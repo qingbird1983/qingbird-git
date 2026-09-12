@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type DirItem } from "../api";
 import { useApp } from "../store";
+import { IconFolder, IconFile } from "./icons";
 
 interface Props {
   path: string;
@@ -79,7 +80,8 @@ export default function InitRepoModal({ path, onClose }: Props) {
                 onChange={() => toggle(it.name)}
               />
               <span className={`exclude-name ${excludes.has(it.name) ? "excluded" : ""}`}>
-                {it.is_dir ? "📁" : "📄"} {it.name}
+                {it.is_dir ? <IconFolder size={14} className="exclude-icon" /> : <IconFile size={14} className="exclude-icon" />}
+                {it.name}
               </span>
               {SUGGESTED.has(it.name) && it.is_dir && <span className="badge badge-missing">建议排除</span>}
             </label>

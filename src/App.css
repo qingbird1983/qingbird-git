@@ -826,7 +826,15 @@ body {
 }
 
 .exclude-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   user-select: none;
+}
+
+.exclude-icon {
+  color: var(--text-dim);
+  flex-shrink: 0;
 }
 
 .exclude-name.excluded {
@@ -1340,6 +1348,10 @@ body {
 
 .segment {
   flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 7px 0;
   border: none;
   border-radius: 999px;

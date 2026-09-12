@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../api";
 import { useApp, type ThemeMode } from "../store";
+import { IconMoon, IconSun, IconMonitor } from "./icons";
 
 interface Props {
   onClose: () => void;
@@ -92,10 +93,10 @@ export default function SettingsModal({ onClose }: Props) {
     }
   };
 
-  const themeOptions: { value: ThemeMode; label: string }[] = [
-    { value: "dark", label: "🌙 暗色" },
-    { value: "light", label: "☀️ 亮色" },
-    { value: "system", label: "🌗 跟随系统" },
+  const themeOptions: { value: ThemeMode; label: string; icon: typeof IconMoon }[] = [
+    { value: "dark", label: "暗色", icon: IconMoon },
+    { value: "light", label: "亮色", icon: IconSun },
+    { value: "system", label: "跟随系统", icon: IconMonitor },
   ];
 
   return (
@@ -111,6 +112,7 @@ export default function SettingsModal({ onClose }: Props) {
               className={`segment ${theme === o.value ? "segment-active" : ""}`}
               onClick={() => void setTheme(o.value)}
             >
+              <o.icon size={13} />
               {o.label}
             </button>
           ))}
