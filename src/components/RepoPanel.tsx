@@ -52,8 +52,9 @@ const EMPTY_LOGS: LogLine[] = [];
 
 export default function RepoPanel() {
   const {
-    selected, status, busy, cloning, progress, changes,
-    checkUpdate, pull, push, commitPush, refreshStatus, openInFolder, openInTerminal, openReadme, log, cancelOp,
+    selected, status, busy, cloning, cmdRunning, progress, changes,
+    checkUpdate, pull, push, commitPush, runRepoCmd, stopRepoCmd,
+    openInFolder, openInTerminal, openReadme, cancelOp,
   } = useApp();
   // 日志按仓库分开：只显示当前选中仓库自己的操作日志
   const logs = useApp((s) => (s.selected ? s.logs[s.selected] : undefined) ?? EMPTY_LOGS);
@@ -125,17 +126,12 @@ export default function RepoPanel() {
     }
   };
 
-  // 一键运行：已保存命令直接在终端执行，否则打开运行命令面板（可修改后保存重跑）
+  // 一键运行：已保存命令后台运行并流式写入日志，否则打开运行命令面板（可修改后保存重跑）
   const runCmd = async (kind: "test" | "build") => {
     if (!selected) return;
     const saved = kind === "test" ? repoEntry?.test_cmd : repoEntry?.build_cmd;
     if (saved && saved.trim()) {
-      try {
-        await api.runRepoCmd(selected, saved.trim());
-        log(`已在终端窗口运行：${saved.trim()}`, "info");
-      } catch (e) {
-        log(String(e), "error");
-      }
+      await runRepoCmd(selected, saved.trim());
     } else {
       setShowCmd(true);
     }
@@ -276,11 +272,11 @@ export default function RepoPanel() {
           <IconCloudUp size={17} />
           一键推送
         </button>
-        <button className="action-btn pill" disabled={!!busy} onClick={() => void runCmd("test")}>
+        <button className="action-btn pill" disabled={!!busy || !!cmdRunning} onClick={() => void runCmd("test")}>
           <IconFlask size={17} />
           跑测试
         </button>
-        <button className="action-btn pill" disabled={!!busy} onClick={() => void runCmd("build")}>
+        <button className="action-btn pill" disabled={!!busy || !!cmdRunning} onClick={() => void runCmd("build")}>
           <IconHammer size={17} />
           构建
         </button>
@@ -366,9 +362,13 @@ export default function RepoPanel() {
       <div className="log-area card">
         <div className="log-header">
           <span>操作日志</span>
-          <button className="btn-sm btn-ghost" onClick={() => selected && void refreshStatus(selected)}>
-            刷新状态
-          </button>
+          {cmdRunning ? (
+            <button className="btn-sm btn-danger" title={`终止后台命令：${cmdRunning}`} onClick={() => void stopRepoCmd()}>
+              终止
+            </button>
+          ) : (
+            <span className="log-hint">后台命令运行时可在此终止</span>
+          )}
         </div>
         <div className="log-body" ref={logRef}>
           {logs.length === 0 && <div className="log-empty">暂无日志</div>}

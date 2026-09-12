@@ -6,6 +6,9 @@ use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::Manager;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(10);
 const NET_TIMEOUT: Duration = Duration::from_secs(300);
 /// 检查云端更新只做 fetch + 对比，超时比完整拉取短得多
@@ -1873,6 +1876,56 @@ pub fn scan_all(app: tauri::AppHandle) -> Vec<ScanItem> {
 
 // ---------- 一键运行：测试 / 构建 ----------
 
+/// 当前后台命令的 Job 句柄与代数编号；同一时间只保留一个，新命令会终止旧的。
+/// 子进程本身留在运行线程里等待回收，全局只记 Job 句柄（Windows 无 Child::try_clone）。
+struct CmdProc {
+    job: isize,
+    gen: u64,
+}
+
+static CMD_CHILD: std::sync::Mutex<Option<CmdProc>> = std::sync::Mutex::new(None);
+static CMD_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CMD_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 去除 ANSI 转义序列（颜色 / 光标控制等），终端彩色输出转成纯文本
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            // CSI 序列：ESC [ 参数... 终止字节（0x40–0x7E）
+            chars.next();
+            while let Some(&n) = chars.peek() {
+                chars.next();
+                if ('\x40'..='\x7e').contains(&n) {
+                    break;
+                }
+            }
+        } else if chars.peek() == Some(&']') {
+            // OSC 序列（如 cargo 的超链接 ESC ]8;;URL ESC \）：以 BEL 或 ESC \ 结束
+            chars.next();
+            loop {
+                match chars.next() {
+                    None | Some('\x07') => break,
+                    Some('\x1b') => {
+                        chars.next();
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        } else if chars.peek().is_some() {
+            // 其他两字符转义，跳过一个字符
+            chars.next();
+        }
+    }
+    out
+}
+
 /// 保存某仓库的一键运行命令（测试 / 构建），保存后点按钮直接在终端运行
 #[tauri::command]
 pub fn set_repo_cmds(
@@ -1990,9 +2043,14 @@ pub fn detect_cmds(path: String) -> CmdDetect {
     d
 }
 
-/// 在新终端窗口中于仓库目录下运行命令（测试 / 构建等），窗口保持打开便于查看输出
-#[tauri::command]
-pub fn run_repo_cmd(path: String, cmd: String) -> Result<(), String> {
+/// 在仓库目录下后台运行命令（测试 / 构建等），不弹终端窗口，
+/// stdout/stderr 逐行通过 Channel 推到前端日志窗口；同一时间只保留一个命令进程
+#[tauri::command(async)]
+pub fn run_repo_cmd(
+    path: String,
+    cmd: String,
+    on_line: tauri::ipc::Channel<String>,
+) -> Result<(), String> {
     if !std::path::Path::new(&path).is_dir() {
         return Err("仓库文件夹不存在".into());
     }
@@ -2000,23 +2058,98 @@ pub fn run_repo_cmd(path: String, cmd: String) -> Result<(), String> {
     if cmd.is_empty() {
         return Err("命令为空".into());
     }
-    // 优先 Windows Terminal，失败回退独立 PowerShell 窗口
-    if Command::new("wt")
-        .arg("-d")
-        .arg(&path)
-        .args(["powershell", "-NoExit", "-Command", cmd])
-        .spawn()
-        .is_ok()
-    {
-        return Ok(());
+
+    let gen = CMD_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+    // 新命令启动前先终止上一个后台命令（其运行线程会自行回收子进程）
+    if let Some(p) = CMD_CHILD.lock().unwrap().take() {
+        crate::git::terminate_job_tree(p.job);
     }
-    Command::new("cmd")
-        .args(["/C", "start", "powershell", "-NoExit", "-Command"])
-        .arg(cmd)
+    CMD_STOP.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let mut command = Command::new("cmd");
+    command
+        .args(["/C", cmd])
         .current_dir(&path)
-        .spawn()
-        .map_err(|e| format!("无法打开终端：{e}"))?;
-    Ok(())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        // CREATE_NO_WINDOW：完全隐藏控制台窗口
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn().map_err(|e| format!("无法启动命令：{e}"))?;
+
+    // 整树绑定 Job：手动终止或应用退出时连同 node/cargo 等子进程一起杀掉
+    #[cfg(windows)]
+    let job = crate::git::bind_kill_on_job_close(&child);
+    #[cfg(not(windows))]
+    let job: isize = 0;
+
+    // 两个读线程分别转发 stdout / stderr，逐行推给前端日志
+    let pump = |stream: Box<dyn std::io::Read + Send>, ch: tauri::ipc::Channel<String>| {
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        // 过滤 ANSI 颜色/控制序列（cargo、vite 等的彩色输出），再去掉行尾空白
+                        let cleaned = strip_ansi(line.trim_end_matches(['\r', '\n']))
+                            .trim_end()
+                            .to_string();
+                        if !cleaned.is_empty() {
+                            let _ = ch.send(cleaned);
+                        }
+                    }
+                }
+            }
+        });
+    };
+    if let Some(out) = child.stdout.take() {
+        pump(Box::new(out), on_line.clone());
+    }
+    if let Some(err) = child.stderr.take() {
+        pump(Box::new(err), on_line);
+    }
+
+    // 交给全局持有：stop_repo_cmd 可随时整树终止
+    *CMD_CHILD.lock().unwrap() = Some(CmdProc { job, gen });
+
+    let status = child.wait().map_err(|e| format!("等待命令退出失败：{e}"))?;
+    // 只清理仍然属于自己的条目，避免误删后启动的新命令
+    let mut g = CMD_CHILD.lock().unwrap();
+    if g.as_ref().map(|p| p.gen) == Some(gen) {
+        *g = None;
+    }
+    drop(g);
+    let code = status.code().unwrap_or(-1);
+    if CMD_STOP.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("命令已被手动终止".into());
+    }
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(format!("命令执行失败，退出码 {code}"))
+    }
+}
+
+/// 手动终止当前后台命令（整树杀掉，不留孤儿终端进程）
+#[tauri::command]
+pub fn stop_repo_cmd() -> Result<(), String> {
+    let p = CMD_CHILD.lock().unwrap().take();
+    match p {
+        Some(p) => {
+            CMD_STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+            crate::git::terminate_job_tree(p.job);
+            Ok(())
+        }
+        None => Err("当前没有正在运行的后台命令".into()),
+    }
 }
 
 // ---------- 磁盘空间扫描与缓存清理 ----------
@@ -2169,6 +2302,23 @@ pub async fn delete_cache_dir(path: String, name: String) -> Result<u64, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_ansi_removes_color_codes() {
+        // cargo / vite 彩色输出的典型形式
+        assert_eq!(strip_ansi("\x1b[2mVITE\x1b[22m \x1b[36mv6.4.3\x1b[39m"), "VITE v6.4.3");
+        assert_eq!(strip_ansi("\x1b[92m   Compiling\x1b[0m ring v0.17.14"), "   Compiling ring v0.17.14");
+        assert_eq!(strip_ansi("\x1b[1m\x1b[96m    Building\x1b[0m [====>] 502/510"), "    Building [====>] 502/510");
+        // OSC 8 超链接（cargo 的 Finished 链接）
+        assert_eq!(
+            strip_ansi("\x1b]8;;https://doc.rust-lang.org/x\x1b\\`dev`\x1b]8;;\x1b\\ profile"),
+            "`dev` profile"
+        );
+        // 纯文本原样保留
+        assert_eq!(strip_ansi("plain text 中文"), "plain text 中文");
+        // 悬空的 ESC 不至于 panic
+        assert_eq!(strip_ansi("tail \x1b"), "tail ");
+    }
 
     #[test]
     fn repo_name_from_url_works() {

@@ -65,6 +65,7 @@ pub fn run() {
             commands::open_in_folder,
             commands::open_in_terminal,
             commands::open_readme,
+            commands::stop_repo_cmd,
             commands::set_repo_cmds,
             commands::detect_cmds,
             commands::run_repo_cmd,

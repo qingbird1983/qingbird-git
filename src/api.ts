@@ -166,7 +166,9 @@ export const api = {
   setRepoCmds: (path: string, testCmd: string, buildCmd: string) =>
     invoke<RepoEntry[]>("set_repo_cmds", { path, testCmd, buildCmd }),
   detectCmds: (path: string) => invoke<CmdDetect>("detect_cmds", { path }),
-  runRepoCmd: (path: string, cmd: string) => invoke<void>("run_repo_cmd", { path, cmd }),
+  runRepoCmd: (path: string, cmd: string, onLine: Channel<string>) =>
+    invoke<void>("run_repo_cmd", { path, cmd, onLine }),
+  stopRepoCmd: () => invoke<void>("stop_repo_cmd"),
   scanRepoSpace: (path: string) => invoke<SpaceReport>("scan_repo_space", { path }),
   deleteCacheDir: (path: string, name: string) => invoke<number>("delete_cache_dir", { path, name }),
   probe: (addr: string) => invoke<boolean>("probe_proxy", { addr }),

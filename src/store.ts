@@ -26,6 +26,8 @@ interface AppState {
   busy: string | null;
   /** 克隆进行中的提示文案；克隆不锁主面板（可同时看日志），仅与其他网络操作互斥 */
   cloning: string | null;
+  /** 后台正在运行的本地命令（测试/构建等），输出流式写入日志窗口 */
+  cmdRunning: string | null;
   /** 每个仓库独立的操作日志；key 为仓库路径，"_app" 为无选中仓库时的全局日志 */
   logs: Record<string, LogLine[]>;
   lastProxy: string | null;
@@ -56,6 +58,9 @@ interface AppState {
   push: () => Promise<void>;
   commitPush: (message: string) => Promise<boolean>;
   cloneRepo: (url: string, parentDir: string, netMode?: string) => boolean;
+  /** 在仓库目录下后台运行本地命令，输出逐行写入该仓库的日志窗口 */
+  runRepoCmd: (path: string, cmd: string) => Promise<void>;
+  stopRepoCmd: () => Promise<void>;
   cancelOp: () => Promise<void>;
   openInFolder: (path: string) => void;
   openInTerminal: (path: string) => void;
@@ -82,6 +87,7 @@ export const useApp = create<AppState>((set, get) => ({
   status: {},
   busy: null,
   cloning: null,
+  cmdRunning: null,
   logs: {},
   lastProxy: null,
   proxyToast: null,
@@ -297,6 +303,27 @@ export const useApp = create<AppState>((set, get) => ({
 
   cancelOp: async () => {
     await api.cancelBusyOp().catch(() => {});
+  },
+
+  runRepoCmd: async (path, cmd) => {
+    // 日志固定写入发起命令的仓库，中途切换选中仓库也不会串行
+    const key = path;
+    const channel = new Channel<string>();
+    channel.onmessage = (line) => get().log(line, "info", key);
+    set({ cmdRunning: cmd });
+    try {
+      await api.runRepoCmd(path, cmd, channel);
+      get().log(`命令执行完成：${cmd}`, "success", key);
+    } catch (e) {
+      get().log(String(e), "error", key);
+    } finally {
+      // 只有仍然是自己时才清空，避免误清新启动命令的状态
+      if (get().cmdRunning === cmd) set({ cmdRunning: null });
+    }
+  },
+
+  stopRepoCmd: async () => {
+    await api.stopRepoCmd().catch((e) => get().log(String(e), "error"));
   },
 
   commitPush: async (message) => {

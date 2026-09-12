@@ -8,13 +8,16 @@ interface Props {
 }
 
 /**
- * 运行命令面板：测试 / 构建命令在这里随时可改，点启动即保存并运行，
- * 命令填错也不会被卡死；另附按项目类型识别的快捷命令（开发 / 安装依赖）。
+ * 运行命令面板：测试 / 构建命令在这里随时可改，点启动即保存并后台运行，
+ * 输出实时写入日志窗口（可随时在日志头部终止），命令填错也不会被卡死；
+ * 另附按项目类型识别的快捷命令（开发 / 安装依赖）。
  */
 export default function CmdPanel({ onClose }: Props) {
   const selected = useApp((s) => s.selected);
   const repos = useApp((s) => s.repos);
   const setRepoCmds = useApp((s) => s.setRepoCmds);
+  const runRepoCmd = useApp((s) => s.runRepoCmd);
+  const cmdRunning = useApp((s) => s.cmdRunning);
   const log = useApp((s) => s.log);
   const entry = selected ? repos.find((r) => r.path === selected) : undefined;
   const [testCmd, setTestCmd] = useState(entry?.test_cmd ?? "");
@@ -42,8 +45,7 @@ export default function CmdPanel({ onClose }: Props) {
     if (!selected || !cmd.trim()) return;
     setRunning(true);
     try {
-      await api.runRepoCmd(selected, cmd.trim());
-      log(`已在终端窗口运行：${cmd.trim()}`, "info");
+      await runRepoCmd(selected, cmd.trim());
       onClose();
     } catch (e) {
       log(String(e), "error");
@@ -63,8 +65,7 @@ export default function CmdPanel({ onClose }: Props) {
         kind === "build" ? cmd.trim() : (testCmd.trim() || entry?.test_cmd || ""),
       );
       log("已保存一键运行命令", "success");
-      await api.runRepoCmd(selected, cmd.trim());
-      log(`已在终端窗口运行：${cmd.trim()}`, "info");
+      await runRepoCmd(selected, cmd.trim());
       onClose();
     } catch (e) {
       log(String(e), "error");
@@ -83,7 +84,8 @@ export default function CmdPanel({ onClose }: Props) {
           </button>
         </h3>
         <div className="modal-desc">
-          测试 / 构建命令可随时修改，点「启动」自动保存并在新终端窗口运行；出错时改好再点一次即可。
+          命令在后台运行，输出实时写入下方日志窗口，可随时在日志头部点「终止」；
+          测试 / 构建命令点「启动」自动保存，出错时改好再点一次即可。
         </div>
         <div className="modal-col">
           <label className="modal-label">测试</label>
@@ -96,7 +98,7 @@ export default function CmdPanel({ onClose }: Props) {
             />
             <button
               className="btn-sm"
-              disabled={running || !testCmd.trim()}
+              disabled={running || !!cmdRunning || !testCmd.trim()}
               onClick={() => void saveAndRun("test", testCmd)}
             >
               启动
@@ -112,7 +114,7 @@ export default function CmdPanel({ onClose }: Props) {
             />
             <button
               className="btn-sm"
-              disabled={running || !buildCmd.trim()}
+              disabled={running || !!cmdRunning || !buildCmd.trim()}
               onClick={() => void saveAndRun("build", buildCmd)}
             >
               启动
@@ -126,7 +128,11 @@ export default function CmdPanel({ onClose }: Props) {
               <div className="cmd-row" key={p.name}>
                 <span className="cmd-name">{p.name}</span>
                 <code className="cmd-text">{p.cmd}</code>
-                <button className="btn-sm btn-ghost" disabled={running} onClick={() => void run(p.cmd)}>
+                <button
+                  className="btn-sm btn-ghost"
+                  disabled={running || !!cmdRunning}
+                  onClick={() => void run(p.cmd)}
+                >
                   启动
                 </button>
               </div>

@@ -272,7 +272,7 @@ pub fn run_git_auth(
 /// 句柄刻意不关闭：关闭最后一份句柄会立即触发 kill-on-job-close。
 /// 让句柄随主进程存活，主进程退出（含任务管理器强杀）时系统回收整棵进程树。
 #[cfg(windows)]
-fn bind_kill_on_job_close(child: &std::process::Child) -> isize {
+pub(crate) fn bind_kill_on_job_close(child: &std::process::Child) -> isize {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -301,7 +301,7 @@ fn bind_kill_on_job_close(child: &std::process::Child) -> isize {
 
 /// 终止 Job 里的整棵进程树（含 git remote-https / index-pack 等孙进程）。
 #[cfg(windows)]
-fn terminate_job_tree(job: isize) {
+pub(crate) fn terminate_job_tree(job: isize) {
     if job != 0 {
         unsafe {
             windows_sys::Win32::System::JobObjects::TerminateJobObject(
@@ -313,7 +313,7 @@ fn terminate_job_tree(job: isize) {
 }
 
 #[cfg(not(windows))]
-fn terminate_job_tree(_job: isize) {}
+pub(crate) fn terminate_job_tree(_job: isize) {}
 
 #[cfg(test)]
 mod tests {
