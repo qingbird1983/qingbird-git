@@ -7,10 +7,13 @@ import CloneModal from "./components/CloneModal";
 import NewRepoModal from "./components/NewRepoModal";
 import InitRepoModal from "./components/InitRepoModal";
 import { useApp, listenTrayScan } from "./store";
+import { IconCloudDown, IconX } from "./components/icons";
 import "./App.css";
 
 function App() {
   const { loadRepos, initTheme, addRepoByPath, log } = useApp();
+  const proxyToast = useApp((s) => s.proxyToast);
+  const dismissProxy = useApp((s) => s.dismissProxy);
   const [showSettings, setShowSettings] = useState(false);
   const [showClone, setShowClone] = useState(false);
   const [showNew, setShowNew] = useState(false);
@@ -76,6 +79,15 @@ function App() {
       {showClone && <CloneModal onClose={() => setShowClone(false)} />}
       {showNew && <NewRepoModal onClose={() => setShowNew(false)} />}
       {initPath && <InitRepoModal path={initPath} onClose={() => setInitPath(null)} />}
+      {proxyToast && (
+        <div className="proxy-toast" key={proxyToast.at}>
+          <IconCloudDown size={15} className="proxy-toast-icon" />
+          <span className="proxy-toast-text">{proxyToast.text}</span>
+          <button className="proxy-toast-close" title="关闭" onClick={dismissProxy}>
+            <IconX size={11} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -11,6 +11,14 @@ export interface LogLine {
 
 export type ThemeMode = "dark" | "light" | "system";
 
+/** 代理回退弹窗通知（用时弹出，自动消失） */
+export interface ProxyToast {
+  text: string;
+  at: number;
+}
+
+let proxyToastTimer: ReturnType<typeof setTimeout> | null = null;
+
 interface AppState {
   repos: RepoEntry[];
   selected: string | null;
@@ -18,6 +26,8 @@ interface AppState {
   busy: string | null;
   logs: LogLine[];
   lastProxy: string | null;
+  /** 当前显示的代理回退通知（null 表示不显示） */
+  proxyToast: ProxyToast | null;
   /** 当前拉取/克隆进度（busy 时有值） */
   progress: ProgressEvent | null;
   /** 每个仓库最近一次拉取的更新内容 */
@@ -32,6 +42,9 @@ interface AppState {
   removeRepo: (path: string) => Promise<void>;
   renameRepo: (path: string, alias: string) => Promise<void>;
   log: (text: string, kind?: LogLine["kind"]) => void;
+  /** 弹出代理回退通知（约 6 秒后自动消失） */
+  notifyProxy: (proxy: string) => void;
+  dismissProxy: () => void;
   setBusy: (op: string | null) => void;
   setProgress: (p: ProgressEvent | null) => void;
   checkUpdate: () => Promise<void>;
@@ -64,6 +77,7 @@ export const useApp = create<AppState>((set, get) => ({
   busy: null,
   logs: [],
   lastProxy: null,
+  proxyToast: null,
   progress: null,
   changes: {},
   theme: "dark",
@@ -135,6 +149,18 @@ export const useApp = create<AppState>((set, get) => ({
       logs: [...s.logs.slice(-500), { time: nowStr(), text, kind }],
     })),
 
+  notifyProxy: (proxy) => {
+    if (proxyToastTimer) clearTimeout(proxyToastTimer);
+    set({ proxyToast: { text: `本次 git 操作已自动通过代理 ${proxy} 完成，不影响系统网络`, at: Date.now() } });
+    proxyToastTimer = setTimeout(() => set({ proxyToast: null }), 6000);
+  },
+
+  dismissProxy: () => {
+    if (proxyToastTimer) clearTimeout(proxyToastTimer);
+    proxyToastTimer = null;
+    set({ proxyToast: null });
+  },
+
   setBusy: (op) => set({ busy: op, progress: op ? get().progress : null }),
 
   setProgress: (p) => set({ progress: p }),
@@ -149,7 +175,8 @@ export const useApp = create<AppState>((set, get) => ({
       get().log(r.message, r.ok ? "success" : "error");
       if (r.used_proxy) {
         set({ lastProxy: r.used_proxy });
-        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成，其他程序网络不受影响`, "proxy");
+        get().notifyProxy(r.used_proxy);
+        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy");
       }
       if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
     } catch (e) {
@@ -171,7 +198,8 @@ export const useApp = create<AppState>((set, get) => ({
       get().log(r.message, r.ok ? "success" : "error");
       if (r.used_proxy) {
         set({ lastProxy: r.used_proxy });
-        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成，其他程序网络不受影响`, "proxy");
+        get().notifyProxy(r.used_proxy);
+        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy");
       }
       if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
       if (r.ok && r.changes) {
@@ -207,7 +235,8 @@ export const useApp = create<AppState>((set, get) => ({
       get().log(r.message, r.ok ? "success" : "error");
       if (r.used_proxy) {
         set({ lastProxy: r.used_proxy });
-        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成，其他程序网络不受影响`, "proxy");
+        get().notifyProxy(r.used_proxy);
+        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy");
       }
       if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
     } catch (e) {
@@ -249,7 +278,8 @@ export const useApp = create<AppState>((set, get) => ({
       get().log(r.message, r.ok ? "success" : "error");
       if (r.used_proxy) {
         set({ lastProxy: r.used_proxy });
-        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成，其他程序网络不受影响`, "proxy");
+        get().notifyProxy(r.used_proxy);
+        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy");
       }
       if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
       return r.ok;

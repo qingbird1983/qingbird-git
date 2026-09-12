@@ -2,6 +2,10 @@ import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, remoteHost } from "../api";
 import { useApp } from "../store";
+import {
+  IconRepo, IconFilePlus, IconDownload, IconPlus,
+  IconPencil, IconX, IconSync, IconMoon, IconSun, IconMonitor, IconGear,
+} from "./icons";
 
 export default function RepoList({
   onOpenClone,
@@ -56,7 +60,7 @@ export default function RepoList({
     void setTheme(next);
   };
 
-  const themeIcon = theme === "dark" ? "🌙" : theme === "light" ? "☀️" : "🌗";
+  const ThemeIcon = theme === "dark" ? IconMoon : theme === "light" ? IconSun : IconMonitor;
   const themeTitle = `主题：${theme === "dark" ? "暗色" : theme === "light" ? "亮色" : "跟随系统"}（点击切换）`;
 
   return (
@@ -73,13 +77,13 @@ export default function RepoList({
             onClick={onOpenNew}
             disabled={!!busy}
           >
-            ✦
+            <IconFilePlus size={15} />
           </button>
           <button className="icon-btn" title="克隆新仓库（粘贴地址下载）" onClick={onOpenClone} disabled={!!busy}>
-            ⤓
+            <IconDownload size={15} />
           </button>
           <button className="icon-btn" title="添加已有仓库文件夹" onClick={() => void handleAdd()} disabled={!!busy}>
-            ＋
+            <IconPlus size={15} />
           </button>
         </div>
       </div>
@@ -106,63 +110,74 @@ export default function RepoList({
               onDoubleClick={() => startRename(r.path, r.alias)}
               title={`${r.path}\n双击可设置自定义显示名`}
             >
-              <div className="repo-item-main">
-                {editing === r.path ? (
-                  <input
-                    className="rename-input"
-                    autoFocus
-                    value={editValue}
-                    placeholder="自定义显示名（如中文名）"
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => setEditValue(e.target.value)}
-                    onBlur={() => void commitRename()}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void commitRename();
-                      if (e.key === "Escape") setEditing(null);
-                    }}
-                  />
-                ) : (
-                  <span className="repo-name">
-                    {r.name}
-                    {r.alias && <span className="alias-flag" title="已设置自定义显示名">名</span>}
-                  </span>
-                )}
-                <span className="repo-badges">
-                  {host && host !== "other" && (
-                    <span className={`badge badge-${host}`}>{host === "gitee" ? "Gitee" : "GitHub"}</span>
-                  )}
-                  {missing && <span className="badge badge-missing">失联</span>}
-                  {st?.dirty && <span className="badge badge-dirty">●</span>}
-                  {st && st.behind > 0 && <span className="badge badge-behind">↓{st.behind}</span>}
-                  {st && st.ahead > 0 && <span className="badge badge-ahead">↑{st.ahead}</span>}
+              <span className="repo-lead">
+                <span className="repo-icon">
+                  <IconRepo size={15} />
                 </span>
-              </div>
-              <div className={`repo-item-sub ${r.alias ? "has-alias" : ""}`}>
-                {r.alias && <span className="repo-alias" title={`自定义显示名（原名：${r.name}）`}>{r.alias}</span>}
-                <span className="repo-branch">{st?.is_repo ? st.branch || "—" : ""}</span>
-              </div>
-              <span className="repo-tools">
-                <button
-                  className="repo-tool"
-                  title="重命名（仅改本地显示名）"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    startRename(r.path, r.alias);
-                  }}
-                >
-                  ✎
-                </button>
-                <button
-                  className="repo-tool"
-                  title="移除"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleRemove(r.path, r.name);
-                  }}
-                >
-                  ×
-                </button>
+                <span className="repo-tools">
+                  <button
+                    className="repo-tool"
+                    title="重命名（仅改本地显示名）"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      startRename(r.path, r.alias);
+                    }}
+                  >
+                    <IconPencil size={12} />
+                  </button>
+                  <button
+                    className="repo-tool danger"
+                    title="移除"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleRemove(r.path, r.name);
+                    }}
+                  >
+                    <IconX size={12} />
+                  </button>
+                </span>
               </span>
+              <div className="repo-info">
+                <div className="repo-item-main">
+                  {editing === r.path ? (
+                    <input
+                      className="rename-input"
+                      autoFocus
+                      value={editValue}
+                      placeholder="自定义显示名（如中文名）"
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      onBlur={() => void commitRename()}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void commitRename();
+                        if (e.key === "Escape") setEditing(null);
+                      }}
+                    />
+                  ) : (
+                    <span className="repo-name">
+                      {r.name}
+                      {r.alias && <span className="alias-flag" title="已设置自定义显示名">名</span>}
+                    </span>
+                  )}
+                  <span className="repo-badges">
+                    {host && host !== "other" && (
+                      <span className={`badge badge-${host}`}>{host === "gitee" ? "Gitee" : "GitHub"}</span>
+                    )}
+                    {missing && <span className="badge badge-missing">失联</span>}
+                    {st?.dirty && <span className="badge badge-dirty">●</span>}
+                    {st && st.behind > 0 && <span className="badge badge-behind">↓{st.behind}</span>}
+                    {st && st.ahead > 0 && <span className="badge badge-ahead">↑{st.ahead}</span>}
+                  </span>
+                </div>
+                <div className="repo-item-sub">
+                  {r.alias && (
+                    <span className="repo-alias" title={`自定义显示名（原名：${r.name}）`}>
+                      {r.alias}
+                    </span>
+                  )}
+                  <span className="repo-branch">{st?.is_repo ? st.branch || "—" : ""}</span>
+                </div>
+              </div>
             </div>
           );
         })}
@@ -170,14 +185,15 @@ export default function RepoList({
 
       <div className="sidebar-footer">
         <button className="pill-btn" title="扫描全部仓库的云端/本地状态" onClick={() => void scanAll()} disabled={!!busy}>
-          ⟳ 扫描全部
+          <IconSync size={13} />
+          扫描全部
         </button>
         <div className="footer-icons">
           <button className="icon-btn" title={themeTitle} onClick={cycleTheme}>
-            {themeIcon}
+            <ThemeIcon size={15} />
           </button>
           <button className="icon-btn" title="设置" onClick={onOpenSettings}>
-            ⚙
+            <IconGear size={15} />
           </button>
         </div>
       </div>

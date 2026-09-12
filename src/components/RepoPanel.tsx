@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { api, remoteHost, type FileChange, type LangStat } from "../api";
 import { useApp } from "../store";
 import HistoryModal from "./HistoryModal";
+import {
+  IconCloud, IconCloudDown, IconCloudUp,
+  IconFolder, IconTerminal, IconHistory, IconDiff, IconX,
+} from "./icons";
 
 /** 常见语言的显示颜色（对齐 GitHub Linguist 配色） */
 const LANG_COLORS: Record<string, string> = {
@@ -41,13 +45,14 @@ function langColor(name: string): string {
 
 export default function RepoPanel() {
   const {
-    selected, status, busy, progress, logs, lastProxy, changes,
+    selected, status, busy, progress, logs, changes,
     checkUpdate, pull, push, commitPush, refreshStatus, openInFolder, openInTerminal,
   } = useApp();
   const [confirmStash, setConfirmStash] = useState(false);
   const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
   const [commitMsg, setCommitMsg] = useState("");
   const [showHistory, setShowHistory] = useState(false);
+  const [showChanges, setShowChanges] = useState(false);
   const [langs, setLangs] = useState<LangStat[]>([]);
   const repos = useApp((s) => s.repos);
   const logRef = useRef<HTMLDivElement>(null);
@@ -62,6 +67,7 @@ export default function RepoPanel() {
     setCommitMsg("");
     setFileChanges([]);
     setLangs([]);
+    setShowChanges(false);
   }, [selected]);
 
   useEffect(() => {
@@ -83,6 +89,7 @@ export default function RepoPanel() {
       void api.listChanges(selected).then(setFileChanges).catch(() => setFileChanges([]));
     } else {
       setFileChanges([]);
+      setShowChanges(false);
     }
   }, [selected, st?.dirty]);
 
@@ -99,7 +106,10 @@ export default function RepoPanel() {
   const handleCommitPush = async () => {
     if (!commitMsg.trim()) return;
     const ok = await commitPush(commitMsg.trim());
-    if (ok) setCommitMsg("");
+    if (ok) {
+      setCommitMsg("");
+      setShowChanges(false);
+    }
   };
 
   if (!selected) {
@@ -136,14 +146,66 @@ export default function RepoPanel() {
         <div className="panel-status">
           <div className="quick-actions">
             <button className="icon-btn" title="打开文件夹" onClick={() => void openInFolder(selected)}>
-              📂
+              <IconFolder size={15} />
             </button>
             <button className="icon-btn" title="在此文件夹打开终端" onClick={() => void openInTerminal(selected)}>
-              ⌨
+              <IconTerminal size={15} />
             </button>
             <button className="icon-btn" title="提交历史" onClick={() => setShowHistory(true)}>
-              ≡
+              <IconHistory size={15} />
             </button>
+            {st?.is_repo && st.dirty && (
+              <span className="changes-anchor">
+                <button
+                  className={`icon-btn has-badge ${showChanges ? "icon-btn-active" : ""}`}
+                  title={`待提交变更（${fileChanges.length} 个文件）`}
+                  onClick={() => setShowChanges((v) => !v)}
+                >
+                  <IconDiff size={15} />
+                  {fileChanges.length > 0 && <span className="btn-badge">{fileChanges.length}</span>}
+                </button>
+                {showChanges && (
+                  <div className="commit-popover">
+                    <div className="update-header">
+                      <span className="commit-title">待提交变更（{fileChanges.length} 个文件）</span>
+                      <button className="popover-close" title="关闭" onClick={() => setShowChanges(false)}>
+                        <IconX size={13} />
+                      </button>
+                    </div>
+                    {fileChanges.length === 0 ? (
+                      <div className="commit-more">正在读取变更列表…</div>
+                    ) : (
+                      <div className="file-list">
+                        {fileChanges.slice(0, 8).map((f, i) => (
+                          <div key={i} className="file-line">
+                            <span className={`file-code file-${f.code.replace("?", "u")}`}>{f.code}</span>
+                            <span className="file-path">{f.path}</span>
+                          </div>
+                        ))}
+                        {fileChanges.length > 8 && (
+                          <div className="commit-more">…还有 {fileChanges.length - 8} 个文件</div>
+                        )}
+                      </div>
+                    )}
+                    <div className="commit-row">
+                      <input
+                        className="modal-input"
+                        placeholder="提交说明，如：修复登录问题"
+                        value={commitMsg}
+                        disabled={!!busy}
+                        onChange={(e) => setCommitMsg(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && commitMsg.trim()) void handleCommitPush();
+                        }}
+                      />
+                      <button className="btn-sm" disabled={!!busy || !commitMsg.trim()} onClick={() => void handleCommitPush()}>
+                        提交并推送
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </span>
+            )}
           </div>
           {host && host !== "other" && (
             <span className={`chip chip-host-${host}`}>{host === "gitee" ? "Gitee" : "GitHub"}</span>
@@ -151,7 +213,6 @@ export default function RepoPanel() {
           {st?.is_repo ? (
             <>
               <span className="chip">分支：{st.branch || "未知"}</span>
-              {st.dirty && <span className="chip chip-warn">有未提交变更</span>}
               {st.behind > 0 && <span className="chip chip-behind">落后云端 {st.behind} 个提交</span>}
               {st.ahead > 0 && <span className="chip chip-ahead">待推送 {st.ahead} 个提交</span>}
               {st.behind === 0 && st.ahead === 0 && !st.has_upstream && <span className="chip">未设置上游分支</span>}
@@ -164,13 +225,16 @@ export default function RepoPanel() {
 
       <div className="actions">
         <button className="action-btn pill" disabled={!!busy} onClick={() => void checkUpdate()}>
-          ☁ 检测云端更新
+          <IconCloud size={17} />
+          检测云端更新
         </button>
         <button className="action-btn pill" disabled={!!busy} onClick={() => void handlePull()}>
-          ⬇ 一键拉取
+          <IconCloudDown size={17} />
+          一键拉取
         </button>
         <button className="action-btn pill" disabled={!!busy} onClick={() => void push()}>
-          ⬆ 一键推送
+          <IconCloudUp size={17} />
+          一键推送
         </button>
       </div>
 
@@ -204,41 +268,6 @@ export default function RepoPanel() {
         </div>
       )}
 
-      {st?.is_repo && st.dirty && fileChanges.length > 0 && (
-        <div className="commit-card card">
-          <div className="update-header">
-            <span className="commit-title">待提交变更（{fileChanges.length} 个文件）</span>
-            <button className="btn-sm btn-ghost" disabled={!!busy} onClick={() => selected && void refreshStatus(selected)}>
-              刷新
-            </button>
-          </div>
-          <div className="file-list">
-            {fileChanges.slice(0, 8).map((f, i) => (
-              <div key={i} className="file-line">
-                <span className={`file-code file-${f.code.replace("?", "u")}`}>{f.code}</span>
-                <span className="file-path">{f.path}</span>
-              </div>
-            ))}
-            {fileChanges.length > 8 && <div className="commit-more">…还有 {fileChanges.length - 8} 个文件</div>}
-          </div>
-          <div className="commit-row">
-            <input
-              className="modal-input"
-              placeholder="提交说明，如：修复登录问题"
-              value={commitMsg}
-              disabled={!!busy}
-              onChange={(e) => setCommitMsg(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && commitMsg.trim()) void handleCommitPush();
-              }}
-            />
-            <button className="btn-sm" disabled={!!busy || !commitMsg.trim()} onClick={() => void handleCommitPush()}>
-              提交并推送
-            </button>
-          </div>
-        </div>
-      )}
-
       {update && !busy && (
         <div className="update-card">
           <div className="update-header">
@@ -260,10 +289,6 @@ export default function RepoPanel() {
           )}
           {update.diff_stat && <pre className="diff-stat">{update.diff_stat}</pre>}
         </div>
-      )}
-
-      {lastProxy && !busy && (
-        <div className="proxy-note">最近的代理回退记录：{lastProxy}（仅作用于 git 操作，不影响系统网络）</div>
       )}
 
       <div className="log-area card">
