@@ -98,7 +98,6 @@ export default function RepoList({
           const st = status[r.path];
           const missing = st && !st.is_repo;
           const host = st ? remoteHost(st.remote_url) : null;
-          const display = r.alias || r.name;
           return (
             <div
               key={r.path}
@@ -124,8 +123,8 @@ export default function RepoList({
                   />
                 ) : (
                   <span className="repo-name">
-                    {display}
-                    {r.alias && <span className="alias-flag" title="自定义显示名">名</span>}
+                    {r.name}
+                    {r.alias && <span className="alias-flag" title="已设置自定义显示名">名</span>}
                   </span>
                 )}
                 <span className="repo-badges">
