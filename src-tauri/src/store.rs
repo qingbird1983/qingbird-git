@@ -8,6 +8,9 @@ use tauri::Manager;
 pub struct RepoEntry {
     pub path: String,
     pub name: String,
+    /// 本地自定义显示名（如中文名），不影响仓库名与磁盘文件；空串表示未设置
+    #[serde(default)]
+    pub alias: String,
     pub added_at: u64,
     pub last_used: u64,
 }

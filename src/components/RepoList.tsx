@@ -1,30 +1,54 @@
+import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { remoteHost } from "../api";
+import { api, remoteHost } from "../api";
 import { useApp } from "../store";
 
 export default function RepoList({
   onOpenClone,
   onOpenNew,
   onOpenSettings,
+  onNeedInit,
 }: {
   onOpenClone: () => void;
   onOpenNew: () => void;
   onOpenSettings: () => void;
+  onNeedInit: (path: string) => void;
 }) {
-  const { repos, selected, status, select, addRepoByPath, removeRepo, busy, scanAll, theme, setTheme } = useApp();
+  const { repos, selected, status, select, addRepoByPath, removeRepo, renameRepo, busy, scanAll, theme, setTheme } =
+    useApp();
   const dragging = useApp((s) => s.dragging);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
 
   const handleAdd = async () => {
     const picked = await open({ directory: true, multiple: false, title: "选择 git 仓库文件夹" });
-    if (typeof picked === "string") {
-      await addRepoByPath(picked);
+    if (typeof picked !== "string") return;
+    // 非 git 仓库文件夹 → 引导一键初始化
+    const st = await api.status(picked).catch(() => null);
+    if (st && !st.is_repo) {
+      onNeedInit(picked);
+      return;
     }
+    const added = await addRepoByPath(picked);
+    if (!added) onNeedInit(picked);
   };
 
   const handleRemove = (path: string, name: string) => {
     if (window.confirm(`从列表移除仓库「${name}」？\n（只移除记录，不会删除磁盘上的文件）`)) {
       void removeRepo(path);
     }
+  };
+
+  const startRename = (path: string, current: string) => {
+    setEditing(path);
+    setEditValue(current);
+  };
+
+  const commitRename = async () => {
+    if (editing) {
+      await renameRepo(editing, editValue.trim());
+    }
+    setEditing(null);
   };
 
   const cycleTheme = () => {
@@ -43,7 +67,12 @@ export default function RepoList({
           青鸟 Git
         </span>
         <div className="header-actions">
-          <button className="icon-btn" title="新建仓库（本地初始化，可同步创建到 GitHub / Gitee）" onClick={onOpenNew} disabled={!!busy}>
+          <button
+            className="icon-btn"
+            title="新建仓库（本地初始化，可同步创建到 GitHub / Gitee）"
+            onClick={onOpenNew}
+            disabled={!!busy}
+          >
             ✦
           </button>
           <button className="icon-btn" title="克隆新仓库（粘贴地址下载）" onClick={onOpenClone} disabled={!!busy}>
@@ -69,18 +98,39 @@ export default function RepoList({
           const st = status[r.path];
           const missing = st && !st.is_repo;
           const host = st ? remoteHost(st.remote_url) : null;
+          const display = r.alias || r.name;
           return (
             <div
               key={r.path}
               className={`repo-item ${selected === r.path ? "active" : ""}`}
               onClick={() => select(r.path)}
-              title={r.path}
+              onDoubleClick={() => startRename(r.path, r.alias)}
+              title={`${r.path}\n双击可设置自定义显示名`}
             >
               <div className="repo-item-main">
-                <span className="repo-name">{r.name}</span>
+                {editing === r.path ? (
+                  <input
+                    className="rename-input"
+                    autoFocus
+                    value={editValue}
+                    placeholder="自定义显示名（如中文名）"
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setEditValue(e.target.value)}
+                    onBlur={() => void commitRename()}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void commitRename();
+                      if (e.key === "Escape") setEditing(null);
+                    }}
+                  />
+                ) : (
+                  <span className="repo-name">
+                    {display}
+                    {r.alias && <span className="alias-flag" title="自定义显示名">名</span>}
+                  </span>
+                )}
                 <span className="repo-badges">
                   {host && host !== "other" && (
-                    <span className={`badge badge-host badge-${host}`}>{host === "gitee" ? "Gitee" : "GitHub"}</span>
+                    <span className={`badge badge-${host}`}>{host === "gitee" ? "Gitee" : "GitHub"}</span>
                   )}
                   {missing && <span className="badge badge-missing">失联</span>}
                   {st?.dirty && <span className="badge badge-dirty">●</span>}
@@ -88,17 +138,31 @@ export default function RepoList({
                   {st && st.ahead > 0 && <span className="badge badge-ahead">↑{st.ahead}</span>}
                 </span>
               </div>
-              <span className="repo-branch">{st?.is_repo ? st.branch || "—" : ""}</span>
-              <button
-                className="repo-remove"
-                title="移除"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleRemove(r.path, r.name);
-                }}
-              >
-                ×
-              </button>
+              <span className="repo-branch">
+                {r.alias ? `${r.name}${st?.is_repo && st.branch ? ` · ${st.branch}` : ""}` : st?.is_repo ? st.branch || "—" : ""}
+              </span>
+              <span className="repo-tools">
+                <button
+                  className="repo-tool"
+                  title="重命名（仅改本地显示名）"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    startRename(r.path, r.alias);
+                  }}
+                >
+                  ✎
+                </button>
+                <button
+                  className="repo-tool"
+                  title="移除"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleRemove(r.path, r.name);
+                  }}
+                >
+                  ×
+                </button>
+              </span>
             </div>
           );
         })}

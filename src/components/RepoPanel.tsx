@@ -1,7 +1,43 @@
 import { useEffect, useRef, useState } from "react";
-import { api, remoteHost, type FileChange } from "../api";
+import { api, remoteHost, type FileChange, type LangStat } from "../api";
 import { useApp } from "../store";
 import HistoryModal from "./HistoryModal";
+
+/** 常见语言的显示颜色（对齐 GitHub Linguist 配色） */
+const LANG_COLORS: Record<string, string> = {
+  Rust: "#dea584",
+  TypeScript: "#3178c6",
+  JavaScript: "#f1e05a",
+  Python: "#3572A5",
+  Go: "#00ADD8",
+  Java: "#b07219",
+  Kotlin: "#A97BFF",
+  Swift: "#F05138",
+  Ruby: "#701516",
+  PHP: "#4F5D95",
+  C: "#555555",
+  "C++": "#f34b7d",
+  "C#": "#178600",
+  "Objective-C": "#438eff",
+  Scala: "#c22d40",
+  Dart: "#00B4AB",
+  Lua: "#000080",
+  HTML: "#e34c26",
+  Vue: "#41b883",
+  Svelte: "#ff3e00",
+  CSS: "#663399",
+  SCSS: "#c6538c",
+  Less: "#1d365d",
+  Shell: "#89e051",
+  PowerShell: "#012456",
+  SQL: "#e38c00",
+  Zig: "#ec915c",
+  Solidity: "#AA6746",
+};
+
+function langColor(name: string): string {
+  return LANG_COLORS[name] ?? (name === "其他" ? "#8b949e" : "#6e7681");
+}
 
 export default function RepoPanel() {
   const {
@@ -12,20 +48,34 @@ export default function RepoPanel() {
   const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
   const [commitMsg, setCommitMsg] = useState("");
   const [showHistory, setShowHistory] = useState(false);
+  const [langs, setLangs] = useState<LangStat[]>([]);
+  const repos = useApp((s) => s.repos);
   const logRef = useRef<HTMLDivElement>(null);
 
   const st = selected ? status[selected] : undefined;
   const update = selected ? changes[selected] : undefined;
+  const repoEntry = selected ? repos.find((r) => r.path === selected) : undefined;
+  const displayName = repoEntry?.alias || selected?.split(/[\\/]/).pop() || "";
 
   useEffect(() => {
     setConfirmStash(false);
     setCommitMsg("");
     setFileChanges([]);
+    setLangs([]);
   }, [selected]);
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [logs]);
+
+  // 选中仓库后拉取语言构成
+  useEffect(() => {
+    if (selected && st?.is_repo) {
+      void api.languages(selected).then(setLangs).catch(() => setLangs([]));
+    } else {
+      setLangs([]);
+    }
+  }, [selected, st?.is_repo]);
 
   // 有未提交变更时拉取变更文件列表
   useEffect(() => {
@@ -71,7 +121,14 @@ export default function RepoPanel() {
     <main className="panel">
       <div className="panel-header card">
         <div className="panel-title">
-          <h2>{selected.split(/[\\/]/).pop()}</h2>
+          <h2>
+            {displayName}
+            {repoEntry?.alias && (
+              <span className="alias-sub" title="本地自定义显示名">
+                {selected.split(/[\\/]/).pop()}
+              </span>
+            )}
+          </h2>
           <span className="panel-path" title={selected}>
             {selected}
           </span>
@@ -116,6 +173,29 @@ export default function RepoPanel() {
           ⬆ 一键推送
         </button>
       </div>
+
+      {langs.length > 0 && (
+        <div className="lang-card card">
+          <div className="lang-bar">
+            {langs.map((l) => (
+              <span
+                key={l.language}
+                className="lang-seg"
+                style={{ width: `${l.percent}%`, background: langColor(l.language) }}
+                title={`${l.language} ${l.percent.toFixed(1)}%`}
+              />
+            ))}
+          </div>
+          <div className="lang-legend">
+            {langs.map((l) => (
+              <span key={l.language} className="lang-item">
+                <span className="lang-dot" style={{ background: langColor(l.language) }} />
+                {l.language} <b>{l.percent.toFixed(1)}%</b>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {confirmStash && (
         <div className="stash-bar">

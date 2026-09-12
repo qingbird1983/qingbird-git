@@ -30,6 +30,7 @@ interface AppState {
   refreshStatus: (path: string) => Promise<void>;
   addRepoByPath: (path: string) => Promise<boolean>;
   removeRepo: (path: string) => Promise<void>;
+  renameRepo: (path: string, alias: string) => Promise<void>;
   log: (text: string, kind?: LogLine["kind"]) => void;
   setBusy: (op: string | null) => void;
   setProgress: (p: ProgressEvent | null) => void;
@@ -121,6 +122,12 @@ export const useApp = create<AppState>((set, get) => ({
     if (!selected && repos.length > 0) {
       get().select(repos[0].path);
     }
+  },
+
+  renameRepo: async (path, alias) => {
+    const repos = await api.renameRepo(path, alias);
+    repos.sort((a, b) => b.last_used - a.last_used);
+    set({ repos });
   },
 
   log: (text, kind = "info") =>

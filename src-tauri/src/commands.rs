@@ -1,5 +1,6 @@
 use crate::{git, proxy, store};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::process::Command;
 use std::time::Duration;
 use tauri::ipc::Channel;
@@ -166,6 +167,18 @@ fn remote_url(repo_path: &str) -> String {
     run_local(repo_path, &["remote", "get-url", "origin"]).stdout.trim().to_string()
 }
 
+/// 提交时使用的 Git 身份（-c 项；设置里未填则交给全局配置）
+fn identity_config(cfg: &store::AppConfig) -> Vec<String> {
+    let mut c = Vec::new();
+    if !cfg.settings.git_name.trim().is_empty() {
+        c.push(format!("user.name={}", cfg.settings.git_name.trim()));
+    }
+    if !cfg.settings.git_email.trim().is_empty() {
+        c.push(format!("user.email={}", cfg.settings.git_email.trim()));
+    }
+    c
+}
+
 /// 执行本地 git 命令（不涉及网络，不走代理回退）
 fn run_local(repo_path: &str, args: &[&str]) -> git::GitOutput {
     git::run_git(repo_path, args, None, LOCAL_TIMEOUT)
@@ -266,6 +279,7 @@ pub fn add_repo(app: tauri::AppHandle, path: String) -> Result<Vec<store::RepoEn
     if !cfg.repos.iter().any(|r| r.path == path) {
         cfg.repos.push(store::RepoEntry {
             name: repo_name(&path),
+            alias: String::new(),
             path: path.clone(),
             added_at: store::now_secs(),
             last_used: store::now_secs(),
@@ -281,6 +295,121 @@ pub fn remove_repo(app: tauri::AppHandle, path: String) -> Vec<store::RepoEntry>
     cfg.repos.retain(|r| r.path != path);
     let _ = store::save(&app, &cfg);
     cfg.repos
+}
+
+/// 设置本地自定义显示名（如中文名）；alias 传空串恢复原始仓库名
+#[tauri::command]
+pub fn rename_repo(app: tauri::AppHandle, path: String, alias: String) -> Vec<store::RepoEntry> {
+    let mut cfg = store::load(&app);
+    if let Some(e) = cfg.repos.iter_mut().find(|r| r.path == path) {
+        e.alias = alias.trim().to_string();
+    }
+    let _ = store::save(&app, &cfg);
+    cfg.repos
+}
+
+// ---------- 初始化已有文件夹 ----------
+
+#[derive(Serialize, Clone)]
+pub struct DirItem {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+/// 列出文件夹顶层内容（供初始化时勾选排除项）
+#[tauri::command]
+pub fn list_dir_items(path: String) -> Vec<DirItem> {
+    let mut items: Vec<DirItem> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&path) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name == ".git" {
+                continue;
+            }
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            items.push(DirItem { name, is_dir });
+        }
+    }
+    items.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    items
+}
+
+/// 把非 git 文件夹初始化为仓库：git init → 写入排除项到 .gitignore → 初始提交 → 加入管理列表
+#[tauri::command]
+pub fn init_repo(
+    app: tauri::AppHandle,
+    path: String,
+    excludes: Vec<String>,
+) -> Result<store::RepoEntry, String> {
+    let path = path.trim().to_string();
+    let dir = std::path::Path::new(&path);
+    if !dir.is_dir() {
+        return Err("文件夹不存在".into());
+    }
+    if valid_repo(&path) {
+        return Err("该文件夹已经是 git 仓库".into());
+    }
+
+    let init = git::run_git_auth(&path, &["init", "-b", "main"], None, LOCAL_TIMEOUT, None, &[], None);
+    if !init.success {
+        let fallback = git::run_git_auth(&path, &["init"], None, LOCAL_TIMEOUT, None, &[], None);
+        if !fallback.success {
+            return Err(format!("git init 失败：{}", fallback.stderr.trim()));
+        }
+    }
+
+    // 把勾选的排除项追加到 .gitignore
+    if !excludes.is_empty() {
+        let gi = dir.join(".gitignore");
+        let mut content = String::new();
+        if gi.exists() {
+            content = std::fs::read_to_string(&gi).unwrap_or_default();
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+        }
+        content.push_str("# 由青鸟 Git 添加的排除项\n");
+        for e in &excludes {
+            content.push_str(e.trim());
+            content.push('\n');
+        }
+        std::fs::write(&gi, content).map_err(|e| format!("写入 .gitignore 失败：{e}"))?;
+    }
+
+    let cfg0 = store::load(&app);
+    let identity = identity_config(&cfg0);
+    let mut argv: Vec<&str> = identity.iter().map(|s| s.as_str()).collect();
+    argv.extend(["add", "-A"]);
+    run_local(&path, &argv);
+
+    let mut cargv: Vec<&str> = identity.iter().map(|s| s.as_str()).collect();
+    cargv.extend(["commit", "-m", "init: 初始提交"]);
+    let commit = run_local(&path, &cargv);
+    if !commit.success {
+        return Err(format!(
+            "仓库已初始化，但初始提交失败（可能未配置 Git 身份，可在设置里填写）：{}",
+            commit.stderr.trim()
+        ));
+    }
+
+    let name = repo_name(&path);
+    let mut cfg = store::load(&app);
+    let entry = store::RepoEntry {
+        name,
+        path: path.clone(),
+        alias: String::new(),
+        added_at: store::now_secs(),
+        last_used: store::now_secs(),
+    };
+    if !cfg.repos.iter().any(|r| r.path == path) {
+        cfg.repos.push(entry.clone());
+        store::save(&app, &cfg)?;
+    }
+    Ok(entry)
 }
 
 // ---------- 状态与三键操作 ----------
@@ -563,6 +692,93 @@ pub fn recent_commits(path: String) -> Vec<CommitInfo> {
     .collect()
 }
 
+/// 项目语言构成（类似 GitHub 语言条）：按扩展名统计代码文件字节占比。
+/// 用 `git ls-files -co --exclude-standard` 取文件列表，自动跳过 .gitignore 忽略的文件。
+#[derive(Serialize, Clone)]
+pub struct LangStat {
+    pub language: String,
+    pub percent: f32,
+}
+
+/// 扩展名 → 语言名（对齐 GitHub Linguist 的常见分类；配置/数据类文件不计入）
+fn lang_of_ext(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "rs" => "Rust",
+        "ts" | "tsx" | "mts" | "cts" => "TypeScript",
+        "js" | "jsx" | "mjs" | "cjs" => "JavaScript",
+        "py" => "Python",
+        "go" => "Go",
+        "java" => "Java",
+        "kt" | "kts" => "Kotlin",
+        "swift" => "Swift",
+        "rb" => "Ruby",
+        "php" => "PHP",
+        "c" | "h" => "C",
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => "C++",
+        "cs" => "C#",
+        "m" | "mm" => "Objective-C",
+        "scala" => "Scala",
+        "dart" => "Dart",
+        "lua" => "Lua",
+        "html" | "htm" => "HTML",
+        "vue" => "Vue",
+        "svelte" => "Svelte",
+        "css" => "CSS",
+        "scss" | "sass" => "SCSS",
+        "less" => "Less",
+        "sh" | "bash" | "zsh" => "Shell",
+        "ps1" | "psm1" => "PowerShell",
+        "sql" => "SQL",
+        "zig" => "Zig",
+        "sol" => "Solidity",
+        _ => return None,
+    })
+}
+
+#[tauri::command]
+pub fn repo_languages(path: String) -> Vec<LangStat> {
+    if !valid_repo(&path) {
+        return Vec::new();
+    }
+    let ls = run_local(&path, &["ls-files", "-co", "--exclude-standard"]);
+    if !ls.success {
+        return Vec::new();
+    }
+    let mut totals: HashMap<&str, u64> = HashMap::new();
+    let mut total: u64 = 0;
+    for f in ls.stdout.lines() {
+        let ext = std::path::Path::new(f)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+        let Some(lang) = lang_of_ext(&ext) else { continue };
+        let len = std::fs::metadata(std::path::Path::new(&path).join(f))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        *totals.entry(lang).or_insert(0) += len;
+        total += len;
+    }
+    if total == 0 {
+        return Vec::new();
+    }
+    let mut stats: Vec<LangStat> = totals
+        .into_iter()
+        .map(|(lang, bytes)| LangStat {
+            language: lang.to_string(),
+            percent: (bytes as f32) / (total as f32) * 100.0,
+        })
+        .collect();
+    stats.sort_by(|a, b| b.percent.total_cmp(&a.percent));
+    // 只保留前 6 项，其余合并为"其他"
+    if stats.len() > 6 {
+        let rest: f32 = stats[6..].iter().map(|s| s.percent).sum();
+        stats.truncate(6);
+        stats.push(LangStat { language: "其他".into(), percent: rest });
+    }
+    stats
+}
+
 /// 一键提交并推送：add -A → commit（自动带 Git 身份）→ push
 #[tauri::command]
 pub fn commit_push(app: tauri::AppHandle, path: String, message: String) -> OpResult {
@@ -592,13 +808,7 @@ pub fn commit_push(app: tauri::AppHandle, path: String, message: String) -> OpRe
         return OpResult::err("添加变更文件失败".into(), combined(&add));
     }
 
-    let mut cargs: Vec<String> = Vec::new();
-    if !cfg.settings.git_name.trim().is_empty() {
-        cargs.push(format!("user.name={}", cfg.settings.git_name.trim()));
-    }
-    if !cfg.settings.git_email.trim().is_empty() {
-        cargs.push(format!("user.email={}", cfg.settings.git_email.trim()));
-    }
+    let cargs = identity_config(&cfg);
     let mut argv: Vec<&str> = cargs.iter().map(|s| s.as_str()).collect();
     argv.extend(["commit", "-m", msg]);
     let commit = run_local(&path, &argv);
@@ -776,13 +986,7 @@ pub fn create_repo(
     .map_err(|e| format!("写入 README 失败：{e}"))?;
 
     let dest_str = dest.to_string_lossy().to_string();
-    let mut cargs: Vec<String> = Vec::new();
-    if !cfg.settings.git_name.trim().is_empty() {
-        cargs.push(format!("user.name={}", cfg.settings.git_name.trim()));
-    }
-    if !cfg.settings.git_email.trim().is_empty() {
-        cargs.push(format!("user.email={}", cfg.settings.git_email.trim()));
-    }
+    let cargs = identity_config(&cfg);
     let mut argv: Vec<&str> = cargs.iter().map(|s| s.as_str()).collect();
     argv.extend(["add", "-A"]);
     run_local(&dest_str, &argv);
@@ -820,6 +1024,7 @@ pub fn create_repo(
     if !cfg.repos.iter().any(|r| r.path == dest_str) {
         cfg.repos.push(store::RepoEntry {
             name: name.clone(),
+            alias: String::new(),
             path: dest_str.clone(),
             added_at: store::now_secs(),
             last_used: store::now_secs(),
@@ -1047,6 +1252,7 @@ pub fn clone_repo(
     if !cfg.repos.iter().any(|r| r.path == dest_str) {
         cfg.repos.push(store::RepoEntry {
             name: name.clone(),
+            alias: String::new(),
             path: dest_str.clone(),
             added_at: store::now_secs(),
             last_used: store::now_secs(),

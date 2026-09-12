@@ -5,6 +5,7 @@ import RepoPanel from "./components/RepoPanel";
 import SettingsModal from "./components/SettingsModal";
 import CloneModal from "./components/CloneModal";
 import NewRepoModal from "./components/NewRepoModal";
+import InitRepoModal from "./components/InitRepoModal";
 import { useApp, listenTrayScan } from "./store";
 import "./App.css";
 
@@ -13,6 +14,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showClone, setShowClone] = useState(false);
   const [showNew, setShowNew] = useState(false);
+  const [initPath, setInitPath] = useState<string | null>(null);
 
   useEffect(() => {
     void loadRepos();
@@ -28,11 +30,24 @@ function App() {
           if (paths.length === 0) return;
           void (async () => {
             let ok = 0;
+            let firstInvalid: string | null = null;
             for (const p of paths) {
-              if (await addRepoByPath(p)) ok++;
+              if (await addRepoByPath(p)) {
+                ok++;
+              } else if (!firstInvalid) {
+                firstInvalid = p;
+              }
             }
             if (ok < paths.length) {
-              log(`有 ${paths.length - ok} 个拖入项不是 git 仓库（未找到 .git）`, "error");
+              const n = paths.length - ok;
+              log(
+                n === 1
+                  ? "拖入的文件夹不是 git 仓库，可在此初始化"
+                  : `有 ${n} 个拖入项不是 git 仓库（未找到 .git）`,
+                "error",
+              );
+              // 单个非仓库文件夹 → 打开初始化面板
+              if (n === 1 && firstInvalid) setInitPath(firstInvalid);
             }
           })();
         } else if (event.payload.type === "enter" || event.payload.type === "over") {
@@ -54,11 +69,13 @@ function App() {
         onOpenClone={() => setShowClone(true)}
         onOpenNew={() => setShowNew(true)}
         onOpenSettings={() => setShowSettings(true)}
+        onNeedInit={(p) => setInitPath(p)}
       />
       <RepoPanel />
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       {showClone && <CloneModal onClose={() => setShowClone(false)} />}
       {showNew && <NewRepoModal onClose={() => setShowNew(false)} />}
+      {initPath && <InitRepoModal path={initPath} onClose={() => setInitPath(null)} />}
     </div>
   );
 }

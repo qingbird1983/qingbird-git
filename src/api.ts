@@ -3,6 +3,8 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 export interface RepoEntry {
   path: string;
   name: string;
+  /** 本地自定义显示名（如中文名），空串表示未设置 */
+  alias: string;
   added_at: number;
   last_used: number;
 }
@@ -82,10 +84,24 @@ export interface AppCredentials {
   ssh_key_path: string;
 }
 
+export interface DirItem {
+  name: string;
+  is_dir: boolean;
+}
+
+export interface LangStat {
+  language: string;
+  percent: number;
+}
+
 export const api = {
   listRepos: () => invoke<RepoEntry[]>("list_repos"),
   addRepo: (path: string) => invoke<RepoEntry[]>("add_repo", { path }),
   removeRepo: (path: string) => invoke<RepoEntry[]>("remove_repo", { path }),
+  renameRepo: (path: string, alias: string) => invoke<RepoEntry[]>("rename_repo", { path, alias }),
+  listDirItems: (path: string) => invoke<DirItem[]>("list_dir_items", { path }),
+  initRepo: (path: string, excludes: string[]) => invoke<RepoEntry>("init_repo", { path, excludes }),
+  languages: (path: string) => invoke<LangStat[]>("repo_languages", { path }),
   status: (path: string) => invoke<RepoStatus>("repo_status", { path }),
   checkUpdate: (path: string) => invoke<OpResult>("check_update", { path }),
   pull: (path: string, stash: boolean, onProgress: Channel<ProgressEvent>) =>
