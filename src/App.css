@@ -696,17 +696,20 @@ body {
   text-decoration: line-through;
 }
 
-/* ---------- 语言统计条 ---------- */
-.lang-card {
-  padding: 12px 16px;
+/* ---------- 语言统计（页脚） ---------- */
+.lang-footer {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  opacity: 0.75;
 }
 
 .lang-bar {
   display: flex;
-  height: 10px;
+  height: 5px;
   border-radius: 999px;
   overflow: hidden;
   background: var(--bg-inset);
+  filter: saturate(0.4);
 }
 
 .lang-seg {
@@ -729,28 +732,29 @@ body {
 .lang-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 16px;
-  margin-top: 10px;
-  font-size: 12.5px;
+  gap: 3px 14px;
+  margin-top: 7px;
+  font-size: 11.5px;
   color: var(--text-dim);
 }
 
 .lang-item {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
 .lang-item b {
-  color: var(--text);
-  font-weight: 600;
+  color: var(--text-dim);
+  font-weight: 500;
 }
 
 .lang-dot {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
+  filter: saturate(0.4);
 }
 
 /* ---------- 提交推送卡片 ---------- */

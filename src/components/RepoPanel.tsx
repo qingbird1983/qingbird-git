@@ -174,29 +174,6 @@ export default function RepoPanel() {
         </button>
       </div>
 
-      {langs.length > 0 && (
-        <div className="lang-card card">
-          <div className="lang-bar">
-            {langs.map((l) => (
-              <span
-                key={l.language}
-                className="lang-seg"
-                style={{ width: `${l.percent}%`, background: langColor(l.language) }}
-                title={`${l.language} ${l.percent.toFixed(1)}%`}
-              />
-            ))}
-          </div>
-          <div className="lang-legend">
-            {langs.map((l) => (
-              <span key={l.language} className="lang-item">
-                <span className="lang-dot" style={{ background: langColor(l.language) }} />
-                {l.language} <b>{l.percent.toFixed(1)}%</b>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
       {confirmStash && (
         <div className="stash-bar">
           <span>本地有未提交变更，是否先暂存（stash）再拉取，完成后自动恢复？</span>
@@ -308,6 +285,29 @@ export default function RepoPanel() {
       </div>
 
       {showHistory && <HistoryModal onClose={() => setShowHistory(false)} />}
+
+      {langs.length > 0 && (
+        <div className="lang-footer">
+          <div className="lang-bar">
+            {langs.map((l) => (
+              <span
+                key={l.language}
+                className="lang-seg"
+                style={{ width: `${l.percent}%`, background: langColor(l.language) }}
+                title={`${l.language} ${l.percent.toFixed(1)}%`}
+              />
+            ))}
+          </div>
+          <div className="lang-legend">
+            {langs.map((l) => (
+              <span key={l.language} className="lang-item">
+                <span className="lang-dot" style={{ background: langColor(l.language) }} />
+                {l.language} <b>{l.percent.toFixed(1)}%</b>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </main>
   );
 }
