@@ -138,9 +138,10 @@ export default function RepoList({
                   {st && st.ahead > 0 && <span className="badge badge-ahead">↑{st.ahead}</span>}
                 </span>
               </div>
-              <span className="repo-branch">
-                {r.alias ? `${r.name}${st?.is_repo && st.branch ? ` · ${st.branch}` : ""}` : st?.is_repo ? st.branch || "—" : ""}
-              </span>
+              <div className={`repo-item-sub ${r.alias ? "has-alias" : ""}`}>
+                {r.alias && <span className="repo-alias" title={`自定义显示名（原名：${r.name}）`}>{r.alias}</span>}
+                <span className="repo-branch">{st?.is_repo ? st.branch || "—" : ""}</span>
+              </div>
               <span className="repo-tools">
                 <button
                   className="repo-tool"
