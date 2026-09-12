@@ -52,8 +52,8 @@ const EMPTY_LOGS: LogLine[] = [];
 
 export default function RepoPanel() {
   const {
-    selected, status, busy, progress, changes,
-    checkUpdate, pull, push, commitPush, refreshStatus, openInFolder, openInTerminal, log,
+    selected, status, busy, cloning, progress, changes,
+    checkUpdate, pull, push, commitPush, refreshStatus, openInFolder, openInTerminal, log, cancelOp,
   } = useApp();
   // 日志按仓库分开：只显示当前选中仓库自己的操作日志
   const logs = useApp((s) => (s.selected ? s.logs[s.selected] : undefined) ?? EMPTY_LOGS);
@@ -155,6 +155,8 @@ export default function RepoPanel() {
 
   const host = st ? remoteHost(st.remote_url) : null;
   const progressPct = progress?.percent != null ? Math.min(100, progress.percent) : null;
+  // 网络操作（检测/拉取/推送/提交推送）与克隆互斥：取消标记与代理缓存是全局的
+  const netBusy = !!busy || !!cloning;
 
   return (
     <main className="panel">
@@ -224,13 +226,13 @@ export default function RepoPanel() {
                         className="modal-input"
                         placeholder="提交说明，如：修复登录问题"
                         value={commitMsg}
-                        disabled={!!busy}
+                        disabled={netBusy}
                         onChange={(e) => setCommitMsg(e.target.value)}
                         onKeyDown={(e) => {
                           if (e.key === "Enter" && commitMsg.trim()) void handleCommitPush();
                         }}
                       />
-                      <button className="btn-sm" disabled={!!busy || !commitMsg.trim()} onClick={() => void handleCommitPush()}>
+                      <button className="btn-sm" disabled={netBusy || !commitMsg.trim()} onClick={() => void handleCommitPush()}>
                         提交并推送
                       </button>
                     </div>
@@ -256,15 +258,15 @@ export default function RepoPanel() {
       </div>
 
       <div className="actions">
-        <button className="action-btn pill" disabled={!!busy} onClick={() => void checkUpdate()}>
+        <button className="action-btn pill" disabled={netBusy} onClick={() => void checkUpdate()}>
           <IconCloud size={17} />
           检测云端更新
         </button>
-        <button className="action-btn pill" disabled={!!busy} onClick={() => void handlePull()}>
+        <button className="action-btn pill" disabled={netBusy} onClick={() => void handlePull()}>
           <IconCloudDown size={17} />
           一键拉取
         </button>
-        <button className="action-btn pill" disabled={!!busy} onClick={() => void push()}>
+        <button className="action-btn pill" disabled={netBusy} onClick={() => void push()}>
           <IconCloudUp size={17} />
           一键推送
         </button>
@@ -292,11 +294,15 @@ export default function RepoPanel() {
         </div>
       )}
 
-      {busy && (
+      {(busy || cloning) && (
         <div className="busy-bar">
           <div className="busy-row">
             <span className="spinner" />
-            <span>{progress ? `${busy.replace(/…$/, "")} · ${progress.stage}` : busy}</span>
+            <span>
+              {(busy ?? cloning ?? "").replace(/…$/, "")}
+              {progress ? ` · ${progress.stage}` : ""}
+              {progress?.detail ? ` · ${progress.detail}` : ""}
+            </span>
             {progressPct != null && <span className="busy-pct">{Math.round(progressPct)}%</span>}
           </div>
           <div className="progress-track">
@@ -305,6 +311,10 @@ export default function RepoPanel() {
               style={progressPct != null ? { width: `${progressPct}%` } : undefined}
             />
           </div>
+          <button className="busy-cancel" title="取消当前操作" onClick={() => void cancelOp()}>
+            <IconX size={13} />
+            取消
+          </button>
         </div>
       )}
 

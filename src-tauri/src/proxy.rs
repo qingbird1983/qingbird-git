@@ -11,16 +11,18 @@ fn tcp_connect(host: &str, port: u16, timeout: Duration) -> Option<TcpStream> {
     TcpStream::connect_timeout(&addr, timeout).ok()
 }
 
-/// 通过 HTTP CONNECT 隧道连 github.com:443 验证代理真正可用
+/// 通过 HTTP CONNECT 隧道连 github.com:443 验证代理真正可用。
+/// 超时给足余量：clash 规则模式下建立节点连接可能要 3~5 秒，
+/// 探测卡在红线上会导致"明明有代理却判定不可用"
 fn probe_http_proxy(bare_addr: &str) -> bool {
     let Some((host, port)) = split_addr(bare_addr) else {
         return false;
     };
-    let Some(mut stream) = tcp_connect(&host, port, Duration::from_secs(3)) else {
+    let Some(mut stream) = tcp_connect(&host, port, Duration::from_secs(5)) else {
         return false;
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(8)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let req = "CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n";
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
@@ -121,7 +123,7 @@ pub fn probe(candidate: &str) -> bool {
         let Some((host, port)) = split_addr(bare) else {
             return false;
         };
-        tcp_connect(&host, port, Duration::from_secs(3)).is_some()
+        tcp_connect(&host, port, Duration::from_secs(5)).is_some()
     } else {
         probe_http_proxy(bare)
     }

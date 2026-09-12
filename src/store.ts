@@ -24,6 +24,8 @@ interface AppState {
   selected: string | null;
   status: Record<string, RepoStatus>;
   busy: string | null;
+  /** 克隆进行中的提示文案；克隆不锁主面板（可同时看日志），仅与其他网络操作互斥 */
+  cloning: string | null;
   /** 每个仓库独立的操作日志；key 为仓库路径，"_app" 为无选中仓库时的全局日志 */
   logs: Record<string, LogLine[]>;
   lastProxy: string | null;
@@ -43,7 +45,7 @@ interface AppState {
   removeRepo: (path: string) => Promise<void>;
   renameRepo: (path: string, alias: string) => Promise<void>;
   setRepoCmds: (path: string, testCmd: string, buildCmd: string) => Promise<void>;
-  log: (text: string, kind?: LogLine["kind"]) => void;
+  log: (text: string, kind?: LogLine["kind"], key?: string) => void;
   /** 弹出代理回退通知（约 6 秒后自动消失） */
   notifyProxy: (proxy: string) => void;
   dismissProxy: () => void;
@@ -53,7 +55,8 @@ interface AppState {
   pull: (stash: boolean) => Promise<"ok" | "dirty" | "fail">;
   push: () => Promise<void>;
   commitPush: (message: string) => Promise<boolean>;
-  cloneRepo: (url: string, parentDir: string) => Promise<boolean>;
+  cloneRepo: (url: string, parentDir: string, netMode?: string) => boolean;
+  cancelOp: () => Promise<void>;
   openInFolder: (path: string) => void;
   openInTerminal: (path: string) => void;
   scanAll: () => Promise<void>;
@@ -77,6 +80,7 @@ export const useApp = create<AppState>((set, get) => ({
   selected: null,
   status: {},
   busy: null,
+  cloning: null,
   logs: {},
   lastProxy: null,
   proxyToast: null,
@@ -152,11 +156,11 @@ export const useApp = create<AppState>((set, get) => ({
     set({ repos });
   },
 
-  log: (text, kind = "info") =>
+  log: (text, kind = "info", key) =>
     set((s) => {
-      const key = s.selected ?? "_app";
-      const arr = [...(s.logs[key] ?? []).slice(-500), { time: nowStr(), text, kind }];
-      return { logs: { ...s.logs, [key]: arr } };
+      const k = key ?? s.selected ?? "_app";
+      const arr = [...(s.logs[k] ?? []).slice(-500), { time: nowStr(), text, kind }];
+      return { logs: { ...s.logs, [k]: arr } };
     }),
 
   notifyProxy: (proxy) => {
@@ -177,7 +181,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   checkUpdate: async () => {
     const path = get().selected;
-    if (!path || get().busy) return;
+    if (!path || get().busy || get().cloning) return;
     get().setBusy("正在检查云端更新…");
     const channel = new Channel<ProgressEvent>();
     channel.onmessage = (p) => get().setProgress(p);
@@ -201,7 +205,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   pull: async (stash) => {
     const path = get().selected;
-    if (!path || get().busy) return "fail";
+    if (!path || get().busy || get().cloning) return "fail";
     get().setBusy("正在拉取…");
     const channel = new Channel<ProgressEvent>();
     channel.onmessage = (p) => get().setProgress(p);
@@ -240,7 +244,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   push: async () => {
     const path = get().selected;
-    if (!path || get().busy) return;
+    if (!path || get().busy || get().cloning) return;
     get().setBusy("正在推送…");
     try {
       const r = await api.push(path);
@@ -259,31 +263,44 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
-  cloneRepo: async (url, parentDir) => {
-    if (get().busy) return false;
-    get().setBusy("正在克隆仓库…");
-    get().log(`开始克隆：${url}`);
+  cloneRepo: (url, parentDir, netMode) => {
+    if (get().busy || get().cloning) return false;
+    if (!url.trim() || !parentDir.trim()) return false;
+    const target = get().selected ?? "_app";
+    set({ cloning: "正在克隆仓库…" });
+    get().log(`开始克隆：${url}`, "info", target);
     const channel = new Channel<ProgressEvent>();
-    channel.onmessage = (p) => get().setProgress(p);
-    try {
-      const r = await api.clone(url, parentDir, channel);
-      r.repos.sort((a, b) => b.last_used - a.last_used);
-      set({ repos: r.repos });
-      get().select(r.path);
-      get().log(`克隆完成，已自动添加仓库：${r.path}`, "success");
-      return true;
-    } catch (e) {
-      get().log(String(e), "error");
-      return false;
-    } finally {
-      get().setBusy(null);
-      get().setProgress(null);
-    }
+    // 克隆不走弹窗：进度写入主面板忙碌条，同时逐行打进日志区（终端式），克隆期间可自由查看
+    channel.onmessage = (p) => {
+      get().setProgress(p);
+      const pct = p.percent != null ? ` ${Math.round(p.percent)}%` : "";
+      const detail = p.detail ? ` · ${p.detail}` : "";
+      get().log(`${p.stage}${pct}${detail}`, "info", target);
+    };
+    void (async () => {
+      try {
+        const r = await api.clone(url, parentDir, channel, netMode);
+        r.repos.sort((a, b) => b.last_used - a.last_used);
+        set({ repos: r.repos });
+        get().select(r.path);
+        get().log(`克隆完成，已自动添加仓库：${r.path}`, "success", target);
+      } catch (e) {
+        get().log(String(e), "error", target);
+      } finally {
+        set({ cloning: null });
+        get().setProgress(null);
+      }
+    })();
+    return true;
+  },
+
+  cancelOp: async () => {
+    await api.cancelBusyOp().catch(() => {});
   },
 
   commitPush: async (message) => {
     const path = get().selected;
-    if (!path || get().busy) return false;
+    if (!path || get().busy || get().cloning) return false;
     get().setBusy("正在提交并推送…");
     try {
       const r = await api.commitPush(path, message);

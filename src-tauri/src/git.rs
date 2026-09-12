@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 // GUI 程序派生控制台子进程（git）时 Windows 会弹出一个立即消失的终端窗口，
@@ -8,6 +9,26 @@ use std::time::{Duration, Instant};
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+
+/// 用户取消标记：置位后所有运行中的 git 子进程在下个轮询周期（≤50ms）被终止。
+/// 同一时刻 UI 只允许一个忙操作，全局标记足够。
+static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// 请求取消当前正在进行的 git 操作
+pub fn request_cancel() {
+    CANCELLED.store(true, Ordering::SeqCst);
+}
+
+/// 新操作开始前清除取消标记
+pub fn clear_cancel() {
+    CANCELLED.store(false, Ordering::SeqCst);
+}
+
+fn is_cancelled() -> bool {
+    CANCELLED.load(Ordering::SeqCst)
+}
+
+pub const CANCELLED_MSG: &str = "操作已被用户取消";
 
 #[derive(Debug, Clone)]
 pub struct GitOutput {
@@ -34,6 +55,9 @@ const NETWORK_ERRORS: &[&str] = &[
     "openssl ssl_read",
     "the remote end hung up",
     "the requested url returned error: 5",
+    // 低速停滞中止（curl 28）在不同传输/错误路径下表面形式不同，两种都要覆盖
+    "operation too slow",
+    "unexpected disconnect",
 ];
 
 pub fn is_network_error(out: &GitOutput) -> bool {
@@ -110,6 +134,15 @@ pub fn run_git_auth(
         Ok(c) => c,
         Err(e) => return fail(format!("无法启动 git 进程: {e}")),
     };
+    // 挂到随主进程退出的 Job 上：
+    // 1) 取消/超时/强杀时能整树终止——git 在 Windows 上是多层进程
+    //    （git.exe → git remote-https / git index-pack），只 kill 顶层会留下
+    //    继续传数据、占管道和目录的孤儿，正是"取消没反应、文件夹删不掉"的根源
+    // 2) 主进程被强杀时 Job 句柄消失，系统回收整棵树
+    #[cfg(windows)]
+    let job_handle = bind_kill_on_job_close(&child);
+    #[cfg(not(windows))]
+    let job_handle: isize = 0;
 
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr piped");
@@ -149,16 +182,43 @@ pub fn run_git_auth(
     });
 
     let start = Instant::now();
+    let mut cancelled = false;
+    let mut stalled = false;
+    // 静默停滞保护：连接阶段没有任何传输数据，http.lowSpeed 保护不生效
+    // （典型场景：直连握手被墙丢包，永远卡在"启动阶段"）。
+    // 开了 --progress 的网络操作正常每秒都有输出，30 秒一行都没有即判定挂死
+    const STALL_SILENCE: Duration = Duration::from_secs(30);
+    let mut last_line = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(st)) => break Some(st),
             Ok(None) => {
-                if let Some(cb) = on_line {
-                    while let Ok(line) = line_rx.try_recv() {
+                let mut got_line = false;
+                while let Ok(line) = line_rx.try_recv() {
+                    got_line = true;
+                    if let Some(cb) = on_line {
                         cb(&line);
                     }
                 }
+                if got_line {
+                    last_line = Instant::now();
+                }
+                if is_cancelled() {
+                    terminate_job_tree(job_handle);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    cancelled = true;
+                    break None;
+                }
+                if last_line.elapsed() > STALL_SILENCE {
+                    terminate_job_tree(job_handle);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    stalled = true;
+                    break None;
+                }
                 if start.elapsed() > timeout {
+                    terminate_job_tree(job_handle);
                     let _ = child.kill();
                     let _ = child.wait();
                     break None;
@@ -187,12 +247,73 @@ pub fn run_git_auth(
             timed_out: false,
         },
         None => {
+            // 取消与停滞/超时都走这里；取消不算网络错误，避免取消后又触发代理回退
+            if cancelled {
+                return GitOutput {
+                    success: false,
+                    stdout: out,
+                    stderr: CANCELLED_MSG.into(),
+                    code: -1,
+                    timed_out: false,
+                };
+            }
             let mut stderr = err;
-            stderr.push_str("\n操作超时，已终止");
+            if stalled {
+                stderr.push_str("\n连接或传输超过 30 秒无任何响应，已中止本次尝试");
+            } else {
+                stderr.push_str("\n操作超时，已终止");
+            }
             GitOutput { success: false, stdout: out, stderr, code: -1, timed_out: true }
         }
     }
 }
+
+/// 把子进程挂到一个带 KILL_ON_JOB_CLOSE 的 Job 上，返回 Job 句柄（isize 表示）。
+/// 句柄刻意不关闭：关闭最后一份句柄会立即触发 kill-on-job-close。
+/// 让句柄随主进程存活，主进程退出（含任务管理器强杀）时系统回收整棵进程树。
+#[cfg(windows)]
+fn bind_kill_on_job_close(child: &std::process::Child) -> isize {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return 0;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if AssignProcessToJobObject(job, child.as_raw_handle()) == 0 {
+            return 0;
+        }
+        job as isize
+    }
+}
+
+/// 终止 Job 里的整棵进程树（含 git remote-https / index-pack 等孙进程）。
+#[cfg(windows)]
+fn terminate_job_tree(job: isize) {
+    if job != 0 {
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(
+                job as _,
+                1,
+            );
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn terminate_job_tree(_job: isize) {}
 
 #[cfg(test)]
 mod tests {
@@ -200,6 +321,30 @@ mod tests {
 
     fn output(stderr: &str, timed_out: bool) -> GitOutput {
         GitOutput { success: false, stdout: String::new(), stderr: stderr.into(), code: -1, timed_out }
+    }
+
+    #[test]
+    fn cancel_kills_running_git() {
+        clear_cancel();
+        // 黑洞地址：TCP 连接会长时间挂起，给取消留出触发窗口
+        let t = std::thread::spawn(|| {
+            run_git_auth(
+                ".",
+                &["ls-remote", "https://10.255.255.1/x.git"],
+                None,
+                Duration::from_secs(30),
+                None,
+                &[],
+                None,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(400));
+        request_cancel();
+        let out = t.join().unwrap();
+        clear_cancel();
+        assert!(!out.success);
+        assert!(!out.timed_out);
+        assert!(out.stderr.contains(CANCELLED_MSG), "stderr = {}", out.stderr);
     }
 
     #[test]
@@ -214,6 +359,10 @@ mod tests {
         )));
         assert!(is_network_error(&output("fatal: OpenSSL SSL_read: Connection was reset", false)));
         assert!(is_network_error(&output("error: RPC failed; curl 56 Recv failure", false)));
+        assert!(is_network_error(&output(
+            "fatal: unable to access 'https://github.com/x/y/': Operation too slow. Less than 30720 bytes/sec transferred the last 20 seconds",
+            false,
+        )));
         assert!(is_network_error(&output("", true)));
     }
 

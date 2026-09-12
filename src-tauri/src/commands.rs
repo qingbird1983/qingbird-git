@@ -55,8 +55,90 @@ pub struct OpResult {
 
 impl OpResult {
     fn err(message: String, output: String) -> Self {
-        OpResult { ok: false, message, output, used_proxy: None, status: None, need_stash: false, changes: None }
+        OpResult {
+            ok: false,
+            message,
+            output,
+            used_proxy: None,
+            status: None,
+            need_stash: false,
+            changes: None,
+        }
     }
+}
+
+/// 从 git 进度行的参数部分提取传输量与网速：
+/// ":  6% (120/2000), 1.21 MiB | 56.00 KiB/s" → "已传输 1.21 MiB · 56.00 KiB/s"
+/// 无速度信息（如 "done."、纯计数行）时返回空串
+fn transfer_detail(rest: &str) -> String {
+    let tail = match rest.split_once("), ") {
+        Some((_, t)) => t,
+        None => return String::new(),
+    };
+    if !tail.contains("/s") {
+        return String::new();
+    }
+    format!("已传输 {}", tail.replace(" | ", " · "))
+}
+
+/// 当前网络路径标记（"直连" / "经代理 127.0.0.1:7897" 等），
+/// 附加到每条进度行的阶段文本上，让用户随时看到当前走的是哪条路（切换提示只闪现一瞬间，不够）
+#[derive(Clone, Default)]
+struct RouteTag(std::sync::Arc<std::sync::Mutex<String>>);
+
+impl RouteTag {
+    fn set(&self, s: &str) {
+        if let Ok(mut g) = self.0.lock() {
+            *g = s.to_string();
+        }
+    }
+    fn get(&self) -> String {
+        self.0.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+}
+
+/// 从阶段提示文本推断当前路径标记
+fn route_of(msg: &str) -> String {
+    if let Some(rest) = msg.strip_prefix("直连失败，正在通过代理 ") {
+        let addr = rest.trim_end_matches(" 重试…");
+        return format!("经代理 {addr}");
+    }
+    if msg.contains("代理并行") {
+        return "并行".into();
+    }
+    "直连".into()
+}
+
+/// 生成配对的进度回调：forward 转发 git stderr 进度行（阶段带路径标记），
+/// stage 在直连/代理切换瞬间发出提示并同步路径标记
+fn progress_hooks(
+    on_progress: &Channel<ProgressEvent>,
+) -> (
+    RouteTag,
+    impl Fn(&str) + '_,
+    impl Fn(&str) + '_,
+) {
+    let tag = RouteTag::default();
+    let t = tag.clone();
+    let forward = move |line: &str| {
+        if let Some(mut ev) = parse_progress(line) {
+            let r = t.get();
+            if !r.is_empty() {
+                ev.stage = format!("{}（{}）", ev.stage, r);
+            }
+            let _ = on_progress.send(ev);
+        }
+    };
+    let t2 = tag.clone();
+    let stage = move |s: &str| {
+        t2.set(&route_of(s));
+        let _ = on_progress.send(ProgressEvent {
+            stage: s.into(),
+            detail: String::new(),
+            percent: None,
+        });
+    };
+    (tag, forward, stage)
 }
 
 /// 解析 git 的 stderr 进度行，转换成可展示的进度事件
@@ -78,19 +160,31 @@ pub fn parse_progress(line: &str) -> Option<ProgressEvent> {
         if let Some(rest) = line.strip_prefix(kw) {
             return Some(ProgressEvent {
                 stage: stage.into(),
-                detail: line.to_string(),
+                detail: transfer_detail(rest),
                 percent: pct(rest),
             });
         }
     }
     if line.starts_with("Cloning into") {
-        return Some(ProgressEvent { stage: "开始克隆".into(), detail: line.to_string(), percent: None });
+        return Some(ProgressEvent {
+            stage: "开始克隆".into(),
+            detail: line.to_string(),
+            percent: None,
+        });
     }
     if line.starts_with("From ") || line.starts_with("FETCH_HEAD") {
-        return Some(ProgressEvent { stage: "获取远端引用".into(), detail: line.to_string(), percent: None });
+        return Some(ProgressEvent {
+            stage: "获取远端引用".into(),
+            detail: line.to_string(),
+            percent: None,
+        });
     }
     if line.starts_with("Fast-forward") {
-        return Some(ProgressEvent { stage: "合并更新".into(), detail: line.to_string(), percent: None });
+        return Some(ProgressEvent {
+            stage: "合并更新".into(),
+            detail: line.to_string(),
+            percent: None,
+        });
     }
     None
 }
@@ -111,12 +205,24 @@ const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 fn base64_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(BASE64_CHARS[(n >> 18) as usize & 63] as char);
         out.push(BASE64_CHARS[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { BASE64_CHARS[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { BASE64_CHARS[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            BASE64_CHARS[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_CHARS[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -150,7 +256,11 @@ fn build_net_auth(cfg: &store::AppConfig, remote_url: &str) -> (Vec<String>, Opt
             _ => "",
         };
         if !token.is_empty() && !is_ssh_url(remote_url) {
-            let user = if host == "github" { "x-access-token" } else { "oauth2" };
+            let user = if host == "github" {
+                "x-access-token"
+            } else {
+                "oauth2"
+            };
             let b64 = base64_encode(format!("{user}:{token}").as_bytes());
             config.push(format!("http.extraheader=AUTHORIZATION: basic {b64}"));
         }
@@ -166,7 +276,10 @@ fn build_net_auth(cfg: &store::AppConfig, remote_url: &str) -> (Vec<String>, Opt
 
 /// 读取仓库 origin 远端地址（读不到则返回空串）
 fn remote_url(repo_path: &str) -> String {
-    run_local(repo_path, &["remote", "get-url", "origin"]).stdout.trim().to_string()
+    run_local(repo_path, &["remote", "get-url", "origin"])
+        .stdout
+        .trim()
+        .to_string()
 }
 
 /// 提交时使用的 Git 身份（-c 项；设置里未填则交给全局配置）
@@ -198,28 +311,27 @@ fn race_direct_vs_proxy(
     timeout: Duration,
 ) -> (git::GitOutput, Option<String>) {
     let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
-    let spawn_attempt =
-        |proxy: Option<String>, line_tx: std::sync::mpsc::Sender<String>| {
-            let repo = repo_path.to_string();
-            let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-            let owned_cfg = git_config.to_vec();
-            let owned_ssh = ssh.map(|s| s.to_string());
-            let git_proxy = proxy.as_deref().map(proxy::to_git_proxy_url);
-            std::thread::spawn(move || {
-                let args: Vec<&str> = owned_args.iter().map(String::as_str).collect();
-                git::run_git_auth(
-                    &repo,
-                    &args,
-                    git_proxy.as_deref(),
-                    timeout,
-                    Some(&|line: &str| {
-                        let _ = line_tx.send(line.to_string());
-                    }),
-                    &owned_cfg,
-                    owned_ssh.as_deref(),
-                )
-            })
-        };
+    let spawn_attempt = |proxy: Option<String>, line_tx: std::sync::mpsc::Sender<String>| {
+        let repo = repo_path.to_string();
+        let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let owned_cfg = git_config.to_vec();
+        let owned_ssh = ssh.map(|s| s.to_string());
+        let git_proxy = proxy.as_deref().map(proxy::to_git_proxy_url);
+        std::thread::spawn(move || {
+            let args: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+            git::run_git_auth(
+                &repo,
+                &args,
+                git_proxy.as_deref(),
+                timeout,
+                Some(&|line: &str| {
+                    let _ = line_tx.send(line.to_string());
+                }),
+                &owned_cfg,
+                owned_ssh.as_deref(),
+            )
+        })
+    };
     let mut t_direct = Some(spawn_attempt(None, line_tx.clone()));
     let mut t_proxy = Some(spawn_attempt(Some(proxy_addr.to_string()), line_tx));
     let fail_out = || git::GitOutput {
@@ -239,15 +351,30 @@ fn race_direct_vs_proxy(
             }
         }
         if direct_out.is_none() && t_direct.as_ref().is_some_and(|h| h.is_finished()) {
-            direct_out = Some(t_direct.take().unwrap().join().unwrap_or_else(|_| fail_out()));
+            direct_out = Some(
+                t_direct
+                    .take()
+                    .unwrap()
+                    .join()
+                    .unwrap_or_else(|_| fail_out()),
+            );
             if direct_out.as_ref().unwrap().success {
                 return (direct_out.unwrap(), None);
             }
         }
         if proxy_out.is_none() && t_proxy.as_ref().is_some_and(|h| h.is_finished()) {
-            proxy_out = Some(t_proxy.take().unwrap().join().unwrap_or_else(|_| fail_out()));
+            proxy_out = Some(
+                t_proxy
+                    .take()
+                    .unwrap()
+                    .join()
+                    .unwrap_or_else(|_| fail_out()),
+            );
             if proxy_out.as_ref().unwrap().success {
-                return (proxy_out.unwrap(), Some(proxy::to_git_proxy_url(proxy_addr)));
+                return (
+                    proxy_out.unwrap(),
+                    Some(proxy::to_git_proxy_url(proxy_addr)),
+                );
             }
         }
         if direct_out.is_some() && proxy_out.is_some() {
@@ -258,11 +385,32 @@ fn race_direct_vs_proxy(
     }
 }
 
+/// 网络路线：Auto=直连优先失败转代理（默认）；DirectOnly=只直连；ProxyOnly=只走代理
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NetMode {
+    Auto,
+    DirectOnly,
+    ProxyOnly,
+}
+
+impl NetMode {
+    fn parse(s: &str) -> Self {
+        match s {
+            "direct" => NetMode::DirectOnly,
+            "proxy" => NetMode::ProxyOnly,
+            _ => NetMode::Auto,
+        }
+    }
+}
+
 /// 网络型 git 操作的统一入口：直连优先，失败且判定为网络问题时自动探测代理重试。
 /// 已有验证可用的代理（last_good_proxy）时，直连与该代理并行赛跑取先成功者。
 /// 代理只注入到当次 git 子进程的环境变量，结束即失效，不改系统代理。
 /// auth_url 为参与认证判定的远端地址；None 时取 repo 的 origin。
 /// git_config / ssh 为按平台令牌认证配置（见 build_net_auth）。
+/// allow_race 为 false 时不做并行赛跑（clone 会同时写同一目标目录，必须串行）。
+/// on_stage 在"直连 / 某代理"尝试切换时回调，供前端展示当前走的网络路径。
+#[allow(clippy::too_many_arguments)]
 fn run_net_op(
     app: &tauri::AppHandle,
     repo_path: &str,
@@ -270,55 +418,174 @@ fn run_net_op(
     on_line: Option<&dyn Fn(&str)>,
     auth_url: Option<&str>,
     timeout: Duration,
+    allow_race: bool,
+    on_stage: Option<&dyn Fn(&str)>,
+    mode: NetMode,
 ) -> (git::GitOutput, Option<String>) {
+    git::clear_cancel();
+    // 强制 IPv4：IPv6 被禁用/不可用的机器上，git 会先尝试 AAAA 连接白白浪费时间
+    let mut owned_args: Vec<&str> = args.to_vec();
+    owned_args.insert(1, "--ipv4");
+    let args = owned_args.as_slice();
     let cfg = store::load(&app);
     let url = match auth_url {
         Some(u) => u.to_string(),
         None => remote_url(repo_path),
     };
-    let (git_config, ssh) = build_net_auth(&cfg, &url);
+    let (mut git_config, ssh) = build_net_auth(&cfg, &url);
+    // 强制 HTTP/1.1：git 默认的 HTTP/2 走本地代理（clash 等 CONNECT 隧道）时
+    // 存在著名的龟速问题——浏览器正常、克隆只有十几 KiB/s，1.1 可直接解决
+    git_config.push("http.version=HTTP/1.1".into());
+    // 传输停滞保护（http.lowSpeedLimit/Time：持续低于限速达到时限即中止本次尝试）
+    // - 直连首试用激进阈值：GitHub 直连被限速时常见十几 KiB/s 的"龟速爬行"，
+    //   按 1KB/s 阈值永远不会判失败，代理就永远没机会接管；20 秒低于 30KB/s 即让位
+    // - 代理尝试与直连兜底用保守阈值：45 秒低于 1KB/s 才算真卡死，避免误杀慢节点
+    let mut direct_cfg = git_config.clone();
+    direct_cfg.push("http.lowSpeedLimit=30720".into());
+    direct_cfg.push("http.lowSpeedTime=20".into());
+    git_config.push("http.lowSpeedLimit=1000".into());
+    git_config.push("http.lowSpeedTime=45".into());
 
-    if let Some(last_good) = cfg.last_good_proxy.clone() {
-        let (out, proxy_url) =
-            race_direct_vs_proxy(repo_path, args, &git_config, ssh.as_deref(), &last_good, on_line, timeout);
-        if out.success {
-            if proxy_url.is_some() {
-                let mut cfg = store::load(&app);
-                cfg.last_good_proxy = Some(last_good);
-                let _ = store::save(&app, &cfg);
+    if allow_race && mode == NetMode::Auto {
+        if let Some(last_good) = cfg.last_good_proxy.clone() {
+            if let Some(cb) = on_stage {
+                cb("直连与已缓存代理并行尝试中…");
             }
-            return (out, proxy_url);
+            let (out, proxy_url) = race_direct_vs_proxy(
+                repo_path,
+                args,
+                &git_config,
+                ssh.as_deref(),
+                &last_good,
+                on_line,
+                timeout,
+            );
+            if out.success {
+                if proxy_url.is_some() {
+                    let mut cfg = store::load(&app);
+                    cfg.last_good_proxy = Some(last_good);
+                    let _ = store::save(&app, &cfg);
+                }
+                return (out, proxy_url);
+            }
         }
     }
 
-    let direct = git::run_git_auth(repo_path, args, None, timeout, on_line, &git_config, ssh.as_deref());
-    if direct.success || !git::is_network_error(&direct) {
-        return (direct, None);
+    let mut direct: Option<git::GitOutput> = None;
+    if mode != NetMode::ProxyOnly {
+        if let Some(cb) = on_stage {
+            cb("正在尝试直连…");
+        }
+        // 用户强制直连时用保守停滞阈值，尊重其选择（龟速也由它跑，静默挂死仍会中止）
+        let direct_cfg = if mode == NetMode::DirectOnly {
+            git_config.clone()
+        } else {
+            direct_cfg
+        };
+        let out = git::run_git_auth(
+            repo_path,
+            args,
+            None,
+            timeout,
+            on_line,
+            &direct_cfg,
+            ssh.as_deref(),
+        );
+        if out.success || !git::is_network_error(&out) {
+            return (out, None);
+        }
+        direct = Some(out);
     }
 
-    let candidates = proxy::gather_candidates(&cfg.settings, &cfg.last_good_proxy);
+    let candidates = if mode == NetMode::DirectOnly {
+        Vec::new()
+    } else {
+        proxy::gather_candidates(&cfg.settings, &cfg.last_good_proxy)
+    };
     for candidate in candidates {
-        // 与赛跑阶段已验证失败的代理重复时跳过
-        if Some(&candidate) == cfg.last_good_proxy.as_ref() {
+        // 仅当赛跑真的跑过（allow_race 且 last_good 存在）才跳过重复候选；
+        // clone 等禁用赛跑的操作若也跳过，last_good 代理就永远没机会被尝试
+        if allow_race && Some(&candidate) == cfg.last_good_proxy.as_ref() {
             continue;
         }
-        if !proxy::probe(&candidate) {
+        // 探测偶尔卡在超时红线上（clash 建连 3~5 秒波动），失败再给一次机会
+        if !proxy::probe(&candidate) && !proxy::probe(&candidate) {
             continue;
+        }
+        if let Some(cb) = on_stage {
+            cb(&format!("直连失败，正在通过代理 {} 重试…", candidate));
         }
         let url = proxy::to_git_proxy_url(&candidate);
-        let out = git::run_git_auth(repo_path, args, Some(&url), timeout, on_line, &git_config, ssh.as_deref());
+        let out = git::run_git_auth(
+            repo_path,
+            args,
+            Some(&url),
+            timeout,
+            on_line,
+            &git_config,
+            ssh.as_deref(),
+        );
         if out.success {
             let mut cfg = store::load(&app);
             cfg.last_good_proxy = Some(candidate);
             let _ = store::save(&app, &cfg);
             return (out, Some(url));
         }
+        // 用户已取消：立即返回，不再尝试后续候选与兜底
+        if out.stderr.contains(git::CANCELLED_MSG) {
+            return (out, None);
+        }
     }
-    (direct, None)
+
+    // 用户已取消且直连结果也是被取消的：直接返回
+    if let Some(d) = &direct {
+        if d.stderr.contains(git::CANCELLED_MSG) {
+            return (d.clone(), None);
+        }
+    }
+
+    // 强制代理却没有任何可用候选：直接报错，不回退直连
+    if mode == NetMode::ProxyOnly {
+        return (
+            git::GitOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "未找到可用代理，请确认代理软件已运行，或在设置中手动填写代理地址".into(),
+                code: -1,
+                timed_out: false,
+            },
+            None,
+        );
+    }
+
+    // 所有候选代理都不可用（仅 Auto）：用保守阈值再兜底直连一次——
+    // 直连可能只是龟速（不满足激进阈值）而非不可达，没代理时仍要能慢慢完成
+    if mode == NetMode::Auto {
+        if let Some(cb) = on_stage {
+            cb("未找到可用代理，改用直连继续（速度可能较慢）…");
+        }
+        let retry = git::run_git_auth(
+            repo_path,
+            args,
+            None,
+            timeout,
+            on_line,
+            &git_config,
+            ssh.as_deref(),
+        );
+        if retry.success {
+            return (retry, None);
+        }
+    }
+    // 走到这里说明 mode 为 Auto/DirectOnly，直连结果一定存在
+    (direct.expect("direct result"), None)
 }
 
 fn read_status(repo_path: &str) -> RepoStatus {
-    let mut st = RepoStatus { is_repo: valid_repo(repo_path), ..Default::default() };
+    let mut st = RepoStatus {
+        is_repo: valid_repo(repo_path),
+        ..Default::default()
+    };
     if !st.is_repo {
         return st;
     }
@@ -327,10 +594,16 @@ fn read_status(repo_path: &str) -> RepoStatus {
         .trim()
         .to_string();
 
-    let upstream = run_local(repo_path, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+    let upstream = run_local(
+        repo_path,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    );
     st.has_upstream = upstream.success;
     if upstream.success {
-        let counts = run_local(repo_path, &["rev-list", "--left-right", "--count", "HEAD...@{u}"]);
+        let counts = run_local(
+            repo_path,
+            &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
+        );
         if counts.success {
             let line = counts.stdout.trim().to_string();
             if let [ahead, behind] = line.split_whitespace().collect::<Vec<_>>()[..] {
@@ -339,7 +612,10 @@ fn read_status(repo_path: &str) -> RepoStatus {
             }
         }
     }
-    st.dirty = !run_local(repo_path, &["status", "--porcelain"]).stdout.trim().is_empty();
+    st.dirty = !run_local(repo_path, &["status", "--porcelain"])
+        .stdout
+        .trim()
+        .is_empty();
     st.remote_url = run_local(repo_path, &["remote", "get-url", "origin"])
         .stdout
         .trim()
@@ -450,7 +726,15 @@ pub fn init_repo(
         return Err("该文件夹已经是 git 仓库".into());
     }
 
-    let init = git::run_git_auth(&path, &["init", "-b", "main"], None, LOCAL_TIMEOUT, None, &[], None);
+    let init = git::run_git_auth(
+        &path,
+        &["init", "-b", "main"],
+        None,
+        LOCAL_TIMEOUT,
+        None,
+        &[],
+        None,
+    );
     if !init.success {
         let fallback = git::run_git_auth(&path, &["init"], None, LOCAL_TIMEOUT, None, &[], None);
         if !fallback.success {
@@ -517,8 +801,19 @@ pub fn repo_status(path: String) -> RepoStatus {
     read_status(&path)
 }
 
+/// 请求取消当前正在进行的网络操作（克隆/检测更新/拉取/推送），
+/// 运行中的 git 子进程会被立即终止
 #[tauri::command]
-pub fn check_update(app: tauri::AppHandle, path: String, on_progress: Channel<ProgressEvent>) -> OpResult {
+pub fn cancel_busy_op() {
+    git::request_cancel();
+}
+
+#[tauri::command(async)]
+pub fn check_update(
+    app: tauri::AppHandle,
+    path: String,
+    on_progress: Channel<ProgressEvent>,
+) -> OpResult {
     if !valid_repo(&path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
@@ -527,12 +822,18 @@ pub fn check_update(app: tauri::AppHandle, path: String, on_progress: Channel<Pr
         detail: String::new(),
         percent: None,
     });
-    let forward = |line: &str| {
-        if let Some(ev) = parse_progress(line) {
-            let _ = on_progress.send(ev);
-        }
-    };
-    let (fetch_out, used_proxy) = run_net_op(&app, &path, &["fetch", "--all", "--prune"], Some(&forward), None, CHECK_TIMEOUT);
+    let (_tag, forward, stage) = progress_hooks(&on_progress);
+    let (fetch_out, used_proxy) = run_net_op(
+        &app,
+        &path,
+        &["fetch", "--all", "--prune", "--progress"],
+        Some(&forward),
+        None,
+        CHECK_TIMEOUT,
+        true,
+        Some(&stage),
+        NetMode::Auto,
+    );
     let status = read_status(&path);
     touch_repo(&app, &path);
 
@@ -555,7 +856,10 @@ pub fn check_update(app: tauri::AppHandle, path: String, on_progress: Channel<Pr
     let message = if !status.has_upstream {
         "当前分支没有设置上游分支，无法对比云端更新".to_string()
     } else if status.behind > 0 && status.ahead > 0 {
-        format!("云端有 {0} 个新提交，同时本地有 {1} 个未推送提交", status.behind, status.ahead)
+        format!(
+            "云端有 {0} 个新提交，同时本地有 {1} 个未推送提交",
+            status.behind, status.ahead
+        )
     } else if status.behind > 0 {
         format!("云端有 {} 个新提交，可以拉取", status.behind)
     } else if status.ahead > 0 {
@@ -563,10 +867,18 @@ pub fn check_update(app: tauri::AppHandle, path: String, on_progress: Channel<Pr
     } else {
         "已是最新，无需同步".to_string()
     };
-    OpResult { ok: true, message, output: combined(&fetch_out), used_proxy, status: Some(status), need_stash: false, changes: None }
+    OpResult {
+        ok: true,
+        message,
+        output: combined(&fetch_out),
+        used_proxy,
+        status: Some(status),
+        need_stash: false,
+        changes: None,
+    }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pull_repo(
     app: tauri::AppHandle,
     path: String,
@@ -576,11 +888,7 @@ pub fn pull_repo(
     if !valid_repo(&path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
-    let forward = |line: &str| {
-        if let Some(ev) = parse_progress(line) {
-            let _ = on_progress.send(ev);
-        }
-    };
+    let (_tag, forward, forward_stage) = progress_hooks(&on_progress);
     let status_before = read_status(&path);
     if status_before.dirty && !stash {
         return OpResult {
@@ -594,12 +902,18 @@ pub fn pull_repo(
         };
     }
 
-    let old_head = run_local(&path, &["rev-parse", "HEAD"]).stdout.trim().to_string();
+    let old_head = run_local(&path, &["rev-parse", "HEAD"])
+        .stdout
+        .trim()
+        .to_string();
 
     let mut log = String::new();
     let mut stashed = false;
     if stash && status_before.dirty {
-        let s = run_local(&path, &["stash", "push", "-u", "-m", "qingbird-git auto stash"]);
+        let s = run_local(
+            &path,
+            &["stash", "push", "-u", "-m", "qingbird-git auto stash"],
+        );
         log.push_str(&combined(&s));
         if !s.success {
             return OpResult::err("暂存本地变更失败，已取消拉取".into(), log);
@@ -607,7 +921,17 @@ pub fn pull_repo(
         stashed = true;
     }
 
-    let (pull_out, used_proxy) = run_net_op(&app, &path, &["pull", "--ff-only", "--progress"], Some(&forward), None, NET_TIMEOUT);
+    let (pull_out, used_proxy) = run_net_op(
+        &app,
+        &path,
+        &["pull", "--ff-only", "--progress"],
+        Some(&forward),
+        None,
+        NET_TIMEOUT,
+        true,
+        Some(&forward_stage),
+        NetMode::Auto,
+    );
     log.push_str(&combined(&pull_out));
     let mut status = read_status(&path);
     touch_repo(&app, &path);
@@ -631,14 +955,24 @@ pub fn pull_repo(
     if !pull_out.success {
         let message = if pull_out.stderr.contains("no tracking information") {
             "当前分支没有上游分支，无法拉取".to_string()
-        } else if pull_out.stderr.contains("Not possible to fast-forward") || pull_out.stderr.contains("divergent") {
+        } else if pull_out.stderr.contains("Not possible to fast-forward")
+            || pull_out.stderr.contains("divergent")
+        {
             "本地与云端历史分叉，ff 拉取失败，请手动处理".to_string()
         } else if used_proxy.is_none() && git::is_network_error(&pull_out) {
             "拉取失败：无法连接远端，且未找到可用代理".to_string()
         } else {
             "拉取失败".to_string()
         };
-        return OpResult { ok: false, message, output: log, used_proxy, status: Some(status), need_stash: false, changes: None };
+        return OpResult {
+            ok: false,
+            message,
+            output: log,
+            used_proxy,
+            status: Some(status),
+            need_stash: false,
+            changes: None,
+        };
     }
 
     status = read_status(&path);
@@ -648,7 +982,15 @@ pub fn pull_repo(
     } else {
         "拉取成功".to_string()
     };
-    OpResult { ok: true, message, output: log, used_proxy, status: Some(status), need_stash: false, changes }
+    OpResult {
+        ok: true,
+        message,
+        output: log,
+        used_proxy,
+        status: Some(status),
+        need_stash: false,
+        changes,
+    }
 }
 
 /// 对比拉取前的 HEAD，提取本次拉下来的提交列表与文件变更摘要
@@ -657,7 +999,10 @@ fn pull_changes(path: &str, old_head: &str) -> Option<UpdateChanges> {
         return None;
     }
     let range = format!("{old_head}..HEAD");
-    let mut changes = UpdateChanges { commits: Vec::new(), diff_stat: String::new() };
+    let mut changes = UpdateChanges {
+        commits: Vec::new(),
+        diff_stat: String::new(),
+    };
 
     let log = run_local(path, &["log", "--oneline", "--no-decorate", &range]);
     if log.success {
@@ -679,7 +1024,7 @@ fn pull_changes(path: &str, old_head: &str) -> Option<UpdateChanges> {
     Some(changes)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn push_repo(app: tauri::AppHandle, path: String) -> OpResult {
     if !valid_repo(&path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
@@ -704,30 +1049,44 @@ fn do_push(app: &tauri::AppHandle, path: &str) -> OpResult {
     if !status.has_upstream {
         let remotes = run_local(path, &["remote"]);
         if remotes.stdout.trim().is_empty() {
-            return OpResult::err("该仓库没有配置远端仓库，无法推送".into(), combined(&remotes));
+            return OpResult::err(
+                "该仓库没有配置远端仓库，无法推送".into(),
+                combined(&remotes),
+            );
         }
     }
 
     let args: Vec<&str> = if status.has_upstream {
-        vec!["push"]
+        vec!["push", "--progress"]
     } else {
-        vec!["push", "--set-upstream", "origin", "HEAD"]
+        vec!["push", "--progress", "--set-upstream", "origin", "HEAD"]
     };
-    let (push_out, used_proxy) = run_net_op(app, path, &args, None, None, NET_TIMEOUT);
+    let (push_out, used_proxy) = run_net_op(app, path, &args, None, None, NET_TIMEOUT, true, None, NetMode::Auto);
     let status = read_status(path);
     touch_repo(app, path);
 
     if !push_out.success {
-        let message = if push_out.stderr.contains("fetch first") || push_out.stderr.contains("rejected") {
-            "推送被拒绝：云端有新提交，请先拉取".to_string()
-        } else if used_proxy.is_none() && git::is_network_error(&push_out) {
-            "推送失败：无法连接远端，且未找到可用代理".to_string()
-        } else if push_out.stderr.contains("could not read Username") || push_out.stderr.contains("Authentication failed") {
-            "推送失败：认证未通过，可在设置里填写对应平台的访问令牌".to_string()
-        } else {
-            "推送失败".to_string()
+        let message =
+            if push_out.stderr.contains("fetch first") || push_out.stderr.contains("rejected") {
+                "推送被拒绝：云端有新提交，请先拉取".to_string()
+            } else if used_proxy.is_none() && git::is_network_error(&push_out) {
+                "推送失败：无法连接远端，且未找到可用代理".to_string()
+            } else if push_out.stderr.contains("could not read Username")
+                || push_out.stderr.contains("Authentication failed")
+            {
+                "推送失败：认证未通过，可在设置里填写对应平台的访问令牌".to_string()
+            } else {
+                "推送失败".to_string()
+            };
+        return OpResult {
+            ok: false,
+            message,
+            output: combined(&push_out),
+            used_proxy,
+            status: Some(status),
+            need_stash: false,
+            changes: None,
         };
-        return OpResult { ok: false, message, output: combined(&push_out), used_proxy, status: Some(status), need_stash: false, changes: None };
     }
 
     let message = if used_proxy.is_some() {
@@ -735,7 +1094,15 @@ fn do_push(app: &tauri::AppHandle, path: &str) -> OpResult {
     } else {
         "推送成功".to_string()
     };
-    OpResult { ok: true, message, output: combined(&push_out), used_proxy, status: Some(status), need_stash: false, changes: None }
+    OpResult {
+        ok: true,
+        message,
+        output: combined(&push_out),
+        used_proxy,
+        status: Some(status),
+        need_stash: false,
+        changes: None,
+    }
 }
 
 // ---------- 提交 ----------
@@ -860,7 +1227,9 @@ pub fn repo_languages(path: String) -> Vec<LangStat> {
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase())
             .unwrap_or_default();
-        let Some(lang) = lang_of_ext(&ext) else { continue };
+        let Some(lang) = lang_of_ext(&ext) else {
+            continue;
+        };
         let len = std::fs::metadata(std::path::Path::new(&path).join(f))
             .map(|m| m.len())
             .unwrap_or(0);
@@ -882,13 +1251,16 @@ pub fn repo_languages(path: String) -> Vec<LangStat> {
     if stats.len() > 6 {
         let rest: f32 = stats[6..].iter().map(|s| s.percent).sum();
         stats.truncate(6);
-        stats.push(LangStat { language: "其他".into(), percent: rest });
+        stats.push(LangStat {
+            language: "其他".into(),
+            percent: rest,
+        });
     }
     stats
 }
 
 /// 一键提交并推送：add -A → commit（自动带 Git 身份）→ push
-#[tauri::command]
+#[tauri::command(async)]
 pub fn commit_push(app: tauri::AppHandle, path: String, message: String) -> OpResult {
     if !valid_repo(&path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
@@ -959,7 +1331,12 @@ fn valid_repo_name(name: &str) -> bool {
 }
 
 /// 在 GitHub 上创建远端仓库，返回 full_name（owner/repo）
-fn api_create_github(token: &str, name: &str, private: bool, description: &str) -> Result<String, String> {
+fn api_create_github(
+    token: &str,
+    name: &str,
+    private: bool,
+    description: &str,
+) -> Result<String, String> {
     let mut body = ureq::json!({ "name": name, "private": private, "auto_init": false });
     if !description.is_empty() {
         body["description"] = ureq::json!(description);
@@ -984,14 +1361,22 @@ fn api_create_github(token: &str, name: &str, private: bool, description: &str) 
         Err(ureq::Error::Status(401, _)) => Err("GitHub 令牌无效或已过期，请在设置里检查".into()),
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
-            Err(format!("GitHub 创建仓库失败（HTTP {code}）：{}", body.chars().take(200).collect::<String>()))
+            Err(format!(
+                "GitHub 创建仓库失败（HTTP {code}）：{}",
+                body.chars().take(200).collect::<String>()
+            ))
         }
         Err(e) => Err(format!("无法连接 GitHub API：{e}")),
     }
 }
 
 /// 在 Gitee 上创建远端仓库，返回 full_name（owner/repo）
-fn api_create_gitee(token: &str, name: &str, private: bool, description: &str) -> Result<String, String> {
+fn api_create_gitee(
+    token: &str,
+    name: &str,
+    private: bool,
+    description: &str,
+) -> Result<String, String> {
     let mut form: Vec<(&str, &str)> = vec![
         ("access_token", token),
         ("name", name),
@@ -1029,7 +1414,7 @@ fn api_create_gitee(token: &str, name: &str, private: bool, description: &str) -
 }
 
 /// 一步创建新仓库：本地 init + 初始提交，可选同时在 GitHub/Gitee 创建远端并推送
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_repo(
     app: tauri::AppHandle,
     name: String,
@@ -1074,22 +1459,45 @@ pub fn create_repo(
             }
             _ => return Err("不支持的平台".into()),
         };
-        let host = if platform == "github" { "https://github.com" } else { "https://gitee.com" };
+        let host = if platform == "github" {
+            "https://github.com"
+        } else {
+            "https://gitee.com"
+        };
         origin = format!("{host}/{remote_full_name}.git");
     }
 
     // 2. 本地初始化 + 初始提交
-    let init = git::run_git_auth(parent_dir.trim(), &["init", "-b", "main", &name], None, LOCAL_TIMEOUT, None, &[], None);
+    let init = git::run_git_auth(
+        parent_dir.trim(),
+        &["init", "-b", "main", &name],
+        None,
+        LOCAL_TIMEOUT,
+        None,
+        &[],
+        None,
+    );
     if !init.success {
         // 兼容不支持 -b 的旧版 git
-        let fallback = git::run_git_auth(parent_dir.trim(), &["init", &name], None, LOCAL_TIMEOUT, None, &[], None);
+        let fallback = git::run_git_auth(
+            parent_dir.trim(),
+            &["init", &name],
+            None,
+            LOCAL_TIMEOUT,
+            None,
+            &[],
+            None,
+        );
         if !fallback.success {
             return Err(format!("git init 失败：{}", fallback.stderr.trim()));
         }
     }
     std::fs::write(
         dest.join("README.md"),
-        format!("# {name}\n\n{}\n", if desc.is_empty() { name.as_str() } else { desc }),
+        format!(
+            "# {name}\n\n{}\n",
+            if desc.is_empty() { name.as_str() } else { desc }
+        ),
     )
     .map_err(|e| format!("写入 README 失败：{e}"))?;
 
@@ -1115,8 +1523,18 @@ pub fn create_repo(
         if !add.success {
             return Err(format!("仓库已创建，但关联远端失败：{}", add.stderr.trim()));
         }
-        let push_args: Vec<&str> = vec!["push", "--set-upstream", "origin", "main"];
-        let (push_out, used_proxy) = run_net_op(&app, &dest_str, &push_args, None, Some(&origin), NET_TIMEOUT);
+        let push_args: Vec<&str> = vec!["push", "--progress", "--set-upstream", "origin", "main"];
+        let (push_out, used_proxy) = run_net_op(
+            &app,
+            &dest_str,
+            &push_args,
+            None,
+            Some(&origin),
+            NET_TIMEOUT,
+            true,
+            None,
+            NetMode::Auto,
+        );
         if !push_out.success {
             message.push_str("，远端已创建，但首次推送失败：");
             message.push_str(push_out.stderr.trim());
@@ -1141,7 +1559,12 @@ pub fn create_repo(
         });
     }
     store::save(&app, &cfg)?;
-    Ok(CreateOutcome { path: dest_str, name, repos: cfg.repos, message })
+    Ok(CreateOutcome {
+        path: dest_str,
+        name,
+        repos: cfg.repos,
+        message,
+    })
 }
 
 // ---------- 设置 ----------
@@ -1241,7 +1664,10 @@ pub fn open_in_terminal(path: String) -> Result<(), String> {
     }
     Command::new("cmd")
         .args(["/C", "start", "powershell", "-NoExit", "-Command"])
-        .arg(format!("Set-Location -LiteralPath '{}'", path.replace('\'', "''")))
+        .arg(format!(
+            "Set-Location -LiteralPath '{}'",
+            path.replace('\'', "''")
+        ))
         .spawn()
         .map_err(|e| format!("无法打开终端：{e}"))?;
     Ok(())
@@ -1263,8 +1689,13 @@ pub fn probe_proxy(addr: String) -> Result<bool, String> {
 fn combined(out: &git::GitOutput) -> String {
     // 进度刷新行（\r 重复输出）在进度条里已展示，日志里去掉避免刷屏
     const PROGRESS_NOISE: &[&str] = &[
-        "Receiving objects", "Resolving deltas", "Updating files", "Counting objects",
-        "Compressing objects", "Enumerating objects", "remote: Enumerating",
+        "Receiving objects",
+        "Resolving deltas",
+        "Updating files",
+        "Counting objects",
+        "Compressing objects",
+        "Enumerating objects",
+        "remote: Enumerating",
     ];
     let clean = |text: &str| -> String {
         text.split('\n')
@@ -1316,13 +1747,15 @@ pub fn repo_name_from_url(url: &str) -> Option<String> {
     valid.then(|| name.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clone_repo(
     app: tauri::AppHandle,
     url: String,
     parent_dir: String,
+    net_mode: Option<String>,
     on_progress: Channel<ProgressEvent>,
 ) -> Result<CloneOutcome, String> {
+    let mode = NetMode::parse(net_mode.as_deref().unwrap_or("auto"));
     let url = url.trim().to_string();
     if !url.contains(':') && !url.contains('/') {
         return Err("仓库地址看起来不完整".into());
@@ -1337,17 +1770,31 @@ pub fn clone_repo(
         return Err(format!("目标文件夹已存在：{}", dest.display()));
     }
 
-    let forward = |line: &str| {
-        if let Some(ev) = parse_progress(line) {
-            let _ = on_progress.send(ev);
-        }
-    };
+    let (_tag, forward, stage) = progress_hooks(&on_progress);
     let args = ["clone", "--progress", &url, &name];
-    let (out, used_proxy) = run_net_op(&app, parent_dir.trim(), &args, Some(&forward), Some(&url), NET_TIMEOUT);
+    let (out, used_proxy) = run_net_op(
+        &app,
+        parent_dir.trim(),
+        &args,
+        Some(&forward),
+        Some(&url),
+        NET_TIMEOUT,
+        false,
+        Some(&stage),
+        mode,
+    );
     if !out.success {
-        let message = if used_proxy.is_none() && git::is_network_error(&out) {
+        // 进入前已确认目标目录不存在，失败后的残留半成品目录是本次尝试产生的，清掉以便重试
+        let _ = std::fs::remove_dir_all(&dest);
+        let message = if out.stderr.contains(git::CANCELLED_MSG) {
+            "克隆已取消".to_string()
+        } else if out.stderr.contains("未找到可用代理") {
+            "克隆失败：代理模式未找到可用代理，请确认代理软件已运行，或在设置中手动填写代理地址".to_string()
+        } else if used_proxy.is_none() && git::is_network_error(&out) {
             "克隆失败：无法连接远端，且未找到可用代理".to_string()
-        } else if out.stderr.contains("could not read Username") || out.stderr.contains("Authentication failed") {
+        } else if out.stderr.contains("could not read Username")
+            || out.stderr.contains("Authentication failed")
+        {
             "克隆失败：这是私有仓库，请确认已在本机 Git 凭证管理器中登录".to_string()
         } else if out.stderr.contains("Repository not found") || out.stderr.contains("not found") {
             "克隆失败：仓库不存在或无权访问".to_string()
@@ -1371,7 +1818,11 @@ pub fn clone_repo(
         });
     }
     store::save(&app, &cfg)?;
-    Ok(CloneOutcome { path: dest_str, name, repos: cfg.repos })
+    Ok(CloneOutcome {
+        path: dest_str,
+        name,
+        repos: cfg.repos,
+    })
 }
 
 // ---------- 一键扫描 ----------
@@ -1382,12 +1833,15 @@ pub struct ScanItem {
     pub status: RepoStatus,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scan_all(app: tauri::AppHandle) -> Vec<ScanItem> {
     let cfg = store::load(&app);
     cfg.repos
         .iter()
-        .map(|r| ScanItem { path: r.path.clone(), status: read_status(&r.path) })
+        .map(|r| ScanItem {
+            path: r.path.clone(),
+            status: read_status(&r.path),
+        })
         .collect()
 }
 
@@ -1529,9 +1983,27 @@ pub fn run_repo_cmd(path: String, cmd: String) -> Result<(), String> {
 
 /// 可清理的构建缓存目录名白名单（均为可再生的构建产物 / 依赖缓存）
 const CACHE_DIRS: &[&str] = &[
-    "target", "node_modules", "dist", "build", "out", ".next", ".nuxt", ".svelte-kit", ".turbo",
-    ".parcel-cache", "coverage", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    ".venv", "venv", ".gradle", "Debug", "Release", ".dart_tool",
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".parcel-cache",
+    "coverage",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".venv",
+    "venv",
+    ".gradle",
+    "Debug",
+    "Release",
+    ".dart_tool",
 ];
 
 #[derive(Serialize, Clone)]
@@ -1566,7 +2038,9 @@ fn verbatim_path(p: &std::path::Path) -> std::path::PathBuf {
 
 /// 递归统计目录大小；符号链接 / junction 不跟进，避免循环与重复统计
 fn dir_size(p: &std::path::Path) -> u64 {
-    let Ok(rd) = std::fs::read_dir(p) else { return 0 };
+    let Ok(rd) = std::fs::read_dir(p) else {
+        return 0;
+    };
     let mut total = 0u64;
     for e in rd.flatten() {
         let Ok(ft) = e.file_type() else { continue };
@@ -1640,7 +2114,8 @@ pub async fn delete_cache_dir(path: String, name: String) -> Result<u64, String>
     tauri::async_runtime::spawn_blocking(move || {
         std::fs::remove_dir_all(&dir_v).map_err(|e| {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
-                "删除失败：目录被占用（可能有编译 / 开发进程正在使用），请先关闭相关程序".to_string()
+                "删除失败：目录被占用（可能有编译 / 开发进程正在使用），请先关闭相关程序"
+                    .to_string()
             } else {
                 format!("删除失败：{e}")
             }
@@ -1657,11 +2132,23 @@ mod tests {
 
     #[test]
     fn repo_name_from_url_works() {
-        assert_eq!(repo_name_from_url("https://github.com/user/hello-world.git"), Some("hello-world".into()));
-        assert_eq!(repo_name_from_url("https://gitee.com/user/hello-world"), Some("hello-world".into()));
-        assert_eq!(repo_name_from_url("git@github.com:user/repo.git"), Some("repo".into()));
+        assert_eq!(
+            repo_name_from_url("https://github.com/user/hello-world.git"),
+            Some("hello-world".into())
+        );
+        assert_eq!(
+            repo_name_from_url("https://gitee.com/user/hello-world"),
+            Some("hello-world".into())
+        );
+        assert_eq!(
+            repo_name_from_url("git@github.com:user/repo.git"),
+            Some("repo".into())
+        );
         // 结尾带斜杠时去掉斜杠后取最后一段（是否为合法仓库交给 clone 结果判断）
-        assert_eq!(repo_name_from_url("https://github.com/user/"), Some("user".into()));
+        assert_eq!(
+            repo_name_from_url("https://github.com/user/"),
+            Some("user".into())
+        );
     }
 
     #[test]
@@ -1669,8 +2156,10 @@ mod tests {
         let ev = parse_progress("Receiving objects:  45% (123/273), 1.2 MiB | 2.3 MiB/s").unwrap();
         assert_eq!(ev.stage, "接收对象");
         assert_eq!(ev.percent, Some(45.0));
+        assert_eq!(ev.detail, "已传输 1.2 MiB · 2.3 MiB/s");
         let ev = parse_progress("Resolving deltas: 100% (10/10), done.").unwrap();
         assert_eq!(ev.percent, Some(100.0));
+        assert_eq!(ev.detail, ""); // done. 无速度信息
         assert!(parse_progress("fatal: unable to access").is_none());
     }
 

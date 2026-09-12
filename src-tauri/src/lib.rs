@@ -49,6 +49,7 @@ pub fn run() {
             commands::check_update,
             commands::pull_repo,
             commands::push_repo,
+            commands::cancel_busy_op,
             commands::commit_push,
             commands::list_changes,
             commands::recent_commits,

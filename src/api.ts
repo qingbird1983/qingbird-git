@@ -134,8 +134,8 @@ export const api = {
   commitPush: (path: string, message: string) => invoke<OpResult>("commit_push", { path, message }),
   listChanges: (path: string) => invoke<FileChange[]>("list_changes", { path }),
   recentCommits: (path: string) => invoke<CommitInfo[]>("recent_commits", { path }),
-  clone: (url: string, parentDir: string, onProgress: Channel<ProgressEvent>) =>
-    invoke<CloneOutcome>("clone_repo", { url, parentDir, onProgress }),
+  clone: (url: string, parentDir: string, onProgress: Channel<ProgressEvent>, netMode = "auto") =>
+    invoke<CloneOutcome>("clone_repo", { url, parentDir, onProgress, netMode }),
   createRepo: (name: string, parentDir: string, platform: string, isPrivate: boolean, description: string) =>
     invoke<CreateOutcome>("create_repo", { name, parentDir, platform, private: isPrivate, description }),
   scanAll: () => invoke<ScanItem[]>("scan_all"),
@@ -159,6 +159,7 @@ export const api = {
     }),
   openInFolder: (path: string) => invoke<void>("open_in_folder", { path }),
   openInTerminal: (path: string) => invoke<void>("open_in_terminal", { path }),
+  cancelBusyOp: () => invoke<void>("cancel_busy_op"),
   setRepoCmds: (path: string, testCmd: string, buildCmd: string) =>
     invoke<RepoEntry[]>("set_repo_cmds", { path, testCmd, buildCmd }),
   detectCmds: (path: string) => invoke<CmdDetect>("detect_cmds", { path }),

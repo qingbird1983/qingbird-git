@@ -590,6 +590,25 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.busy-cancel {
+  margin-top: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 8px;
+}
+
+.busy-cancel:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
 .spinner {
   width: 14px;
   height: 14px;
@@ -693,6 +712,13 @@ body {
   color: var(--accent);
   margin-bottom: 6px;
   font-weight: 600;
+}
+
+.progress-detail {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- 别名与重命名 ---------- */
@@ -1338,8 +1364,7 @@ body {
 }
 
 /* ---------- 分段控件（主题） ---------- */
-.segmented {
-  display: flex;
+.segmented {  display: flex;
   gap: 4px;
   background: var(--bg-inset);
   border-radius: 999px;
@@ -1352,7 +1377,8 @@ body {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 7px 0;
+  padding: 7px 14px;
+  white-space: nowrap;
   border: none;
   border-radius: 999px;
   background: transparent;
