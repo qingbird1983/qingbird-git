@@ -41,6 +41,7 @@ interface AppState {
   addRepoByPath: (path: string) => Promise<boolean>;
   removeRepo: (path: string) => Promise<void>;
   renameRepo: (path: string, alias: string) => Promise<void>;
+  setRepoCmds: (path: string, testCmd: string, buildCmd: string) => Promise<void>;
   log: (text: string, kind?: LogLine["kind"]) => void;
   /** 弹出代理回退通知（约 6 秒后自动消失） */
   notifyProxy: (proxy: string) => void;
@@ -140,6 +141,12 @@ export const useApp = create<AppState>((set, get) => ({
 
   renameRepo: async (path, alias) => {
     const repos = await api.renameRepo(path, alias);
+    repos.sort((a, b) => b.last_used - a.last_used);
+    set({ repos });
+  },
+
+  setRepoCmds: async (path, testCmd, buildCmd) => {
+    const repos = await api.setRepoCmds(path, testCmd, buildCmd);
     repos.sort((a, b) => b.last_used - a.last_used);
     set({ repos });
   },

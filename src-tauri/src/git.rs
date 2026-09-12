@@ -2,6 +2,13 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+// GUI 程序派生控制台子进程（git）时 Windows 会弹出一个立即消失的终端窗口，
+// 必须加 CREATE_NO_WINDOW 抑制；仅对后台子进程，open_in_terminal 的可见窗口不受影响
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 #[derive(Debug, Clone)]
 pub struct GitOutput {
     pub success: bool,
@@ -96,6 +103,8 @@ pub fn run_git_auth(
         cmd.env("GIT_SSH_COMMAND", ssh);
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,

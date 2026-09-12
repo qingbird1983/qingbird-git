@@ -13,6 +13,12 @@ pub struct RepoEntry {
     pub alias: String,
     pub added_at: u64,
     pub last_used: u64,
+    /// 一键运行：测试命令；空串表示未设置（首次点击时自动识别预填）
+    #[serde(default)]
+    pub test_cmd: String,
+    /// 一键运行：构建命令；空串表示未设置
+    #[serde(default)]
+    pub build_cmd: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

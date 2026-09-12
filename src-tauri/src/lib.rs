@@ -63,6 +63,11 @@ pub fn run() {
             commands::set_credentials,
             commands::open_in_folder,
             commands::open_in_terminal,
+            commands::set_repo_cmds,
+            commands::detect_cmds,
+            commands::run_repo_cmd,
+            commands::scan_repo_space,
+            commands::delete_cache_dir,
             commands::probe_proxy
         ])
         .setup(|app| {

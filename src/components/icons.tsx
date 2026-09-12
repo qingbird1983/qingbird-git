@@ -166,3 +166,44 @@ export const IconCloudUp = (p: { size?: number; className?: string }) => (
     <path d="M16 19l-4-4-4 4M12 21v-9" />
   </Icon>
 );
+
+/** 磁盘（空间扫描） */
+export const IconDisk = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <path d="M22 12H2" />
+    <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    <path d="M6 16h.01M10 16h.01" />
+  </Icon>
+);
+
+/** 播放（跑测试） */
+export const IconPlay = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <path d="M7 4l13 8-13 8V4z" />
+  </Icon>
+);
+
+/** 锤子（构建） */
+export const IconHammer = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <path d="M15 12l-8.5 8.5a2.12 2.12 0 0 1-3-3L12 9" />
+    <path d="M17.64 15L22 10.64" />
+    <path d="M20.91 11.7l-1.25-1.25c-.6-.6-.93-1.4-.93-2.25v-.86L16.01 4.6a5.56 5.56 0 0 0-3.94-1.64H9l.92.82A6.18 6.18 0 0 0 12 5.36c.9.3 1.86.3 2.76 0L17 7.38" />
+  </Icon>
+);
+
+/** 烧瓶（测试） */
+export const IconFlask = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <path d="M10 2v7.5a2 2 0 0 1-.21.9L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45L14.21 10.4a2 2 0 0 1-.21-.9V2" />
+    <path d="M8.5 2h7M7 16h10" />
+  </Icon>
+);
+
+/** 垃圾桶（清理缓存） */
+export const IconTrash = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+    <path d="M10 11v6M14 11v6" />
+  </Icon>
+);

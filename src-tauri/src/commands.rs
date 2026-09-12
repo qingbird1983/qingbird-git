@@ -283,6 +283,8 @@ pub fn add_repo(app: tauri::AppHandle, path: String) -> Result<Vec<store::RepoEn
             path: path.clone(),
             added_at: store::now_secs(),
             last_used: store::now_secs(),
+            test_cmd: String::new(),
+            build_cmd: String::new(),
         });
     }
     store::save(&app, &cfg)?;
@@ -404,6 +406,8 @@ pub fn init_repo(
         alias: String::new(),
         added_at: store::now_secs(),
         last_used: store::now_secs(),
+        test_cmd: String::new(),
+        build_cmd: String::new(),
     };
     if !cfg.repos.iter().any(|r| r.path == path) {
         cfg.repos.push(entry.clone());
@@ -1028,6 +1032,8 @@ pub fn create_repo(
             path: dest_str.clone(),
             added_at: store::now_secs(),
             last_used: store::now_secs(),
+            test_cmd: String::new(),
+            build_cmd: String::new(),
         });
     }
     store::save(&app, &cfg)?;
@@ -1256,6 +1262,8 @@ pub fn clone_repo(
             path: dest_str.clone(),
             added_at: store::now_secs(),
             last_used: store::now_secs(),
+            test_cmd: String::new(),
+            build_cmd: String::new(),
         });
     }
     store::save(&app, &cfg)?;
@@ -1277,6 +1285,266 @@ pub fn scan_all(app: tauri::AppHandle) -> Vec<ScanItem> {
         .iter()
         .map(|r| ScanItem { path: r.path.clone(), status: read_status(&r.path) })
         .collect()
+}
+
+// ---------- 一键运行：测试 / 构建 ----------
+
+/// 保存某仓库的一键运行命令（测试 / 构建），保存后点按钮直接在终端运行
+#[tauri::command]
+pub fn set_repo_cmds(
+    app: tauri::AppHandle,
+    path: String,
+    test_cmd: String,
+    build_cmd: String,
+) -> Vec<store::RepoEntry> {
+    let mut cfg = store::load(&app);
+    if let Some(e) = cfg.repos.iter_mut().find(|r| r.path == path) {
+        e.test_cmd = test_cmd.trim().to_string();
+        e.build_cmd = build_cmd.trim().to_string();
+    }
+    let _ = store::save(&app, &cfg);
+    cfg.repos
+}
+
+#[derive(Serialize, Clone, Default)]
+pub struct CmdDetect {
+    pub test_cmd: String,
+    pub build_cmd: String,
+}
+
+/// 按特征文件自动识别常用的测试 / 构建命令（只做预填，用户可修改后保存）
+#[tauri::command]
+pub fn detect_cmds(path: String) -> CmdDetect {
+    let root = std::path::Path::new(&path);
+    let mut d = CmdDetect::default();
+
+    if root.join("package.json").is_file() {
+        // 依据锁文件选择包管理器
+        let pm = if root.join("pnpm-lock.yaml").is_file() {
+            "pnpm"
+        } else if root.join("yarn.lock").is_file() {
+            "yarn"
+        } else if root.join("bun.lockb").is_file() || root.join("bun.lock").is_file() {
+            "bun"
+        } else {
+            "npm"
+        };
+        if let Ok(s) = std::fs::read_to_string(root.join("package.json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                let scripts = v.get("scripts");
+                if scripts.and_then(|s| s.get("test")).is_some() {
+                    d.test_cmd = format!("{pm} test");
+                }
+                if scripts.and_then(|s| s.get("build")).is_some() {
+                    d.build_cmd = format!("{pm} run build");
+                }
+            }
+        }
+    }
+    if d.test_cmd.is_empty() && root.join("Cargo.toml").is_file() {
+        d.test_cmd = "cargo test".into();
+    }
+    if d.build_cmd.is_empty() && root.join("Cargo.toml").is_file() {
+        d.build_cmd = "cargo build --release".into();
+    }
+    if d.test_cmd.is_empty() && root.join("go.mod").is_file() {
+        d.test_cmd = "go test ./...".into();
+    }
+    if d.build_cmd.is_empty() && root.join("go.mod").is_file() {
+        d.build_cmd = "go build ./...".into();
+    }
+    if d.test_cmd.is_empty()
+        && (root.join("pyproject.toml").is_file()
+            || root.join("requirements.txt").is_file()
+            || root.join("setup.py").is_file())
+    {
+        d.test_cmd = "pytest".into();
+    }
+    if d.test_cmd.is_empty() && root.join("pom.xml").is_file() {
+        d.test_cmd = "mvn test".into();
+    }
+    if d.build_cmd.is_empty() && root.join("pom.xml").is_file() {
+        d.build_cmd = "mvn package".into();
+    }
+    if d.test_cmd.is_empty()
+        && (root.join("build.gradle").is_file() || root.join("build.gradle.kts").is_file())
+    {
+        d.test_cmd = "gradle test".into();
+    }
+    if d.build_cmd.is_empty()
+        && (root.join("build.gradle").is_file() || root.join("build.gradle.kts").is_file())
+    {
+        d.build_cmd = "gradle build".into();
+    }
+    if d.test_cmd.is_empty()
+        && std::fs::read_dir(root)
+            .map(|rd| {
+                rd.flatten().any(|e| {
+                    let n = e.file_name().to_string_lossy().to_lowercase();
+                    n.ends_with(".csproj") || n.ends_with(".sln")
+                })
+            })
+            .unwrap_or(false)
+    {
+        d.test_cmd = "dotnet test".into();
+        d.build_cmd = "dotnet build".into();
+    }
+    d
+}
+
+/// 在新终端窗口中于仓库目录下运行命令（测试 / 构建等），窗口保持打开便于查看输出
+#[tauri::command]
+pub fn run_repo_cmd(path: String, cmd: String) -> Result<(), String> {
+    if !std::path::Path::new(&path).is_dir() {
+        return Err("仓库文件夹不存在".into());
+    }
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return Err("命令为空".into());
+    }
+    // 优先 Windows Terminal，失败回退独立 PowerShell 窗口
+    if Command::new("wt")
+        .arg("-d")
+        .arg(&path)
+        .args(["powershell", "-NoExit", "-Command", cmd])
+        .spawn()
+        .is_ok()
+    {
+        return Ok(());
+    }
+    Command::new("cmd")
+        .args(["/C", "start", "powershell", "-NoExit", "-Command"])
+        .arg(cmd)
+        .current_dir(&path)
+        .spawn()
+        .map_err(|e| format!("无法打开终端：{e}"))?;
+    Ok(())
+}
+
+// ---------- 磁盘空间扫描与缓存清理 ----------
+
+/// 可清理的构建缓存目录名白名单（均为可再生的构建产物 / 依赖缓存）
+const CACHE_DIRS: &[&str] = &[
+    "target", "node_modules", "dist", "build", "out", ".next", ".nuxt", ".svelte-kit", ".turbo",
+    ".parcel-cache", "coverage", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".venv", "venv", ".gradle", "Debug", "Release", ".dart_tool",
+];
+
+#[derive(Serialize, Clone)]
+pub struct DirSize {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    /// 属于白名单内的可清理缓存目录
+    pub is_cache: bool,
+}
+
+#[derive(Serialize, Clone)]
+pub struct SpaceReport {
+    /// 仓库文件夹总占用（字节）
+    pub total: u64,
+    /// 一级子目录 / 文件按大小排序
+    pub dirs: Vec<DirSize>,
+}
+
+/// 超长路径加 \\?\ 前缀，避免深层 node_modules / target 触发 Windows MAX_PATH 限制
+fn verbatim_path(p: &std::path::Path) -> std::path::PathBuf {
+    let s = p.as_os_str().to_string_lossy();
+    if s.len() > 240 && !s.starts_with("\\\\?\\") {
+        if let Some(rest) = s.strip_prefix("\\\\") {
+            return std::path::PathBuf::from(format!("\\\\?\\UNC\\{rest}"));
+        }
+        std::path::PathBuf::from(format!("\\\\?\\{s}"))
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// 递归统计目录大小；符号链接 / junction 不跟进，避免循环与重复统计
+fn dir_size(p: &std::path::Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(p) else { return 0 };
+    let mut total = 0u64;
+    for e in rd.flatten() {
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_dir() {
+            total += dir_size(&e.path());
+        } else if ft.is_file() {
+            total += e.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    total
+}
+
+/// 扫描仓库一级内容的磁盘占用（大仓库可能耗时数秒，放后台线程执行）
+#[tauri::command]
+pub async fn scan_repo_space(path: String) -> Result<SpaceReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = std::path::Path::new(&path);
+        if !root.is_dir() {
+            return Err("文件夹不存在".into());
+        }
+        let root_v = verbatim_path(root);
+        let mut dirs: Vec<DirSize> = Vec::new();
+        let mut total = 0u64;
+        if let Ok(rd) = std::fs::read_dir(&root_v) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                let Ok(ft) = e.file_type() else { continue };
+                let size = if ft.is_dir() {
+                    dir_size(&e.path())
+                } else if ft.is_file() {
+                    e.metadata().map(|m| m.len()).unwrap_or(0)
+                } else {
+                    0
+                };
+                total += size;
+                dirs.push(DirSize {
+                    path: root.join(&name).to_string_lossy().to_string(),
+                    is_cache: ft.is_dir() && CACHE_DIRS.contains(&name.as_str()),
+                    name,
+                    size,
+                });
+            }
+        }
+        dirs.sort_by(|a, b| {
+            b.size
+                .cmp(&a.size)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        Ok(SpaceReport { total, dirs })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 删除仓库下的构建缓存目录。只允许白名单内的一级子目录，避免误删任意内容。
+#[tauri::command]
+pub async fn delete_cache_dir(path: String, name: String) -> Result<u64, String> {
+    if !CACHE_DIRS.contains(&name.as_str()) {
+        return Err(format!("“{name}”不在可清理目录白名单中"));
+    }
+    let root = std::path::Path::new(&path);
+    if !root.is_dir() {
+        return Err("仓库文件夹不存在".into());
+    }
+    let dir_v = verbatim_path(&root.join(&name));
+    let meta = std::fs::metadata(&dir_v).map_err(|_| "目录不存在".to_string())?;
+    if !meta.is_dir() {
+        return Err("目标不是文件夹".into());
+    }
+    let size = dir_size(&dir_v);
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::remove_dir_all(&dir_v).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "删除失败：目录被占用（可能有编译 / 开发进程正在使用），请先关闭相关程序".to_string()
+            } else {
+                format!("删除失败：{e}")
+            }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(size)
 }
 
 #[cfg(test)]

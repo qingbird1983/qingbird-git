@@ -7,6 +7,10 @@ export interface RepoEntry {
   alias: string;
   added_at: number;
   last_used: number;
+  /** 一键运行：测试命令，空串表示未设置（旧配置可能缺省） */
+  test_cmd?: string;
+  /** 一键运行：构建命令，空串表示未设置 */
+  build_cmd?: string;
 }
 
 export interface RepoStatus {
@@ -94,6 +98,25 @@ export interface LangStat {
   percent: number;
 }
 
+export interface DirSize {
+  name: string;
+  path: string;
+  size: number;
+  /** 属于白名单内的可清理缓存目录 */
+  is_cache: boolean;
+}
+
+export interface SpaceReport {
+  /** 仓库文件夹总占用（字节） */
+  total: number;
+  dirs: DirSize[];
+}
+
+export interface CmdDetect {
+  test_cmd: string;
+  build_cmd: string;
+}
+
 export const api = {
   listRepos: () => invoke<RepoEntry[]>("list_repos"),
   addRepo: (path: string) => invoke<RepoEntry[]>("add_repo", { path }),
@@ -135,6 +158,12 @@ export const api = {
     }),
   openInFolder: (path: string) => invoke<void>("open_in_folder", { path }),
   openInTerminal: (path: string) => invoke<void>("open_in_terminal", { path }),
+  setRepoCmds: (path: string, testCmd: string, buildCmd: string) =>
+    invoke<RepoEntry[]>("set_repo_cmds", { path, testCmd, buildCmd }),
+  detectCmds: (path: string) => invoke<CmdDetect>("detect_cmds", { path }),
+  runRepoCmd: (path: string, cmd: string) => invoke<void>("run_repo_cmd", { path, cmd }),
+  scanRepoSpace: (path: string) => invoke<SpaceReport>("scan_repo_space", { path }),
+  deleteCacheDir: (path: string, name: string) => invoke<number>("delete_cache_dir", { path, name }),
   probe: (addr: string) => invoke<boolean>("probe_proxy", { addr }),
   autostartIsEnabled: () => invoke<boolean>("plugin:autostart|is_enabled"),
   autostartEnable: () => invoke<void>("plugin:autostart|enable"),

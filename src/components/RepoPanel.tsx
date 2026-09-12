@@ -2,9 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { api, remoteHost, type FileChange, type LangStat } from "../api";
 import { useApp } from "../store";
 import HistoryModal from "./HistoryModal";
+import SpaceModal from "./SpaceModal";
+import CmdModal from "./CmdModal";
 import {
   IconCloud, IconCloudDown, IconCloudUp,
   IconFolder, IconTerminal, IconHistory, IconDiff, IconX,
+  IconDisk, IconFlask, IconHammer,
 } from "./icons";
 
 /** 常见语言的显示颜色（对齐 GitHub Linguist 配色） */
@@ -46,13 +49,15 @@ function langColor(name: string): string {
 export default function RepoPanel() {
   const {
     selected, status, busy, progress, logs, changes,
-    checkUpdate, pull, push, commitPush, refreshStatus, openInFolder, openInTerminal,
+    checkUpdate, pull, push, commitPush, refreshStatus, openInFolder, openInTerminal, log,
   } = useApp();
   const [confirmStash, setConfirmStash] = useState(false);
   const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
   const [commitMsg, setCommitMsg] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [showChanges, setShowChanges] = useState(false);
+  const [showSpace, setShowSpace] = useState(false);
+  const [cmdKind, setCmdKind] = useState<"test" | "build" | null>(null);
   const [langs, setLangs] = useState<LangStat[]>([]);
   const repos = useApp((s) => s.repos);
   const logRef = useRef<HTMLDivElement>(null);
@@ -112,6 +117,22 @@ export default function RepoPanel() {
     }
   };
 
+  // 一键运行：已保存命令直接在终端执行，否则弹出设置框（自动识别预填）
+  const runCmd = async (kind: "test" | "build") => {
+    if (!selected) return;
+    const saved = kind === "test" ? repoEntry?.test_cmd : repoEntry?.build_cmd;
+    if (saved && saved.trim()) {
+      try {
+        await api.runRepoCmd(selected, saved.trim());
+        log(`已在终端窗口运行：${saved.trim()}`, "info");
+      } catch (e) {
+        log(String(e), "error");
+      }
+    } else {
+      setCmdKind(kind);
+    }
+  };
+
   if (!selected) {
     return (
       <main className="panel panel-empty">
@@ -153,6 +174,9 @@ export default function RepoPanel() {
             </button>
             <button className="icon-btn" title="提交历史" onClick={() => setShowHistory(true)}>
               <IconHistory size={15} />
+            </button>
+            <button className="icon-btn" title="磁盘空间与缓存清理" onClick={() => setShowSpace(true)}>
+              <IconDisk size={15} />
             </button>
             {st?.is_repo && st.dirty && (
               <span className="changes-anchor">
@@ -236,6 +260,14 @@ export default function RepoPanel() {
           <IconCloudUp size={17} />
           一键推送
         </button>
+        <button className="action-btn pill" disabled={!!busy} onClick={() => void runCmd("test")}>
+          <IconFlask size={17} />
+          跑测试
+        </button>
+        <button className="action-btn pill" disabled={!!busy} onClick={() => void runCmd("build")}>
+          <IconHammer size={17} />
+          构建
+        </button>
       </div>
 
       {confirmStash && (
@@ -310,6 +342,8 @@ export default function RepoPanel() {
       </div>
 
       {showHistory && <HistoryModal onClose={() => setShowHistory(false)} />}
+      {showSpace && <SpaceModal onClose={() => setShowSpace(false)} />}
+      {cmdKind && <CmdModal kind={cmdKind} onClose={() => setCmdKind(null)} />}
 
       {langs.length > 0 && (
         <div className="lang-footer">
