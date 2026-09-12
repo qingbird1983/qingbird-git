@@ -59,6 +59,7 @@ interface AppState {
   cancelOp: () => Promise<void>;
   openInFolder: (path: string) => void;
   openInTerminal: (path: string) => void;
+  openReadme: (path: string) => void;
   scanAll: () => Promise<void>;
   setTheme: (t: ThemeMode) => Promise<void>;
   initTheme: () => Promise<void>;
@@ -327,6 +328,10 @@ export const useApp = create<AppState>((set, get) => ({
 
   openInTerminal: (path) => {
     void api.openInTerminal(path).catch((e) => get().log(String(e), "error"));
+  },
+
+  openReadme: (path) => {
+    void api.openReadme(path).catch((e) => get().log(String(e), "error"));
   },
 
   scanAll: async () => {

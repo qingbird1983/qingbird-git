@@ -3,11 +3,11 @@ import { api, remoteHost, type FileChange, type LangStat } from "../api";
 import { useApp, type LogLine } from "../store";
 import HistoryModal from "./HistoryModal";
 import SpaceModal from "./SpaceModal";
-import CmdModal from "./CmdModal";
+import CmdPanel from "./CmdPanel";
 import {
   IconCloud, IconCloudDown, IconCloudUp,
-  IconFolder, IconTerminal, IconHistory, IconDiff, IconX,
-  IconDisk, IconFlask, IconHammer, IconSync,
+  IconFolder, IconTerminal, IconHistory, IconDiff, IconX, IconFile,
+  IconDisk, IconFlask, IconHammer, IconSync, IconPlay,
 } from "./icons";
 
 /** 常见语言的显示颜色（对齐 GitHub Linguist 配色） */
@@ -53,7 +53,7 @@ const EMPTY_LOGS: LogLine[] = [];
 export default function RepoPanel() {
   const {
     selected, status, busy, cloning, progress, changes,
-    checkUpdate, pull, push, commitPush, refreshStatus, openInFolder, openInTerminal, log, cancelOp,
+    checkUpdate, pull, push, commitPush, refreshStatus, openInFolder, openInTerminal, openReadme, log, cancelOp,
   } = useApp();
   // 日志按仓库分开：只显示当前选中仓库自己的操作日志
   const logs = useApp((s) => (s.selected ? s.logs[s.selected] : undefined) ?? EMPTY_LOGS);
@@ -64,7 +64,7 @@ export default function RepoPanel() {
   const [showChanges, setShowChanges] = useState(false);
   const [showSpace, setShowSpace] = useState(false);
   const [showSync, setShowSync] = useState(false);
-  const [cmdKind, setCmdKind] = useState<"test" | "build" | null>(null);
+  const [showCmd, setShowCmd] = useState(false);
   const [langs, setLangs] = useState<LangStat[]>([]);
   const repos = useApp((s) => s.repos);
   const logRef = useRef<HTMLDivElement>(null);
@@ -125,7 +125,7 @@ export default function RepoPanel() {
     }
   };
 
-  // 一键运行：已保存命令直接在终端执行，否则弹出设置框（自动识别预填）
+  // 一键运行：已保存命令直接在终端执行，否则打开运行命令面板（可修改后保存重跑）
   const runCmd = async (kind: "test" | "build") => {
     if (!selected) return;
     const saved = kind === "test" ? repoEntry?.test_cmd : repoEntry?.build_cmd;
@@ -137,7 +137,7 @@ export default function RepoPanel() {
         log(String(e), "error");
       }
     } else {
-      setCmdKind(kind);
+      setShowCmd(true);
     }
   };
 
@@ -187,6 +187,12 @@ export default function RepoPanel() {
             </button>
             <button className="icon-btn" title="磁盘空间与缓存清理" onClick={() => setShowSpace(true)}>
               <IconDisk size={15} />
+            </button>
+            <button className="icon-btn" title="查看仓库说明（用系统默认程序打开 README）" onClick={() => void openReadme(selected)}>
+              <IconFile size={15} />
+            </button>
+            <button className="icon-btn" title="运行命令（测试 / 构建 / 开发，可修改）" onClick={() => setShowCmd(true)}>
+              <IconPlay size={15} />
             </button>
             {st?.is_repo && st.dirty && (
               <span className="changes-anchor">
@@ -377,7 +383,7 @@ export default function RepoPanel() {
 
       {showHistory && <HistoryModal onClose={() => setShowHistory(false)} />}
       {showSpace && <SpaceModal onClose={() => setShowSpace(false)} />}
-      {cmdKind && <CmdModal kind={cmdKind} onClose={() => setCmdKind(null)} />}
+      {showCmd && <CmdPanel onClose={() => setShowCmd(false)} />}
 
       {langs.length > 0 && (
         <div className="lang-footer">

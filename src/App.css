@@ -1586,6 +1586,38 @@ body {
   color: var(--text-dim);
 }
 
+/* ---------- 运行命令面板：命令行 + 启动按钮 ---------- */
+.cmd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cmd-row .modal-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.cmd-name {
+  flex-shrink: 0;
+  width: 56px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.cmd-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text);
+  padding: 7px 10px;
+  background: var(--bg-inset);
+  border-radius: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- 本次同步内容弹出面板 ---------- */
 .sync-commit-list {
   max-height: 40vh;

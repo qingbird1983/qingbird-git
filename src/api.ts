@@ -115,6 +115,8 @@ export interface SpaceReport {
 export interface CmdDetect {
   test_cmd: string;
   build_cmd: string;
+  dev_cmd: string;
+  install_cmd: string;
 }
 
 export const api = {
@@ -159,6 +161,7 @@ export const api = {
     }),
   openInFolder: (path: string) => invoke<void>("open_in_folder", { path }),
   openInTerminal: (path: string) => invoke<void>("open_in_terminal", { path }),
+  openReadme: (path: string) => invoke<void>("open_readme", { path }),
   cancelBusyOp: () => invoke<void>("cancel_busy_op"),
   setRepoCmds: (path: string, testCmd: string, buildCmd: string) =>
     invoke<RepoEntry[]>("set_repo_cmds", { path, testCmd, buildCmd }),

@@ -1673,6 +1673,32 @@ pub fn open_in_terminal(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 打开仓库根目录的 README 说明文档（调用系统默认 Markdown 关联程序）
+#[tauri::command]
+pub fn open_readme(path: String) -> Result<(), String> {
+    let root = std::path::Path::new(&path);
+    if !root.is_dir() {
+        return Err("仓库文件夹不存在".into());
+    }
+    // 常见命名都识别：大小写变体、.markdown 与无扩展名
+    let candidates = [
+        "README.md",
+        "Readme.md",
+        "readme.md",
+        "README.markdown",
+        "Readme.markdown",
+        "README",
+        "Readme",
+        "readme",
+    ];
+    let readme = candidates
+        .iter()
+        .map(|n| root.join(n))
+        .find(|p| p.is_file())
+        .ok_or_else(|| "仓库根目录未找到 README.md 说明文档".to_string())?;
+    tauri_plugin_opener::open_path(&readme, None::<&str>).map_err(|e| format!("打开 README 失败：{e}"))
+}
+
 #[tauri::command]
 pub fn set_settings(app: tauri::AppHandle, manual_proxy: String) -> Result<(), String> {
     let mut cfg = store::load(&app);
@@ -1868,6 +1894,10 @@ pub fn set_repo_cmds(
 pub struct CmdDetect {
     pub test_cmd: String,
     pub build_cmd: String,
+    /// 开发调试命令（如 pnpm run dev / cargo run），仅预填快捷命令面板
+    pub dev_cmd: String,
+    /// 安装依赖命令（如 pnpm install），仅预填快捷命令面板
+    pub install_cmd: String,
 }
 
 /// 按特征文件自动识别常用的测试 / 构建命令（只做预填，用户可修改后保存）
@@ -1896,6 +1926,10 @@ pub fn detect_cmds(path: String) -> CmdDetect {
                 if scripts.and_then(|s| s.get("build")).is_some() {
                     d.build_cmd = format!("{pm} run build");
                 }
+                if scripts.and_then(|s| s.get("dev")).is_some() {
+                    d.dev_cmd = format!("{pm} run dev");
+                }
+                d.install_cmd = format!("{pm} install");
             }
         }
     }
@@ -1905,11 +1939,17 @@ pub fn detect_cmds(path: String) -> CmdDetect {
     if d.build_cmd.is_empty() && root.join("Cargo.toml").is_file() {
         d.build_cmd = "cargo build --release".into();
     }
+    if d.dev_cmd.is_empty() && root.join("Cargo.toml").is_file() {
+        d.dev_cmd = "cargo run".into();
+    }
     if d.test_cmd.is_empty() && root.join("go.mod").is_file() {
         d.test_cmd = "go test ./...".into();
     }
     if d.build_cmd.is_empty() && root.join("go.mod").is_file() {
         d.build_cmd = "go build ./...".into();
+    }
+    if d.dev_cmd.is_empty() && root.join("main.go").is_file() {
+        d.dev_cmd = "go run .".into();
     }
     if d.test_cmd.is_empty()
         && (root.join("pyproject.toml").is_file()
