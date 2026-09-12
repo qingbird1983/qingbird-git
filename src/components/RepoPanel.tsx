@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { api, remoteHost, type FileChange, type LangStat } from "../api";
-import { useApp } from "../store";
+import { useApp, type LogLine } from "../store";
 import HistoryModal from "./HistoryModal";
 import SpaceModal from "./SpaceModal";
 import CmdModal from "./CmdModal";
 import {
   IconCloud, IconCloudDown, IconCloudUp,
   IconFolder, IconTerminal, IconHistory, IconDiff, IconX,
-  IconDisk, IconFlask, IconHammer,
+  IconDisk, IconFlask, IconHammer, IconSync,
 } from "./icons";
 
 /** 常见语言的显示颜色（对齐 GitHub Linguist 配色） */
@@ -46,17 +46,24 @@ function langColor(name: string): string {
   return LANG_COLORS[name] ?? (name === "其他" ? "#8b949e" : "#6e7681");
 }
 
+// zustand v5 要求选择器返回稳定引用：仓库还没有日志时返回这个共享常量，
+// 不能在 selector 里新建 []，否则 getSnapshot 每次都是新引用导致 React 白屏
+const EMPTY_LOGS: LogLine[] = [];
+
 export default function RepoPanel() {
   const {
-    selected, status, busy, progress, logs, changes,
+    selected, status, busy, progress, changes,
     checkUpdate, pull, push, commitPush, refreshStatus, openInFolder, openInTerminal, log,
   } = useApp();
+  // 日志按仓库分开：只显示当前选中仓库自己的操作日志
+  const logs = useApp((s) => (s.selected ? s.logs[s.selected] : undefined) ?? EMPTY_LOGS);
   const [confirmStash, setConfirmStash] = useState(false);
   const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
   const [commitMsg, setCommitMsg] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [showChanges, setShowChanges] = useState(false);
   const [showSpace, setShowSpace] = useState(false);
+  const [showSync, setShowSync] = useState(false);
   const [cmdKind, setCmdKind] = useState<"test" | "build" | null>(null);
   const [langs, setLangs] = useState<LangStat[]>([]);
   const repos = useApp((s) => s.repos);
@@ -73,6 +80,7 @@ export default function RepoPanel() {
     setFileChanges([]);
     setLangs([]);
     setShowChanges(false);
+    setShowSync(false);
   }, [selected]);
 
   useEffect(() => {
@@ -301,26 +309,42 @@ export default function RepoPanel() {
       )}
 
       {update && !busy && (
-        <div className="update-card">
-          <div className="update-header">
-            <span className="update-title">
-              本次同步内容
-              {host === "gitee" ? "（来自 Gitee）" : host === "github" ? "（来自 GitHub）" : ""}
-            </span>
-            <span className="update-count">{update.commits.length} 个新提交</span>
-          </div>
-          {update.commits.length > 0 && (
-            <ul className="commit-list">
-              {update.commits.slice(0, 10).map((c, i) => (
-                <li key={i} className="commit-line">
-                  {c}
-                </li>
-              ))}
-              {update.commits.length > 10 && <li className="commit-more">…等共 {update.commits.length} 个提交</li>}
-            </ul>
+        <span className="changes-anchor">
+          <button
+            className={`icon-btn has-badge ${showSync ? "icon-btn-active" : ""}`}
+            title={`本次同步内容（${update.commits.length} 个新提交）`}
+            onClick={() => setShowSync((v) => !v)}
+          >
+            <IconSync size={15} />
+            {update.commits.length > 0 && <span className="btn-badge">{update.commits.length}</span>}
+          </button>
+          {showSync && (
+            <div className="commit-popover">
+              <div className="update-header">
+                <span className="commit-title">
+                  本次同步内容
+                  {host === "gitee" ? "（来自 Gitee）" : host === "github" ? "（来自 GitHub）" : ""}
+                </span>
+                <span className="update-count">{update.commits.length} 个新提交</span>
+                <button className="popover-close" title="关闭" onClick={() => setShowSync(false)}>
+                  <IconX size={13} />
+                </button>
+              </div>
+              {update.commits.length === 0 ? (
+                <div className="commit-more">本次没有新提交（可能只是文件变更同步）</div>
+              ) : (
+                <div className="sync-commit-list">
+                  {update.commits.map((c, i) => (
+                    <div key={i} className="sync-commit-line">
+                      {c}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="commit-more">文件变更明细见下方操作日志</div>
+            </div>
           )}
-          {update.diff_stat && <pre className="diff-stat">{update.diff_stat}</pre>}
-        </div>
+        </span>
       )}
 
       <div className="log-area card">

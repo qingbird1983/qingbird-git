@@ -1559,3 +1559,23 @@ body {
   font-size: 12px;
   color: var(--text-dim);
 }
+
+/* ---------- 本次同步内容弹出面板 ---------- */
+.sync-commit-list {
+  max-height: 40vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+
+.sync-commit-line {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.5;
+  padding: 5px 8px;
+  background: var(--bg-inset);
+  border-radius: 6px;
+  word-break: break-word;
+}

@@ -8,6 +8,8 @@ use tauri::Manager;
 
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(10);
 const NET_TIMEOUT: Duration = Duration::from_secs(300);
+/// 检查云端更新只做 fetch + 对比，超时比完整拉取短得多
+const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Serialize, Clone, Default)]
 pub struct RepoStatus {
@@ -184,7 +186,80 @@ fn run_local(repo_path: &str, args: &[&str]) -> git::GitOutput {
     git::run_git(repo_path, args, None, LOCAL_TIMEOUT)
 }
 
-/// 网络型 git 操作的统一入口：先直连，失败且判定为网络问题时自动探测代理重试。
+/// 直连与已知可用代理并行赛跑：谁先成功用谁。
+/// 解决直连被墙时长时间挂起、要等满超时才轮到代理重试的问题。
+fn race_direct_vs_proxy(
+    repo_path: &str,
+    args: &[&str],
+    git_config: &[String],
+    ssh: Option<&str>,
+    proxy_addr: &str,
+    on_line: Option<&dyn Fn(&str)>,
+    timeout: Duration,
+) -> (git::GitOutput, Option<String>) {
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+    let spawn_attempt =
+        |proxy: Option<String>, line_tx: std::sync::mpsc::Sender<String>| {
+            let repo = repo_path.to_string();
+            let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let owned_cfg = git_config.to_vec();
+            let owned_ssh = ssh.map(|s| s.to_string());
+            let git_proxy = proxy.as_deref().map(proxy::to_git_proxy_url);
+            std::thread::spawn(move || {
+                let args: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+                git::run_git_auth(
+                    &repo,
+                    &args,
+                    git_proxy.as_deref(),
+                    timeout,
+                    Some(&|line: &str| {
+                        let _ = line_tx.send(line.to_string());
+                    }),
+                    &owned_cfg,
+                    owned_ssh.as_deref(),
+                )
+            })
+        };
+    let mut t_direct = Some(spawn_attempt(None, line_tx.clone()));
+    let mut t_proxy = Some(spawn_attempt(Some(proxy_addr.to_string()), line_tx));
+    let fail_out = || git::GitOutput {
+        success: false,
+        stdout: String::new(),
+        stderr: "git 进程异常退出".into(),
+        code: -1,
+        timed_out: false,
+    };
+
+    let mut direct_out: Option<git::GitOutput> = None;
+    let mut proxy_out: Option<git::GitOutput> = None;
+    loop {
+        while let Ok(line) = line_rx.try_recv() {
+            if let Some(cb) = on_line {
+                cb(&line);
+            }
+        }
+        if direct_out.is_none() && t_direct.as_ref().is_some_and(|h| h.is_finished()) {
+            direct_out = Some(t_direct.take().unwrap().join().unwrap_or_else(|_| fail_out()));
+            if direct_out.as_ref().unwrap().success {
+                return (direct_out.unwrap(), None);
+            }
+        }
+        if proxy_out.is_none() && t_proxy.as_ref().is_some_and(|h| h.is_finished()) {
+            proxy_out = Some(t_proxy.take().unwrap().join().unwrap_or_else(|_| fail_out()));
+            if proxy_out.as_ref().unwrap().success {
+                return (proxy_out.unwrap(), Some(proxy::to_git_proxy_url(proxy_addr)));
+            }
+        }
+        if direct_out.is_some() && proxy_out.is_some() {
+            // 两路都失败：返回直连结果，交给外层继续走候选代理串行回退
+            return (direct_out.unwrap(), None);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 网络型 git 操作的统一入口：直连优先，失败且判定为网络问题时自动探测代理重试。
+/// 已有验证可用的代理（last_good_proxy）时，直连与该代理并行赛跑取先成功者。
 /// 代理只注入到当次 git 子进程的环境变量，结束即失效，不改系统代理。
 /// auth_url 为参与认证判定的远端地址；None 时取 repo 的 origin。
 /// git_config / ssh 为按平台令牌认证配置（见 build_net_auth）。
@@ -194,6 +269,7 @@ fn run_net_op(
     args: &[&str],
     on_line: Option<&dyn Fn(&str)>,
     auth_url: Option<&str>,
+    timeout: Duration,
 ) -> (git::GitOutput, Option<String>) {
     let cfg = store::load(&app);
     let url = match auth_url {
@@ -201,18 +277,36 @@ fn run_net_op(
         None => remote_url(repo_path),
     };
     let (git_config, ssh) = build_net_auth(&cfg, &url);
-    let direct = git::run_git_auth(repo_path, args, None, NET_TIMEOUT, on_line, &git_config, ssh.as_deref());
+
+    if let Some(last_good) = cfg.last_good_proxy.clone() {
+        let (out, proxy_url) =
+            race_direct_vs_proxy(repo_path, args, &git_config, ssh.as_deref(), &last_good, on_line, timeout);
+        if out.success {
+            if proxy_url.is_some() {
+                let mut cfg = store::load(&app);
+                cfg.last_good_proxy = Some(last_good);
+                let _ = store::save(&app, &cfg);
+            }
+            return (out, proxy_url);
+        }
+    }
+
+    let direct = git::run_git_auth(repo_path, args, None, timeout, on_line, &git_config, ssh.as_deref());
     if direct.success || !git::is_network_error(&direct) {
         return (direct, None);
     }
 
     let candidates = proxy::gather_candidates(&cfg.settings, &cfg.last_good_proxy);
     for candidate in candidates {
+        // 与赛跑阶段已验证失败的代理重复时跳过
+        if Some(&candidate) == cfg.last_good_proxy.as_ref() {
+            continue;
+        }
         if !proxy::probe(&candidate) {
             continue;
         }
         let url = proxy::to_git_proxy_url(&candidate);
-        let out = git::run_git_auth(repo_path, args, Some(&url), NET_TIMEOUT, on_line, &git_config, ssh.as_deref());
+        let out = git::run_git_auth(repo_path, args, Some(&url), timeout, on_line, &git_config, ssh.as_deref());
         if out.success {
             let mut cfg = store::load(&app);
             cfg.last_good_proxy = Some(candidate);
@@ -424,11 +518,21 @@ pub fn repo_status(path: String) -> RepoStatus {
 }
 
 #[tauri::command]
-pub fn check_update(app: tauri::AppHandle, path: String) -> OpResult {
+pub fn check_update(app: tauri::AppHandle, path: String, on_progress: Channel<ProgressEvent>) -> OpResult {
     if !valid_repo(&path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
-    let (fetch_out, used_proxy) = run_net_op(&app, &path, &["fetch", "--all", "--prune"], None, None);
+    let _ = on_progress.send(ProgressEvent {
+        stage: "正在连接远端…".into(),
+        detail: String::new(),
+        percent: None,
+    });
+    let forward = |line: &str| {
+        if let Some(ev) = parse_progress(line) {
+            let _ = on_progress.send(ev);
+        }
+    };
+    let (fetch_out, used_proxy) = run_net_op(&app, &path, &["fetch", "--all", "--prune"], Some(&forward), None, CHECK_TIMEOUT);
     let status = read_status(&path);
     touch_repo(&app, &path);
 
@@ -503,7 +607,7 @@ pub fn pull_repo(
         stashed = true;
     }
 
-    let (pull_out, used_proxy) = run_net_op(&app, &path, &["pull", "--ff-only", "--progress"], Some(&forward), None);
+    let (pull_out, used_proxy) = run_net_op(&app, &path, &["pull", "--ff-only", "--progress"], Some(&forward), None, NET_TIMEOUT);
     log.push_str(&combined(&pull_out));
     let mut status = read_status(&path);
     touch_repo(&app, &path);
@@ -609,7 +713,7 @@ fn do_push(app: &tauri::AppHandle, path: &str) -> OpResult {
     } else {
         vec!["push", "--set-upstream", "origin", "HEAD"]
     };
-    let (push_out, used_proxy) = run_net_op(app, path, &args, None, None);
+    let (push_out, used_proxy) = run_net_op(app, path, &args, None, None, NET_TIMEOUT);
     let status = read_status(path);
     touch_repo(app, path);
 
@@ -1012,7 +1116,7 @@ pub fn create_repo(
             return Err(format!("仓库已创建，但关联远端失败：{}", add.stderr.trim()));
         }
         let push_args: Vec<&str> = vec!["push", "--set-upstream", "origin", "main"];
-        let (push_out, used_proxy) = run_net_op(&app, &dest_str, &push_args, None, Some(&origin));
+        let (push_out, used_proxy) = run_net_op(&app, &dest_str, &push_args, None, Some(&origin), NET_TIMEOUT);
         if !push_out.success {
             message.push_str("，远端已创建，但首次推送失败：");
             message.push_str(push_out.stderr.trim());
@@ -1239,7 +1343,7 @@ pub fn clone_repo(
         }
     };
     let args = ["clone", "--progress", &url, &name];
-    let (out, used_proxy) = run_net_op(&app, parent_dir.trim(), &args, Some(&forward), Some(&url));
+    let (out, used_proxy) = run_net_op(&app, parent_dir.trim(), &args, Some(&forward), Some(&url), NET_TIMEOUT);
     if !out.success {
         let message = if used_proxy.is_none() && git::is_network_error(&out) {
             "克隆失败：无法连接远端，且未找到可用代理".to_string()

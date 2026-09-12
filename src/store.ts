@@ -24,7 +24,8 @@ interface AppState {
   selected: string | null;
   status: Record<string, RepoStatus>;
   busy: string | null;
-  logs: LogLine[];
+  /** 每个仓库独立的操作日志；key 为仓库路径，"_app" 为无选中仓库时的全局日志 */
+  logs: Record<string, LogLine[]>;
   lastProxy: string | null;
   /** 当前显示的代理回退通知（null 表示不显示） */
   proxyToast: ProxyToast | null;
@@ -76,7 +77,7 @@ export const useApp = create<AppState>((set, get) => ({
   selected: null,
   status: {},
   busy: null,
-  logs: [],
+  logs: {},
   lastProxy: null,
   proxyToast: null,
   progress: null,
@@ -152,9 +153,11 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   log: (text, kind = "info") =>
-    set((s) => ({
-      logs: [...s.logs.slice(-500), { time: nowStr(), text, kind }],
-    })),
+    set((s) => {
+      const key = s.selected ?? "_app";
+      const arr = [...(s.logs[key] ?? []).slice(-500), { time: nowStr(), text, kind }];
+      return { logs: { ...s.logs, [key]: arr } };
+    }),
 
   notifyProxy: (proxy) => {
     if (proxyToastTimer) clearTimeout(proxyToastTimer);
@@ -176,8 +179,10 @@ export const useApp = create<AppState>((set, get) => ({
     const path = get().selected;
     if (!path || get().busy) return;
     get().setBusy("正在检查云端更新…");
+    const channel = new Channel<ProgressEvent>();
+    channel.onmessage = (p) => get().setProgress(p);
     try {
-      const r = await api.checkUpdate(path);
+      const r = await api.checkUpdate(path, channel);
       get().log(r.output.trim() || "(无输出)");
       get().log(r.message, r.ok ? "success" : "error");
       if (r.used_proxy) {
@@ -190,6 +195,7 @@ export const useApp = create<AppState>((set, get) => ({
       get().log(String(e), "error");
     } finally {
       get().setBusy(null);
+      get().setProgress(null);
     }
   },
 

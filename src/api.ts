@@ -126,7 +126,8 @@ export const api = {
   initRepo: (path: string, excludes: string[]) => invoke<RepoEntry>("init_repo", { path, excludes }),
   languages: (path: string) => invoke<LangStat[]>("repo_languages", { path }),
   status: (path: string) => invoke<RepoStatus>("repo_status", { path }),
-  checkUpdate: (path: string) => invoke<OpResult>("check_update", { path }),
+  checkUpdate: (path: string, onProgress: Channel<ProgressEvent>) =>
+    invoke<OpResult>("check_update", { path, onProgress }),
   pull: (path: string, stash: boolean, onProgress: Channel<ProgressEvent>) =>
     invoke<OpResult>("pull_repo", { path, stash, onProgress }),
   push: (path: string) => invoke<OpResult>("push_repo", { path }),
