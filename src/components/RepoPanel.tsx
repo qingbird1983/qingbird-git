@@ -1,50 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { api, remoteHost, type FileChange, type LangStat } from "../api";
-import { useApp, type LogLine } from "../store";
+import { api, remoteHost, type FileChange } from "../api";
+import { useApp, autoSyncLabel, AUTO_SYNC_OPTIONS, AUTO_SYNC_DAILY, type LogLine } from "../store";
 import HistoryModal from "./HistoryModal";
-import SpaceModal from "./SpaceModal";
 import CmdPanel from "./CmdPanel";
 import {
   IconCloud, IconCloudDown, IconCloudUp,
   IconFolder, IconTerminal, IconHistory, IconDiff, IconX, IconFile,
-  IconDisk, IconFlask, IconHammer, IconSync, IconPlay,
+  IconFlask, IconHammer, IconSync, IconPlay, IconClock,
 } from "./icons";
-
-/** 常见语言的显示颜色（对齐 GitHub Linguist 配色） */
-const LANG_COLORS: Record<string, string> = {
-  Rust: "#dea584",
-  TypeScript: "#3178c6",
-  JavaScript: "#f1e05a",
-  Python: "#3572A5",
-  Go: "#00ADD8",
-  Java: "#b07219",
-  Kotlin: "#A97BFF",
-  Swift: "#F05138",
-  Ruby: "#701516",
-  PHP: "#4F5D95",
-  C: "#555555",
-  "C++": "#f34b7d",
-  "C#": "#178600",
-  "Objective-C": "#438eff",
-  Scala: "#c22d40",
-  Dart: "#00B4AB",
-  Lua: "#000080",
-  HTML: "#e34c26",
-  Vue: "#41b883",
-  Svelte: "#ff3e00",
-  CSS: "#663399",
-  SCSS: "#c6538c",
-  Less: "#1d365d",
-  Shell: "#89e051",
-  PowerShell: "#012456",
-  SQL: "#e38c00",
-  Zig: "#ec915c",
-  Solidity: "#AA6746",
-};
-
-function langColor(name: string): string {
-  return LANG_COLORS[name] ?? (name === "其他" ? "#8b949e" : "#6e7681");
-}
 
 // zustand v5 要求选择器返回稳定引用：仓库还没有日志时返回这个共享常量，
 // 不能在 selector 里新建 []，否则 getSnapshot 每次都是新引用导致 React 白屏
@@ -54,7 +17,7 @@ export default function RepoPanel() {
   const {
     selected, status, busy, cloning, cmdRunning, progress, changes,
     checkUpdate, pull, push, commitPush, runRepoCmd, stopRepoCmd,
-    openInFolder, openInTerminal, openReadme, cancelOp,
+    openInFolder, openInTerminal, openReadme, cancelOp, setAutoSync,
   } = useApp();
   // 日志按仓库分开：只显示当前选中仓库自己的操作日志
   const logs = useApp((s) => (s.selected ? s.logs[s.selected] : undefined) ?? EMPTY_LOGS);
@@ -63,10 +26,9 @@ export default function RepoPanel() {
   const [commitMsg, setCommitMsg] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [showChanges, setShowChanges] = useState(false);
-  const [showSpace, setShowSpace] = useState(false);
   const [showSync, setShowSync] = useState(false);
   const [showCmd, setShowCmd] = useState(false);
-  const [langs, setLangs] = useState<LangStat[]>([]);
+  const [showAutoSync, setShowAutoSync] = useState(false);
   const repos = useApp((s) => s.repos);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -79,23 +41,14 @@ export default function RepoPanel() {
     setConfirmStash(false);
     setCommitMsg("");
     setFileChanges([]);
-    setLangs([]);
     setShowChanges(false);
     setShowSync(false);
+    setShowAutoSync(false);
   }, [selected]);
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [logs]);
-
-  // 选中仓库后拉取语言构成
-  useEffect(() => {
-    if (selected && st?.is_repo) {
-      void api.languages(selected).then(setLangs).catch(() => setLangs([]));
-    } else {
-      setLangs([]);
-    }
-  }, [selected, st?.is_repo]);
 
   // 有未提交变更时拉取变更文件列表
   useEffect(() => {
@@ -141,7 +94,9 @@ export default function RepoPanel() {
     return (
       <main className="panel panel-empty">
         <div className="empty-big">
-          <div className="empty-logo">git</div>
+          <div className="empty-logo" aria-hidden>
+            青
+          </div>
           选择或添加一个仓库开始使用
           <div className="empty-sub">支持本地文件夹、拖拽添加、粘贴地址克隆、一键新建仓库（GitHub / Gitee）</div>
         </div>
@@ -153,6 +108,28 @@ export default function RepoPanel() {
   const progressPct = progress?.percent != null ? Math.min(100, progress.percent) : null;
   // 网络操作（检测/拉取/推送/提交推送）与克隆互斥：取消标记与代理缓存是全局的
   const netBusy = !!busy || !!cloning;
+  // 定时自动同步（仅对此仓库生效）：间隔模式或每天定时模式
+  const autoMins = repoEntry?.auto_sync_mins ?? 0;
+  const autoDaily = repoEntry?.daily_time ?? "";
+  const autoOn = autoMins > 0 || !!autoDaily;
+  const autoPullOn = repoEntry?.auto_pull ?? false;
+  const lastAutoCheck = repoEntry?.last_auto_check ?? 0;
+  const lastAutoResult = (repoEntry?.last_auto_result ?? "").replace(/^[a-z]+:/, "");
+  const lastCheckText =
+    lastAutoCheck > 0
+      ? (() => {
+          const mins = Math.max(1, Math.round(Date.now() / 1000 - lastAutoCheck));
+          return mins < 60 ? `${mins} 分钟前` : `${Math.round(mins / 60)} 小时前`;
+        })()
+      : null;
+  // 切换档位：每天定时首次点入默认 09:00，切回间隔模式清空时间点
+  const applyAutoSync = (mins: number) => {
+    if (mins === AUTO_SYNC_DAILY) {
+      void setAutoSync(selected, 0, autoPullOn, autoDaily || "09:00");
+    } else {
+      void setAutoSync(selected, mins, autoPullOn, "");
+    }
+  };
 
   return (
     <main className="panel">
@@ -181,15 +158,124 @@ export default function RepoPanel() {
             <button className="icon-btn" title="提交历史" onClick={() => setShowHistory(true)}>
               <IconHistory size={15} />
             </button>
-            <button className="icon-btn" title="磁盘空间与缓存清理" onClick={() => setShowSpace(true)}>
-              <IconDisk size={15} />
-            </button>
             <button className="icon-btn" title="查看仓库说明（用系统默认程序打开 README）" onClick={() => void openReadme(selected)}>
               <IconFile size={15} />
             </button>
             <button className="icon-btn" title="运行命令（测试 / 构建 / 开发，可修改）" onClick={() => setShowCmd(true)}>
               <IconPlay size={15} />
             </button>
+            <span className="changes-anchor">
+              <button
+                className={`icon-btn ${autoOn ? "auto-on" : ""} ${showAutoSync ? "icon-btn-active" : ""}`}
+                title={
+                  autoOn
+                    ? `定时自动同步：${autoSyncLabel(autoMins, autoDaily)}（仅此仓库，点击设置）`
+                    : "定时自动同步（仅此仓库，点击设置）"
+                }
+                onClick={() => setShowAutoSync((v) => !v)}
+              >
+                <IconClock size={15} />
+              </button>
+              {showAutoSync && (
+                <div className="commit-popover auto-sync-pop">
+                  <div className="update-header">
+                    <span className="commit-title">定时自动同步</span>
+                    <button className="popover-close" title="关闭" onClick={() => setShowAutoSync(false)}>
+                      <IconX size={13} />
+                    </button>
+                  </div>
+                  <p className="auto-sync-desc">
+                    在后台按间隔检测云端更新（自动走直连/代理回退），仅对此仓库生效；
+                    只做快进合并（--ff-only），本地分叉或有未提交变更时不会动你的代码。
+                  </p>
+                  <div className="segmented auto-sync-seg">
+                    {AUTO_SYNC_OPTIONS.map((o) => (
+                      <button
+                        key={o.mins}
+                        className={`segment ${
+                          (o.mins === AUTO_SYNC_DAILY ? !!autoDaily : autoMins === o.mins)
+                            ? "segment-active"
+                            : ""
+                        }`}
+                        onClick={() => applyAutoSync(o.mins)}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                  {autoDaily && (
+                    <div className="auto-sync-daily-row">
+                      <span>每天执行时刻</span>
+                      <input
+                        type="time"
+                        className="auto-sync-time"
+                        value={autoDaily}
+                        onChange={(e) => void setAutoSync(selected, 0, autoPullOn, e.target.value)}
+                      />
+                    </div>
+                  )}
+                  <label className="switch-row auto-sync-switch">
+                    <span>检测到更新后自动拉取</span>
+                    <button
+                      className={`switch ${autoPullOn ? "on" : ""}`}
+                      role="switch"
+                      aria-checked={autoPullOn}
+                      title={autoOn ? undefined : "请先选择间隔或每天定时开启"}
+                      onClick={() => {
+                        if (autoOn) void setAutoSync(selected, autoMins, !autoPullOn, autoDaily);
+                      }}
+                    >
+                      <span className="switch-knob" />
+                    </button>
+                  </label>
+                  <div className="auto-sync-meta">
+                    {lastCheckText
+                      ? `上次自动检查：${lastCheckText}${lastAutoResult ? ` · ${lastAutoResult}` : ""}`
+                      : autoOn
+                        ? "已开启，稍后自动进行首次检查"
+                        : "尚未开启，选择间隔或每天定时即可启用"}
+                  </div>
+                </div>
+              )}
+            </span>
+            {update && !busy && (
+              <span className="changes-anchor">
+                <button
+                  className={`icon-btn has-badge ${showSync ? "icon-btn-active" : ""}`}
+                  title={`本次同步内容（${update.commits.length} 个新提交）`}
+                  onClick={() => setShowSync((v) => !v)}
+                >
+                  <IconSync size={15} />
+                  {update.commits.length > 0 && <span className="btn-badge">{update.commits.length}</span>}
+                </button>
+                {showSync && (
+                  <div className="commit-popover">
+                    <div className="update-header">
+                      <span className="commit-title">
+                        本次同步内容
+                        {host === "gitee" ? "（来自 Gitee）" : host === "github" ? "（来自 GitHub）" : ""}
+                      </span>
+                      <span className="update-count">{update.commits.length} 个新提交</span>
+                      <button className="popover-close" title="关闭" onClick={() => setShowSync(false)}>
+                        <IconX size={13} />
+                      </button>
+                    </div>
+                    {update.commits.length === 0 ? (
+                      <div className="commit-more">本次没有新提交（可能只是文件变更同步）</div>
+                    ) : (
+                      <div className="sync-commit-list">
+                        {update.commits.map((c, i) => (
+                          <div key={i} className="sync-commit-line">
+                            {c}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="commit-more">文件变更明细见下方操作日志</div>
+                  </div>
+                )}
+              </span>
+            )}
             {st?.is_repo && st.dirty && (
               <span className="changes-anchor">
                 <button
@@ -297,7 +383,7 @@ export default function RepoPanel() {
       )}
 
       {(busy || cloning) && (
-        <div className="busy-bar">
+        <div className="busy-pop">
           <div className="busy-row">
             <span className="spinner" />
             <span>
@@ -318,45 +404,6 @@ export default function RepoPanel() {
             取消
           </button>
         </div>
-      )}
-
-      {update && !busy && (
-        <span className="changes-anchor">
-          <button
-            className={`icon-btn has-badge ${showSync ? "icon-btn-active" : ""}`}
-            title={`本次同步内容（${update.commits.length} 个新提交）`}
-            onClick={() => setShowSync((v) => !v)}
-          >
-            <IconSync size={15} />
-            {update.commits.length > 0 && <span className="btn-badge">{update.commits.length}</span>}
-          </button>
-          {showSync && (
-            <div className="commit-popover">
-              <div className="update-header">
-                <span className="commit-title">
-                  本次同步内容
-                  {host === "gitee" ? "（来自 Gitee）" : host === "github" ? "（来自 GitHub）" : ""}
-                </span>
-                <span className="update-count">{update.commits.length} 个新提交</span>
-                <button className="popover-close" title="关闭" onClick={() => setShowSync(false)}>
-                  <IconX size={13} />
-                </button>
-              </div>
-              {update.commits.length === 0 ? (
-                <div className="commit-more">本次没有新提交（可能只是文件变更同步）</div>
-              ) : (
-                <div className="sync-commit-list">
-                  {update.commits.map((c, i) => (
-                    <div key={i} className="sync-commit-line">
-                      {c}
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="commit-more">文件变更明细见下方操作日志</div>
-            </div>
-          )}
-        </span>
       )}
 
       <div className="log-area card">
@@ -382,31 +429,7 @@ export default function RepoPanel() {
       </div>
 
       {showHistory && <HistoryModal onClose={() => setShowHistory(false)} />}
-      {showSpace && <SpaceModal onClose={() => setShowSpace(false)} />}
       {showCmd && <CmdPanel onClose={() => setShowCmd(false)} />}
-
-      {langs.length > 0 && (
-        <div className="lang-footer">
-          <div className="lang-bar">
-            {langs.map((l) => (
-              <span
-                key={l.language}
-                className="lang-seg"
-                style={{ width: `${l.percent}%`, background: langColor(l.language) }}
-                title={`${l.language} ${l.percent.toFixed(1)}%`}
-              />
-            ))}
-          </div>
-          <div className="lang-legend">
-            {langs.map((l) => (
-              <span key={l.language} className="lang-item">
-                <span className="lang-dot" style={{ background: langColor(l.language) }} />
-                {l.language} <b>{l.percent.toFixed(1)}%</b>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
     </main>
   );
 }

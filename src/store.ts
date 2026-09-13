@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { api, remoteHost, type ProgressEvent, type RepoEntry, type RepoStatus, type UpdateChanges } from "./api";
+import { api, remoteHost, type AutoSyncEvent, type ProgressEvent, type RepoEntry, type RepoStatus, type UpdateChanges } from "./api";
 
 export interface LogLine {
   time: string;
@@ -17,7 +17,15 @@ export interface ProxyToast {
   at: number;
 }
 
+/** 定时自动同步结果通知（后台推送，自动消失） */
+export interface AutoToast {
+  text: string;
+  kind: "info" | "warn" | "error";
+  at: number;
+}
+
 let proxyToastTimer: ReturnType<typeof setTimeout> | null = null;
+let autoToastTimer: ReturnType<typeof setTimeout> | null = null;
 
 interface AppState {
   repos: RepoEntry[];
@@ -33,6 +41,8 @@ interface AppState {
   lastProxy: string | null;
   /** 当前显示的代理回退通知（null 表示不显示） */
   proxyToast: ProxyToast | null;
+  /** 当前定时自动同步结果通知（null 表示不显示） */
+  autoToast: AutoToast | null;
   /** 当前拉取/克隆进度（busy 时有值） */
   progress: ProgressEvent | null;
   /** 每个仓库最近一次拉取的更新内容 */
@@ -40,6 +50,16 @@ interface AppState {
   theme: ThemeMode;
   /** 有文件夹拖入窗口时为 true（显示拖放提示层） */
   dragging: boolean;
+  /** 侧栏展开/收起（会话级，不落盘） */
+  sidebarOpen: boolean;
+  toggleSidebar: () => void;
+  /** 设置弹窗开关（标题栏设置按钮与 App 弹窗层共用） */
+  settingsOpen: boolean;
+  openSettings: () => void;
+  closeSettings: () => void;
+  /** 侧栏宽度（拖宽条可调，clamp 到 SIDEBAR_MIN_W..SIDEBAR_MAX_W；localStorage 记忆） */
+  sidebarWidth: number;
+  setSidebarWidth: (w: number) => void;
   loadRepos: () => Promise<void>;
   select: (path: string | null) => void;
   refreshStatus: (path: string) => Promise<void>;
@@ -47,10 +67,15 @@ interface AppState {
   removeRepo: (path: string) => Promise<void>;
   renameRepo: (path: string, alias: string) => Promise<void>;
   setRepoCmds: (path: string, testCmd: string, buildCmd: string) => Promise<void>;
+  pinRepo: (path: string, pinned: boolean) => Promise<void>;
+  setAutoSync: (path: string, mins: number, autoPull: boolean, dailyTime?: string) => Promise<void>;
   log: (text: string, kind?: LogLine["kind"], key?: string) => void;
   /** 弹出代理回退通知（约 6 秒后自动消失） */
   notifyProxy: (proxy: string) => void;
   dismissProxy: () => void;
+  /** 弹出定时自动同步结果通知（约 8 秒后自动消失） */
+  notifyAuto: (text: string, kind?: AutoToast["kind"]) => void;
+  dismissAuto: () => void;
   setBusy: (op: string | null) => void;
   setProgress: (p: ProgressEvent | null) => void;
   checkUpdate: () => Promise<void>;
@@ -65,6 +90,8 @@ interface AppState {
   openInFolder: (path: string) => void;
   openInTerminal: (path: string) => void;
   openReadme: (path: string) => void;
+  /** 用系统默认浏览器打开仓库的云端主页（GitHub / Gitee） */
+  openRepoWebsite: (path: string) => void;
   scanAll: () => Promise<void>;
   setTheme: (t: ThemeMode) => Promise<void>;
   initTheme: () => Promise<void>;
@@ -72,6 +99,26 @@ interface AppState {
 
 function nowStr() {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+/** 仓库列表统一排序（原地）：置顶优先，其余按最近使用自动靠前 */
+export function sortRepos(repos: RepoEntry[]): RepoEntry[] {
+  return repos.sort(
+    (a, b) =>
+      Number(b.pinned ?? false) - Number(a.pinned ?? false) || b.last_used - a.last_used,
+  );
+}
+
+/** 侧栏宽度上下限（App.tsx 的拖宽条与 store 双重 clamp） */
+export const SIDEBAR_MIN_W = 300;
+export const SIDEBAR_MAX_W = 440;
+const SIDEBAR_DEFAULT_W = 300;
+const SIDEBAR_W_KEY = "qingbird.sidebarWidth";
+
+function loadSidebarWidth(): number {
+  const raw = Number(localStorage.getItem(SIDEBAR_W_KEY));
+  if (!Number.isFinite(raw) || raw <= 0) return SIDEBAR_DEFAULT_W;
+  return Math.min(SIDEBAR_MAX_W, Math.max(SIDEBAR_MIN_W, raw));
 }
 
 export function applyThemeClass(mode: ThemeMode) {
@@ -91,18 +138,29 @@ export const useApp = create<AppState>((set, get) => ({
   logs: {},
   lastProxy: null,
   proxyToast: null,
+  autoToast: null,
   progress: null,
   changes: {},
   theme: "dark",
   dragging: false,
+  sidebarOpen: true,
+  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+  settingsOpen: false,
+  openSettings: () => set({ settingsOpen: true }),
+  closeSettings: () => set({ settingsOpen: false }),
+  sidebarWidth: loadSidebarWidth(),
+  setSidebarWidth: (w) => {
+    const clamped = Math.min(SIDEBAR_MAX_W, Math.max(SIDEBAR_MIN_W, Math.round(w)));
+    localStorage.setItem(SIDEBAR_W_KEY, String(clamped));
+    set({ sidebarWidth: clamped });
+  },
 
   loadRepos: async () => {
     const repos = await api.listRepos();
     // 按最后使用时间倒序，最近使用的排前面
-    repos.sort((a, b) => b.last_used - a.last_used);
+    sortRepos(repos);
     set({ repos });
-    const selected = get().selected;
-    if (!selected && repos.length > 0) {
+    const selected = get().selected;    if (!selected && repos.length > 0) {
       get().select(repos[0].path);
     }
   },
@@ -126,7 +184,7 @@ export const useApp = create<AppState>((set, get) => ({
   addRepoByPath: async (path) => {
     try {
       const repos = await api.addRepo(path);
-      repos.sort((a, b) => b.last_used - a.last_used);
+      sortRepos(repos);
       set({ repos });
       get().select(path);
       get().log(`已添加仓库：${path}`, "success");
@@ -139,7 +197,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   removeRepo: async (path) => {
     const repos = await api.removeRepo(path);
-    repos.sort((a, b) => b.last_used - a.last_used);
+    sortRepos(repos);
     const status = { ...get().status };
     delete status[path];
     const changes = { ...get().changes };
@@ -153,20 +211,56 @@ export const useApp = create<AppState>((set, get) => ({
 
   renameRepo: async (path, alias) => {
     const repos = await api.renameRepo(path, alias);
-    repos.sort((a, b) => b.last_used - a.last_used);
+    sortRepos(repos);
     set({ repos });
   },
 
   setRepoCmds: async (path, testCmd, buildCmd) => {
     const repos = await api.setRepoCmds(path, testCmd, buildCmd);
-    repos.sort((a, b) => b.last_used - a.last_used);
+    sortRepos(repos);
+    set({ repos });
+  },
+
+  setAutoSync: async (path, mins, autoPull, dailyTime = "") => {
+    const repos = await api.setAutoSync(path, mins, autoPull, dailyTime);
+    sortRepos(repos);
+    set({ repos });
+    const on = mins > 0 || !!dailyTime;
+    if (on) {
+      const label = dailyTime ? `每天 ${dailyTime}` : `每 ${autoSyncLabel(mins)}`;
+      get().log(
+        `已开启定时自动同步（${label}），${autoPull ? "检测到更新后自动拉取" : "仅检测提醒，不自动拉取"}`,
+        "success",
+        path,
+      );
+    } else {
+      get().log("已关闭定时自动同步", "info", path);
+    }
+  },
+
+  pinRepo: async (path, pinned) => {
+    const repos = await api.pinRepo(path, pinned);
+    sortRepos(repos);
     set({ repos });
   },
 
   log: (text, kind = "info", key) =>
     set((s) => {
       const k = key ?? s.selected ?? "_app";
-      const arr = [...(s.logs[k] ?? []).slice(-500), { time: nowStr(), text, kind }];
+      // git 的进度信息用 \r 在终端里原地刷新；整段 stderr 进日志时会把一堆
+      // 进度片段挤在同一行。折叠规则：每个 \n 行只保留它最后一个 \r 段
+      //（即该行的终态，如 "Counting objects: 100% (33/33), done."），
+      // 与终端最终显示一致。
+      const collapsed = text
+        .split("\n")
+        .map((ln) => {
+          const i = ln.lastIndexOf("\r");
+          return (i >= 0 ? ln.slice(i + 1) : ln).trimEnd();
+        })
+        .filter((ln) => ln.trim() !== "")
+        .join("\n");
+      if (!collapsed) return {};
+      const arr = [...(s.logs[k] ?? []).slice(-500), { time: nowStr(), text: collapsed, kind }];
       return { logs: { ...s.logs, [k]: arr } };
     }),
 
@@ -180,6 +274,18 @@ export const useApp = create<AppState>((set, get) => ({
     if (proxyToastTimer) clearTimeout(proxyToastTimer);
     proxyToastTimer = null;
     set({ proxyToast: null });
+  },
+
+  notifyAuto: (text, kind = "info") => {
+    if (autoToastTimer) clearTimeout(autoToastTimer);
+    set({ autoToast: { text, kind, at: Date.now() } });
+    autoToastTimer = setTimeout(() => set({ autoToast: null }), 8000);
+  },
+
+  dismissAuto: () => {
+    if (autoToastTimer) clearTimeout(autoToastTimer);
+    autoToastTimer = null;
+    set({ autoToast: null });
   },
 
   setBusy: (op) => set({ busy: op, progress: op ? get().progress : null }),
@@ -287,7 +393,7 @@ export const useApp = create<AppState>((set, get) => ({
     void (async () => {
       try {
         const r = await api.clone(url, parentDir, channel, netMode);
-        r.repos.sort((a, b) => b.last_used - a.last_used);
+        sortRepos(r.repos);
         set({ repos: r.repos });
         get().select(r.path);
         get().log(`克隆完成，已自动添加仓库：${r.path}`, "success", target);
@@ -361,6 +467,10 @@ export const useApp = create<AppState>((set, get) => ({
     void api.openReadme(path).catch((e) => get().log(String(e), "error"));
   },
 
+  openRepoWebsite: (path) => {
+    void api.openRepoWebsite(path).catch((e) => get().log(String(e), "error"));
+  },
+
   scanAll: async () => {
     if (get().busy) return;
     const n = get().repos.length;
@@ -414,5 +524,49 @@ export const useApp = create<AppState>((set, get) => ({
 export function listenTrayScan() {
   return listen("scan-all", () => {
     void useApp.getState().scanAll();
+  });
+}
+
+/** 自动同步间隔档位；mins = -1 表示"每天定时"模式（时间点由 daily_time 指定） */
+export const AUTO_SYNC_OPTIONS = [
+  { mins: 0, label: "关闭" },
+  { mins: 15, label: "15分钟" },
+  { mins: 30, label: "30分钟" },
+  { mins: 60, label: "1小时" },
+  { mins: 360, label: "6小时" },
+  { mins: 720, label: "12小时" },
+  { mins: -1, label: "每天定时" },
+];
+
+/** 每天定时模式的档位哨兵值 */
+export const AUTO_SYNC_DAILY = -1;
+
+/** 档位展示文案；每天定时模式显示时间点，如 "每天 09:30" */
+export function autoSyncLabel(mins: number, dailyTime?: string): string {
+  if (dailyTime) return `每天 ${dailyTime}`;
+  return AUTO_SYNC_OPTIONS.find((o) => o.mins === mins)?.label ?? `${mins}分钟`;
+}
+
+/** 监听后台定时自动同步事件：更新仓库列表 / 更新卡片 / 日志与通知 */
+export function listenAutoSync() {
+  return listen<AutoSyncEvent>("auto-sync-event", (e) => {
+    const ev = e.payload;
+    const { repos } = ev;
+    sortRepos(repos);
+    useApp.setState({ repos });
+    if (ev.kind === "pulled") {
+      useApp.setState((s) => ({
+        changes: {
+          ...s.changes,
+          [ev.path]: { commits: ev.commits, diff_stat: ev.diff_stat },
+        },
+      }));
+    }
+    const { log, notifyAuto, refreshStatus } = useApp.getState();
+    log(`[自动同步] ${ev.message}`, ev.kind === "error" ? "error" : ev.kind === "ok" ? "info" : "success", ev.path);
+    if (ev.kind !== "ok") {
+      notifyAuto(`「${ev.name}」${ev.message}`, ev.kind === "error" ? "error" : "info");
+    }
+    void refreshStatus(ev.path);
   });
 }

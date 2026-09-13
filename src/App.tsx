@@ -1,20 +1,46 @@
 import { useEffect, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import TitleBar from "./components/TitleBar";
 import RepoList from "./components/RepoList";
 import RepoPanel from "./components/RepoPanel";
+import LangFooter from "./components/LangFooter";
 import SettingsModal from "./components/SettingsModal";
 import CloneModal from "./components/CloneModal";
 import NewRepoModal from "./components/NewRepoModal";
 import InitRepoModal from "./components/InitRepoModal";
-import { useApp, listenTrayScan } from "./store";
-import { IconCloudDown, IconX } from "./components/icons";
+import { useApp, listenTrayScan, listenAutoSync } from "./store";
+import { IconCloudDown, IconSync, IconX } from "./components/icons";
 import "./App.css";
+
+const SIDEBAR_DEFAULT_W = 300;
 
 function App() {
   const { loadRepos, initTheme, addRepoByPath, log } = useApp();
   const proxyToast = useApp((s) => s.proxyToast);
   const dismissProxy = useApp((s) => s.dismissProxy);
-  const [showSettings, setShowSettings] = useState(false);
+  const autoToast = useApp((s) => s.autoToast);
+  const dismissAuto = useApp((s) => s.dismissAuto);
+  // 侧栏常挂载 + 宽度/透明度过渡做平滑收展（--panel-anim）；
+  // 内容包在 .panel-clip 里保持固定宽，收缩时只被裁切不被挤压。
+  // 开关入口在自建标题栏的品牌印章钮上（TitleBar.tsx）。
+  // 拖宽条可调宽度（SIDEBAR_MIN_W..SIDEBAR_MAX_W）；拖拽中关掉过渡避免跟手延迟。
+  const sidebarOpen = useApp((s) => s.sidebarOpen);
+  const sidebarWidth = useApp((s) => s.sidebarWidth);
+  const showSettings = useApp((s) => s.settingsOpen);
+  const [resizing, setResizing] = useState(false);
+
+  const startResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setResizing(true);
+    const onMove = (ev: MouseEvent) => useApp.getState().setSidebarWidth(ev.clientX);
+    const onUp = () => {
+      setResizing(false);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
   const [showClone, setShowClone] = useState(false);
   const [showNew, setShowNew] = useState(false);
   const [initPath, setInitPath] = useState<string | null>(null);
@@ -22,7 +48,7 @@ function App() {
   useEffect(() => {
     void loadRepos();
     void initTheme();
-    const unlisteners: Promise<() => void>[] = [listenTrayScan()];
+    const unlisteners: Promise<() => void>[] = [listenTrayScan(), listenAutoSync()];
 
     // 拖拽文件夹到窗口任意位置即可添加仓库
     unlisteners.push(
@@ -68,14 +94,37 @@ function App() {
 
   return (
     <div className="app">
-      <RepoList
-        onOpenClone={() => setShowClone(true)}
-        onOpenNew={() => setShowNew(true)}
-        onOpenSettings={() => setShowSettings(true)}
-        onNeedInit={(p) => setInitPath(p)}
-      />
-      <RepoPanel />
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      <TitleBar />
+      <div className="app-body">
+        <aside
+          className={`sidebar${resizing ? " resizing" : ""}`}
+          style={{
+            width: sidebarOpen ? sidebarWidth : 0,
+            opacity: sidebarOpen ? 1 : 0,
+          }}
+        >
+          <div className="panel-clip" style={{ width: sidebarWidth }}>
+            <RepoList
+              onOpenClone={() => setShowClone(true)}
+              onOpenNew={() => setShowNew(true)}
+              onNeedInit={(p) => setInitPath(p)}
+            />
+          </div>
+        </aside>
+        {/* 拖宽条：骑在侧栏右缝上，按住左右拖调宽，双击恢复默认宽度 */}
+        {sidebarOpen && (
+          <div
+            className={`app-resizer${resizing ? " active" : ""}`}
+            title="拖动调整仓库栏宽度（双击恢复默认）"
+            onMouseDown={startResize}
+            onDoubleClick={() => useApp.getState().setSidebarWidth(SIDEBAR_DEFAULT_W)}
+          />
+        )}
+        <RepoPanel />
+      </div>
+      {/* 语言统计页脚：全窗通铺（仓库栏下方 → 右缘），底色与仓库栏一致 */}
+      <LangFooter />
+      {showSettings && <SettingsModal onClose={useApp.getState().closeSettings} />}
       {showClone && <CloneModal onClose={() => setShowClone(false)} />}
       {showNew && <NewRepoModal onClose={() => setShowNew(false)} />}
       {initPath && <InitRepoModal path={initPath} onClose={() => setInitPath(null)} />}
@@ -84,6 +133,15 @@ function App() {
           <IconCloudDown size={15} className="proxy-toast-icon" />
           <span className="proxy-toast-text">{proxyToast.text}</span>
           <button className="proxy-toast-close" title="关闭" onClick={dismissProxy}>
+            <IconX size={11} />
+          </button>
+        </div>
+      )}
+      {autoToast && (
+        <div className={`proxy-toast auto-toast-${autoToast.kind}`} key={autoToast.at}>
+          <IconSync size={15} className="proxy-toast-icon" />
+          <span className="proxy-toast-text">{autoToast.text}</span>
+          <button className="proxy-toast-close" title="关闭" onClick={dismissAuto}>
             <IconX size={11} />
           </button>
         </div>

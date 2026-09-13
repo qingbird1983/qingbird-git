@@ -11,6 +11,18 @@ export interface RepoEntry {
   test_cmd?: string;
   /** 一键运行：构建命令，空串表示未设置 */
   build_cmd?: string;
+  /** 定时自动同步间隔（分钟），0 = 关闭或"每天定时"模式（旧配置可能缺省） */
+  auto_sync_mins?: number;
+  /** "每天定时"模式的执行时刻（本地时区 "HH:MM"），非空即每天定时模式 */
+  daily_time?: string;
+  /** 检测到云端更新后是否自动拉取 */
+  auto_pull?: boolean;
+  /** 上次自动检查时间戳（秒），0 表示从未跑过 */
+  last_auto_check?: number;
+  /** 上次自动同步结果摘要（"ok:…" / "behind:…" / "skip:…" / "err:…"） */
+  last_auto_result?: string;
+  /** 用户置顶：排在列表最前（旧配置可能缺省） */
+  pinned?: boolean;
 }
 
 export interface RepoStatus {
@@ -119,6 +131,17 @@ export interface CmdDetect {
   install_cmd: string;
 }
 
+/** 后台定时自动同步的事件（scheduler.rs 推送） */
+export interface AutoSyncEvent {
+  path: string;
+  name: string;
+  kind: "pulled" | "behind" | "ok" | "skip" | "error";
+  message: string;
+  commits: string[];
+  diff_stat: string;
+  repos: RepoEntry[];
+}
+
 export const api = {
   listRepos: () => invoke<RepoEntry[]>("list_repos"),
   addRepo: (path: string) => invoke<RepoEntry[]>("add_repo", { path }),
@@ -162,9 +185,14 @@ export const api = {
   openInFolder: (path: string) => invoke<void>("open_in_folder", { path }),
   openInTerminal: (path: string) => invoke<void>("open_in_terminal", { path }),
   openReadme: (path: string) => invoke<void>("open_readme", { path }),
+  openRepoWebsite: (path: string) => invoke<void>("open_repo_website", { path }),
   cancelBusyOp: () => invoke<void>("cancel_busy_op"),
   setRepoCmds: (path: string, testCmd: string, buildCmd: string) =>
     invoke<RepoEntry[]>("set_repo_cmds", { path, testCmd, buildCmd }),
+  setAutoSync: (path: string, mins: number, autoPull: boolean, dailyTime = "") =>
+    invoke<RepoEntry[]>("set_auto_sync", { path, mins, autoPull, dailyTime }),
+  pinRepo: (path: string, pinned: boolean) =>
+    invoke<RepoEntry[]>("pin_repo", { path, pinned }),
   detectCmds: (path: string) => invoke<CmdDetect>("detect_cmds", { path }),
   runRepoCmd: (path: string, cmd: string, onLine: Channel<string>) =>
     invoke<void>("run_repo_cmd", { path, cmd, onLine }),
