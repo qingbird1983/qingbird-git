@@ -19,6 +19,24 @@ pub struct RepoEntry {
     /// 一键运行：构建命令；空串表示未设置
     #[serde(default)]
     pub build_cmd: String,
+    /// 定时自动同步间隔（分钟），0 = 关闭或处于"每天定时"模式；只有用户明确开启的仓库才参与调度
+    #[serde(default)]
+    pub auto_sync_mins: u32,
+    /// "每天定时"模式的执行时间点（本地时区 "HH:MM"）；非空表示每天定时模式，优先于间隔模式
+    #[serde(default)]
+    pub daily_time: String,
+    /// 检测到云端更新后是否自动拉取（false = 只检测提醒，不动工作区）
+    #[serde(default)]
+    pub auto_pull: bool,
+    /// 上次自动检查时间戳（秒），由后台调度器维护
+    #[serde(default)]
+    pub last_auto_check: u64,
+    /// 上次自动同步结果摘要（"ok:…" / "behind:…" / "skip:…" / "err:…"）
+    #[serde(default)]
+    pub last_auto_result: String,
+    /// 用户置顶：排在列表最前（其余按 last_used 自动靠前）
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -60,6 +78,17 @@ pub fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// 解析 "HH:MM" 时间字符串，合法返回 (小时, 分钟)，非法返回 None
+pub fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
+    let (h, m) = s.split_once(':')?;
+    let h: u32 = h.trim().parse().ok()?;
+    let m: u32 = m.trim().parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some((h, m))
 }
 
 fn config_path(app: &tauri::AppHandle) -> Option<PathBuf> {

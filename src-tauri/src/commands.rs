@@ -2,6 +2,7 @@ use crate::{git, proxy, store};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::Manager;
@@ -13,6 +14,31 @@ const LOCAL_TIMEOUT: Duration = Duration::from_secs(10);
 const NET_TIMEOUT: Duration = Duration::from_secs(300);
 /// 检查云端更新只做 fetch + 对比，超时比完整拉取短得多
 const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// 全局网络操作互斥锁：用户操作与后台自动同步互斥。
+/// 自动同步只 try_lock（拿不到就跳过本轮），用户操作优先并可打断后台同步。
+static OP_LOCK: Mutex<()> = Mutex::new(());
+
+/// 后台自动同步尝试进入操作区：用户正在操作时返回 None（跳过本轮）
+pub fn try_begin_op() -> Option<MutexGuard<'static, ()>> {
+    OP_LOCK.try_lock().ok()
+}
+
+/// 用户网络操作进入操作区：若被后台自动同步占用，先请求取消其 git 子进程
+/// 再等锁（最多约 10 秒），等不到说明有异常占用，返回 None
+pub fn begin_user_op() -> Option<MutexGuard<'static, ()>> {
+    if let Ok(g) = OP_LOCK.try_lock() {
+        return Some(g);
+    }
+    git::request_cancel();
+    for _ in 0..50 {
+        if let Ok(g) = OP_LOCK.try_lock() {
+            return Some(g);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    None
+}
 
 #[derive(Serialize, Clone, Default)]
 pub struct RepoStatus {
@@ -113,9 +139,10 @@ fn route_of(msg: &str) -> String {
 }
 
 /// 生成配对的进度回调：forward 转发 git stderr 进度行（阶段带路径标记），
-/// stage 在直连/代理切换瞬间发出提示并同步路径标记
+/// stage 在直连/代理切换瞬间发出提示并同步路径标记。
+/// on_progress 传 None 时回调静默空转（后台自动同步没有前端通道）。
 fn progress_hooks(
-    on_progress: &Channel<ProgressEvent>,
+    on_progress: Option<&Channel<ProgressEvent>>,
 ) -> (
     RouteTag,
     impl Fn(&str) + '_,
@@ -124,22 +151,26 @@ fn progress_hooks(
     let tag = RouteTag::default();
     let t = tag.clone();
     let forward = move |line: &str| {
-        if let Some(mut ev) = parse_progress(line) {
-            let r = t.get();
-            if !r.is_empty() {
-                ev.stage = format!("{}（{}）", ev.stage, r);
+        if let Some(on_progress) = on_progress {
+            if let Some(mut ev) = parse_progress(line) {
+                let r = t.get();
+                if !r.is_empty() {
+                    ev.stage = format!("{}（{}）", ev.stage, r);
+                }
+                let _ = on_progress.send(ev);
             }
-            let _ = on_progress.send(ev);
         }
     };
     let t2 = tag.clone();
     let stage = move |s: &str| {
         t2.set(&route_of(s));
-        let _ = on_progress.send(ProgressEvent {
-            stage: s.into(),
-            detail: String::new(),
-            percent: None,
-        });
+        if let Some(on_progress) = on_progress {
+            let _ = on_progress.send(ProgressEvent {
+                stage: s.into(),
+                detail: String::new(),
+                percent: None,
+            });
+        }
     };
     (tag, forward, stage)
 }
@@ -192,7 +223,7 @@ pub fn parse_progress(line: &str) -> Option<ProgressEvent> {
     None
 }
 
-fn valid_repo(path: &str) -> bool {
+pub(crate) fn valid_repo(path: &str) -> bool {
     std::path::Path::new(path).join(".git").exists()
 }
 
@@ -658,6 +689,12 @@ pub fn add_repo(app: tauri::AppHandle, path: String) -> Result<Vec<store::RepoEn
             last_used: store::now_secs(),
             test_cmd: String::new(),
             build_cmd: String::new(),
+            auto_sync_mins: 0,
+            daily_time: String::new(),
+            auto_pull: false,
+            last_auto_check: 0,
+            last_auto_result: String::new(),
+            pinned: false,
         });
     }
     store::save(&app, &cfg)?;
@@ -789,6 +826,12 @@ pub fn init_repo(
         last_used: store::now_secs(),
         test_cmd: String::new(),
         build_cmd: String::new(),
+        auto_sync_mins: 0,
+        daily_time: String::new(),
+        auto_pull: false,
+        last_auto_check: 0,
+        last_auto_result: String::new(),
+        pinned: false,
     };
     if !cfg.repos.iter().any(|r| r.path == path) {
         cfg.repos.push(entry.clone());
@@ -817,18 +860,33 @@ pub fn check_update(
     path: String,
     on_progress: Channel<ProgressEvent>,
 ) -> OpResult {
-    if !valid_repo(&path) {
+    let Some(_guard) = begin_user_op() else {
+        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+    };
+    do_check(&app, &path, Some(&on_progress))
+}
+
+/// 检查云端更新的核心流程（用户操作与后台自动同步共用）；
+/// on_progress 为 None 时进度静默丢弃（后台任务没有前端通道）
+pub fn do_check(
+    app: &tauri::AppHandle,
+    path: &str,
+    on_progress: Option<&Channel<ProgressEvent>>,
+) -> OpResult {
+    if !valid_repo(path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
-    let _ = on_progress.send(ProgressEvent {
-        stage: "正在连接远端…".into(),
-        detail: String::new(),
-        percent: None,
-    });
-    let (_tag, forward, stage) = progress_hooks(&on_progress);
+    if let Some(ch) = on_progress {
+        let _ = ch.send(ProgressEvent {
+            stage: "正在连接远端…".into(),
+            detail: String::new(),
+            percent: None,
+        });
+    }
+    let (_tag, forward, stage) = progress_hooks(on_progress);
     let (fetch_out, used_proxy) = run_net_op(
-        &app,
-        &path,
+        app,
+        path,
         &["fetch", "--all", "--prune", "--progress"],
         Some(&forward),
         None,
@@ -837,8 +895,8 @@ pub fn check_update(
         Some(&stage),
         NetMode::Auto,
     );
-    let status = read_status(&path);
-    touch_repo(&app, &path);
+    let status = read_status(path);
+    touch_repo(app, path);
 
     if !fetch_out.success {
         let mut msg = "检查更新失败：无法连接远端".to_string();
@@ -888,11 +946,24 @@ pub fn pull_repo(
     stash: bool,
     on_progress: Channel<ProgressEvent>,
 ) -> OpResult {
-    if !valid_repo(&path) {
+    let Some(_guard) = begin_user_op() else {
+        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+    };
+    do_pull(&app, &path, stash, Some(&on_progress))
+}
+
+/// 拉取的核心流程（用户操作与后台自动同步共用），永远 --ff-only
+pub fn do_pull(
+    app: &tauri::AppHandle,
+    path: &str,
+    stash: bool,
+    on_progress: Option<&Channel<ProgressEvent>>,
+) -> OpResult {
+    if !valid_repo(path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
-    let (_tag, forward, forward_stage) = progress_hooks(&on_progress);
-    let status_before = read_status(&path);
+    let (_tag, forward, forward_stage) = progress_hooks(on_progress);
+    let status_before = read_status(path);
     if status_before.dirty && !stash {
         return OpResult {
             ok: false,
@@ -905,7 +976,7 @@ pub fn pull_repo(
         };
     }
 
-    let old_head = run_local(&path, &["rev-parse", "HEAD"])
+    let old_head = run_local(path, &["rev-parse", "HEAD"])
         .stdout
         .trim()
         .to_string();
@@ -914,7 +985,7 @@ pub fn pull_repo(
     let mut stashed = false;
     if stash && status_before.dirty {
         let s = run_local(
-            &path,
+            path,
             &["stash", "push", "-u", "-m", "qingbird-git auto stash"],
         );
         log.push_str(&combined(&s));
@@ -925,8 +996,8 @@ pub fn pull_repo(
     }
 
     let (pull_out, used_proxy) = run_net_op(
-        &app,
-        &path,
+        app,
+        path,
         &["pull", "--ff-only", "--progress"],
         Some(&forward),
         None,
@@ -936,11 +1007,11 @@ pub fn pull_repo(
         NetMode::Auto,
     );
     log.push_str(&combined(&pull_out));
-    let mut status = read_status(&path);
-    touch_repo(&app, &path);
+    let mut status = read_status(path);
+    touch_repo(app, path);
 
     if stashed {
-        let pop = run_local(&path, &["stash", "pop"]);
+        let pop = run_local(path, &["stash", "pop"]);
         log.push_str(&combined(&pop));
         if !pop.success {
             return OpResult {
@@ -978,8 +1049,8 @@ pub fn pull_repo(
         };
     }
 
-    status = read_status(&path);
-    let changes = pull_changes(&path, &old_head);
+    status = read_status(path);
+    let changes = pull_changes(path, &old_head);
     let message = if used_proxy.is_some() {
         "拉取成功（已自动通过代理完成）".to_string()
     } else {
@@ -1032,6 +1103,9 @@ pub fn push_repo(app: tauri::AppHandle, path: String) -> OpResult {
     if !valid_repo(&path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
+    let Some(_guard) = begin_user_op() else {
+        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+    };
     do_push(&app, &path)
 }
 
@@ -1268,6 +1342,9 @@ pub fn commit_push(app: tauri::AppHandle, path: String, message: String) -> OpRe
     if !valid_repo(&path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
+    let Some(_guard) = begin_user_op() else {
+        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+    };
     let msg = message.trim();
     if msg.is_empty() {
         return OpResult::err("请先填写提交说明".into(), String::new());
@@ -1559,6 +1636,12 @@ pub fn create_repo(
             last_used: store::now_secs(),
             test_cmd: String::new(),
             build_cmd: String::new(),
+            auto_sync_mins: 0,
+            daily_time: String::new(),
+            auto_pull: false,
+            last_auto_check: 0,
+            last_auto_result: String::new(),
+            pinned: false,
         });
     }
     store::save(&app, &cfg)?;
@@ -1702,6 +1785,43 @@ pub fn open_readme(path: String) -> Result<(), String> {
     tauri_plugin_opener::open_path(&readme, None::<&str>).map_err(|e| format!("打开 README 失败：{e}"))
 }
 
+/// 把 origin 远端地址转成浏览器可访问的仓库主页地址：
+/// git@host:path 与 ssh:// 形式转 https，http(s) 形式去掉 .git 后缀；无法识别返回 None
+pub fn browse_url_from_remote(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    if url.is_empty() {
+        return None;
+    }
+    let strip_git = |s: &str| s.strip_suffix(".git").unwrap_or(s).to_string();
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        return Some(format!("https://{host}/{}", strip_git(path)));
+    }
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let rest = rest.split_once('@').map(|(_, r)| r).unwrap_or(rest);
+        let (host, path) = rest.split_once('/')?;
+        return Some(format!("https://{host}/{}", strip_git(path)));
+    }
+    if url.starts_with("https://") || url.starts_with("http://") {
+        return Some(strip_git(url));
+    }
+    None
+}
+
+/// 用系统默认浏览器打开仓库的云端主页（GitHub / Gitee 等）。
+/// 不走内置浏览器：WebView2 内嵌页无法复用 git 的代理探测逻辑，也没有可用的网页翻译能力，
+/// 而用户默认浏览器自带翻译与自己的代理扩展，体验更好。
+#[tauri::command]
+pub fn open_repo_website(path: String) -> Result<(), String> {
+    if !valid_repo(&path) {
+        return Err("该文件夹不是 git 仓库".into());
+    }
+    let url = remote_url(&path);
+    let web = browse_url_from_remote(&url)
+        .ok_or_else(|| "该仓库没有可识别的远端地址，无法打开云端主页".to_string())?;
+    tauri_plugin_opener::open_url(&web, None::<&str>).map_err(|e| format!("打开浏览器失败：{e}"))
+}
+
 #[tauri::command]
 pub fn set_settings(app: tauri::AppHandle, manual_proxy: String) -> Result<(), String> {
     let mut cfg = store::load(&app);
@@ -1784,6 +1904,9 @@ pub fn clone_repo(
     net_mode: Option<String>,
     on_progress: Channel<ProgressEvent>,
 ) -> Result<CloneOutcome, String> {
+    let Some(_guard) = begin_user_op() else {
+        return Err("后台自动同步正在进行，已请求中断，请稍后重试".into());
+    };
     let mode = NetMode::parse(net_mode.as_deref().unwrap_or("auto"));
     let url = url.trim().to_string();
     if !url.contains(':') && !url.contains('/') {
@@ -1799,7 +1922,7 @@ pub fn clone_repo(
         return Err(format!("目标文件夹已存在：{}", dest.display()));
     }
 
-    let (_tag, forward, stage) = progress_hooks(&on_progress);
+    let (_tag, forward, stage) = progress_hooks(Some(&on_progress));
     let args = ["clone", "--progress", &url, &name];
     let (out, used_proxy) = run_net_op(
         &app,
@@ -1844,6 +1967,12 @@ pub fn clone_repo(
             last_used: store::now_secs(),
             test_cmd: String::new(),
             build_cmd: String::new(),
+            auto_sync_mins: 0,
+            daily_time: String::new(),
+            auto_pull: false,
+            last_auto_check: 0,
+            last_auto_result: String::new(),
+            pinned: false,
         });
     }
     store::save(&app, &cfg)?;
@@ -1938,6 +2067,56 @@ pub fn set_repo_cmds(
     if let Some(e) = cfg.repos.iter_mut().find(|r| r.path == path) {
         e.test_cmd = test_cmd.trim().to_string();
         e.build_cmd = build_cmd.trim().to_string();
+    }
+    let _ = store::save(&app, &cfg);
+    cfg.repos
+}
+
+/// 设置某仓库的定时自动同步。两种模式：
+/// - 间隔模式：daily_time 为空，mins > 0（分钟）
+/// - 每天定时模式：daily_time = "HH:MM"（本地时区），mins 置 0
+/// mins 与 daily_time 均无效（0 + 空）即为关闭。
+/// 开启 / 切换模式 / 改参数时把 last_auto_check 归零，让调度器立即跑首轮。
+#[tauri::command]
+pub fn set_auto_sync(
+    app: tauri::AppHandle,
+    path: String,
+    mins: u32,
+    auto_pull: bool,
+    daily_time: String,
+) -> Vec<store::RepoEntry> {
+    // 每天定时模式只在时间合法时生效（"HH:MM"，0-23:0-59）
+    let daily = store::parse_hhmm(daily_time.trim())
+        .map(|(h, m)| format!("{h:02}:{m:02}"))
+        .unwrap_or_default();
+    let eff_mins = if daily.is_empty() { mins } else { 0 };
+    let mut cfg = store::load(&app);
+    if let Some(e) = cfg.repos.iter_mut().find(|r| r.path == path) {
+        if e.auto_sync_mins != eff_mins || e.auto_pull != auto_pull || e.daily_time != daily {
+            e.auto_sync_mins = eff_mins;
+            e.daily_time = daily;
+            e.auto_pull = auto_pull;
+            // 重新开启（或改间隔 / 时间点）时立即到期；关闭时清掉旧结果摘要
+            e.last_auto_check = if eff_mins > 0 || !e.daily_time.is_empty() {
+                0
+            } else {
+                e.last_auto_check
+            };
+            if eff_mins == 0 && e.daily_time.is_empty() {
+                e.last_auto_result = String::new();
+            }
+        }
+    }
+    let _ = store::save(&app, &cfg);
+    cfg.repos
+}
+
+/// 置顶 / 取消置顶仓库；置顶的仓库在列表最前，其余仍按最近使用排序
+#[tauri::command]
+pub fn pin_repo(app: tauri::AppHandle, path: String, pinned: bool) -> Vec<store::RepoEntry> {
+    let mut cfg = store::load(&app);
+    if let Some(e) = cfg.repos.iter_mut().find(|r| r.path == path) {
+        e.pinned = pinned;
     }
     let _ = store::save(&app, &cfg);
     cfg.repos
@@ -2407,5 +2586,28 @@ mod tests {
         assert!(!valid_repo_name("a b"));
         assert!(!valid_repo_name(".hidden"));
         assert!(!valid_repo_name("中文"));
+    }
+
+    #[test]
+    fn browse_url_from_remote_works() {
+        assert_eq!(
+            browse_url_from_remote("git@github.com:user/repo.git"),
+            Some("https://github.com/user/repo".into())
+        );
+        assert_eq!(
+            browse_url_from_remote("ssh://git@gitee.com/user/repo.git"),
+            Some("https://gitee.com/user/repo".into())
+        );
+        assert_eq!(
+            browse_url_from_remote("https://github.com/user/repo.git"),
+            Some("https://github.com/user/repo".into())
+        );
+        assert_eq!(
+            browse_url_from_remote("https://git.example.com/team/proj/"),
+            Some("https://git.example.com/team/proj".into())
+        );
+        // 无远端 / 非 http 形式（如本地路径）不可浏览
+        assert_eq!(browse_url_from_remote(""), None);
+        assert_eq!(browse_url_from_remote("C:\\code\\repo"), None);
     }
 }

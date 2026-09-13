@@ -1,6 +1,7 @@
 mod commands;
 mod git;
 mod proxy;
+mod scheduler;
 mod store;
 
 use tauri::{
@@ -65,8 +66,11 @@ pub fn run() {
             commands::open_in_folder,
             commands::open_in_terminal,
             commands::open_readme,
+            commands::open_repo_website,
             commands::stop_repo_cmd,
             commands::set_repo_cmds,
+            commands::set_auto_sync,
+            commands::pin_repo,
             commands::detect_cmds,
             commands::run_repo_cmd,
             commands::scan_repo_space,
@@ -76,6 +80,8 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle();
             apply_saved_theme(handle);
+            // 后台定时自动同步：只处理用户开启的仓库
+            scheduler::start(handle.clone());
 
             // 托盘菜单：显示主窗口 / 一键扫描全部 / 开机自启 / 退出
             let show = MenuItem::with_id(handle, "show", "显示主窗口", true, None::<&str>)?;
