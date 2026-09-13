@@ -10,16 +10,15 @@ use tauri::{
     Manager,
 };
 
-fn apply_saved_theme(app: &tauri::AppHandle) {
-    let cfg = store::load(app);
+/// 读取持久化主题并应用到窗口（setup 与重建窗口共用）
+fn apply_saved_theme(win: &tauri::WebviewWindow) {
+    let cfg = store::load(win.app_handle());
     let theme = match cfg.settings.theme.as_str() {
         "dark" => Some(tauri::Theme::Dark),
         "light" => Some(tauri::Theme::Light),
         _ => None,
     };
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_theme(theme);
-    }
+    let _ = win.set_theme(theme);
 }
 
 fn show_main(app: &tauri::AppHandle) {
@@ -27,6 +26,17 @@ fn show_main(app: &tauri::AppHandle) {
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
+        return;
+    }
+    // 窗口已被销毁（关窗 = 释放 Webview 省内存）：按 tauri.conf.json 的窗口配置重建
+    let cfg = app.config().app.windows.first().cloned();
+    if let Some(cfg) = cfg {
+        if let Ok(win) = tauri::webview::WebviewWindowBuilder::from_config(app, &cfg)
+            .and_then(|b| b.build())
+        {
+            apply_saved_theme(&win);
+            let _ = win.set_focus();
+        }
     }
 }
 
@@ -79,7 +89,9 @@ pub fn run() {
         ])
         .setup(|app| {
             let handle = app.handle();
-            apply_saved_theme(handle);
+            if let Some(win) = handle.get_webview_window("main") {
+                apply_saved_theme(&win);
+            }
             // 后台定时自动同步：只处理用户开启的仓库
             scheduler::start(handle.clone());
 
@@ -122,6 +134,9 @@ pub fn run() {
                                 } else {
                                     show_main(app);
                                 }
+                            } else {
+                                // 窗口已销毁（关窗后托盘常驻），点击托盘重建
+                                show_main(app);
                             }
                         }
                     }
@@ -130,14 +145,24 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 点关闭按钮时隐藏到托盘常驻，从托盘菜单退出
+            // 点关闭按钮：销毁 Webview 释放内存（WebView2 常驻是大头），应用退到托盘只留 Rust 后端；
+            // 点击托盘图标/菜单时按 conf 重建窗口。定时自动同步等后台任务不受影响。
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    let _ = window.hide();
                     api.prevent_close();
+                    let _ = window.destroy();
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // 主窗口销毁后应用零窗口运行（托盘常驻）：拦下"全部窗口已关"触发的默认退出
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            }
+            let _ = app;
+        });
 }
