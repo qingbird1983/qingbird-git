@@ -30,6 +30,69 @@ export function Icon({
   );
 }
 
+/** 左箭头（侧栏收展把手） */
+export const IconChevronLeft = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <path d="M15 18l-6-6 6-6" />
+  </Icon>
+);
+
+/** 面板开关（侧栏收展：标题栏印章 hover 态） */
+export const IconPanelLeft = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M9 4v16" />
+  </Icon>
+);
+
+/** 窗控：最小化 / 最大化 / 还原 */
+export const IconMinus = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <path d="M5 12h14" />
+  </Icon>
+);
+
+export const IconMaximize = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M16 21h3a2 2 0 0 0 2-2v-3M8 21H5a2 2 0 0 1-2-2v-3" />
+  </Icon>
+);
+
+export const IconRestore = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <rect x="8" y="8" width="12" height="12" rx="2" />
+    <path d="M4 16V6a2 2 0 0 1 2-2h10" />
+  </Icon>
+);
+
+/** 品牌 git 字标：与应用图标同一套几何字形（g/i/t），颜色跟随 currentColor。
+    字形坐标即 scripts/gen-icons.mjs 的 birdCoverage 设计稿（0..100 网格）。 */
+export const IconGitMark = ({
+  size = 14,
+  className,
+}: {
+  size?: number;
+  className?: string;
+}) => (
+  <svg
+    width={size}
+    height={(size * 61) / 83}
+    viewBox="12.5 23.5 83 61"
+    fill="none"
+    className={className}
+    aria-hidden
+  >
+    <circle cx="27" cy="48" r="10.5" stroke="currentColor" strokeWidth="8" />
+    <path
+      d="M41.5 48V76M41.5 76L33 79M60 40V62M80 32V70M80 70L88 73M70 42H90"
+      stroke="currentColor"
+      strokeWidth="10"
+      strokeLinecap="round"
+    />
+    <circle cx="60" cy="29" r="5.5" fill="currentColor" />
+  </svg>
+);
+
 /** 仓库（书本形 repo 标） */
 export const IconRepo = (p: { size?: number; className?: string }) => (
   <Icon {...p}>
@@ -141,6 +204,31 @@ export const IconSync = (p: { size?: number; className?: string }) => (
   <Icon {...p}>
     <path d="M23 4v6h-6M1 20v-6h6" />
     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+  </Icon>
+);
+
+/** 闹钟（定时自动同步）：表盘偏下 + 顶部两个铃铛斜线，与提交历史的纯时钟区分 */
+export const IconClock = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <circle cx="12" cy="13" r="8" />
+    <path d="M12 9.5V13l2.5 1.8" />
+    <path d="M5 3 2.5 5.5M19 3l2.5 2.5" />
+  </Icon>
+);
+
+/** 图钉（置顶仓库） */
+export const IconPin = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <path d="M9 4h6v4.5l2.5 2.5v1.5h-11v-1.5L9 8.5V4z" />
+    <path d="M12 12.5V20" />
+  </Icon>
+);
+
+/** 搜索（放大镜） */
+export const IconSearch = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="m21 21-4.3-4.3" />
   </Icon>
 );
 

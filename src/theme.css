@@ -1,0 +1,215 @@
+/* ============================================================
+   青鸟 Git · 设计令牌 —— 「纸墨」主题
+   与兄弟项目 qingbird-md（纸上翻译）同一套品牌设计语言：
+   三层宣纸底 / 三级墨色 / 青花 accent / 朱砂警示 / 发丝线分区 /
+   贴面零阴影（仅浮层脱离纸面）/ 统一动效曲线 / 纸纹噪点。
+   CSS 侧恒以 var() 取色，组件样式零硬编码色。
+   ============================================================ */
+
+/* 内置品牌衬线：思源宋体（SIL OFL，可内嵌商用）。
+   专为品牌层（侧栏品牌名 / 仓库标题 / 空态印章）使用，
+   UI 无衬线走系统栈，等宽走系统栈。 */
+@font-face {
+  font-family: "Source Han Serif SC";
+  src: url("./assets/fonts/SourceHanSerifSC-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Source Han Serif SC";
+  src: url("./assets/fonts/SourceHanSerifSC-700.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* 字体三栈：UI 无衬线 / 品牌衬线 / 等宽（末位落雅黑保证 CJK 注释不豆腐） */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+  --font-serif: "Source Han Serif SC", "Noto Serif SC", "Songti SC", STSong, STZhongsong,
+    "SimSun", serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas,
+    "Microsoft YaHei", monospace;
+
+  /* 统一动效曲线：入场 0.2–0.34s / 退场减半；只动 opacity/transform，禁动 layout */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --panel-anim: 320ms;
+
+  /* ---- 圆角：三档 + 胶囊，全站只用这几档 ---- */
+  --r-sm: 6px; /* 按钮、输入、列表行 */
+  --r-md: 8px; /* 卡片 */
+  --r-lg: 12px; /* 浮层、弹窗 */
+  --r-pill: 99px; /* 胶囊按钮、chip、分段 */
+
+  /* ---- 纸面：三层宣纸递进（暗色 = 三层墨纸） ---- */
+  --bg: #232220; /* 主区画布 */
+  --bg2: #2b2925; /* 面板：侧栏（略深一档的暖墨纸） */
+  --bg3: #39362f; /* 悬停/按下/凹陷：按钮与列表行的交互态 */
+
+  /* ---- 墨色：三级递减 ---- */
+  --fg: #e6e1d4;
+  --fg2: #b8b3a4;
+  --fg3: #8b8778;
+
+  /* ---- 青花（accent）：唯一彩色，只给「拉取/落后/链接/主按钮」语义 ---- */
+  --accent: #6fa3c4;
+  --accent-strong: #8fbad6;
+  --accent-weak: rgba(111, 163, 196, 0.14); /* 选中底 */
+  --accent-ring: rgba(111, 163, 196, 0.38); /* focus 外环 */
+  --on-accent: #14161a; /* 主色底上的文字 */
+
+  /* ---- 朱砂：品牌印 / 警示 / 失联专用 ---- */
+  --zhu: #c96a5c;
+  --zhu-wash: rgba(201, 106, 92, 0.12);
+
+  /* ---- 描边与面：发丝线体系 ---- */
+  --border: #3b3830;
+  --border-strong: #474338;
+  --sep-bg: #332f29;
+  --panel-bg: var(--bg2);
+  --surface: #2e2b26; /* 浮层/弹窗/卡片底（最亮面） */
+  --field-bg: #232220; /* 输入框底 */
+
+  /* ---- 交互态 ---- */
+  --item-hover-bg: rgba(230, 225, 212, 0.06);
+  --btn-bg: var(--surface);
+  --btn-border: var(--border);
+  --placeholder-fg: #6b6759;
+
+  /* ---- 语义色（git 状态：落后=青花 / 待推送=成功 / 脏=警告 / 失联=朱砂） ---- */
+  --success: #5fc085;
+  --success-wash: rgba(95, 192, 133, 0.14);
+  --warning: #d4a948;
+  --warning-wash: rgba(212, 169, 72, 0.14);
+  --danger: var(--zhu);
+  --danger-wash: var(--zhu-wash);
+
+  /* ---- 远程托管标识色 ---- */
+  --gitee: #d4675f;
+  --gitee-wash: rgba(212, 103, 95, 0.13);
+
+  /* ---- 投影：贴面零阴影（发丝线分区），仅浮层脱离纸面 ---- */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.32);
+  --shadow: 0 12px 36px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3); /* 浮窗/菜单 */
+  --shadow-strong: 0 14px 44px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35); /* 模态 */
+  --shadow-ink: 0 2px 6px rgba(0, 0, 0, 0.45); /* 墨块主按钮专用 */
+
+  --backdrop: rgba(0, 0, 0, 0.5);
+
+  --scrollbar-thumb: #55514a;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f7f4ec;
+  --bg2: #f1ece0;
+  --bg3: #e8e1d1;
+
+  --fg: #211f1a;
+  --fg2: #4c4a40;
+  --fg3: #8f8b7c;
+
+  --accent: #31678e;
+  --accent-strong: #285677;
+  --accent-weak: rgba(49, 103, 142, 0.08);
+  --accent-ring: rgba(49, 103, 142, 0.3);
+  --on-accent: #f9f3ea; /* 暖白，不用纯白 */
+
+  --zhu: #b3483a;
+  --zhu-wash: rgba(179, 72, 58, 0.08);
+
+  --border: #e3dcc9;
+  --border-strong: #d8d0bb;
+  --sep-bg: #ece6d8;
+  --panel-bg: var(--bg2);
+  --surface: #fffdf8;
+  --field-bg: #fffdf8;
+
+  --item-hover-bg: rgba(33, 31, 26, 0.045);
+  --btn-bg: var(--surface);
+  --btn-border: var(--border);
+  --placeholder-fg: #bcb7a5;
+
+  --success: #3a7a52;
+  --success-wash: rgba(58, 122, 82, 0.1);
+  --warning: #b8860b;
+  --warning-wash: rgba(184, 134, 11, 0.12);
+  --danger: var(--zhu);
+  --danger-wash: var(--zhu-wash);
+
+  --gitee: #c71d23;
+  --gitee-wash: rgba(199, 29, 35, 0.08);
+
+  --shadow-xs: 0 1px 2px rgba(33, 31, 26, 0.05);
+  --shadow-sm: 0 1px 3px rgba(33, 31, 26, 0.06);
+  --shadow: 0 12px 36px rgba(33, 31, 26, 0.14), 0 2px 6px rgba(33, 31, 26, 0.06);
+  --shadow-strong: 0 14px 44px rgba(33, 31, 26, 0.16), 0 2px 8px rgba(33, 31, 26, 0.07);
+  --shadow-ink: 0 2px 6px rgba(33, 31, 26, 0.22);
+
+  --backdrop: rgba(33, 31, 26, 0.28);
+
+  --scrollbar-thumb: #bcb7a5;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+/* 纸纹噪点：全局唯一质感来源。
+   fixed 顶层覆盖 + pointer-events:none，opacity 0.02 红线（>0.03 禁止），
+   明暗共用同一纹理，暗色下视觉更弱属预期。 */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.02;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 180px 180px;
+}
+
+/* 滚动条：透明轨道 + 浮条式滑块（透明描边收窄色条） */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border: 3px solid transparent;
+  border-radius: 5px;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg3);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::selection {
+  background: var(--accent-weak);
+}
+
+/* 键盘可达性：焦点外环统一青花 */
+:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}

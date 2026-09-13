@@ -14,6 +14,7 @@
     "windows": [
       {
         "title": "青鸟 Git — 本地仓库一键同步",
+        "decorations": false,
         "width": 1100,
         "height": 720,
         "minWidth": 860,

@@ -1,4 +1,5 @@
-// 生成 qingbird-git 应用图标：蓝色渐变圆角方块 + 白色飞鸟剪影
+// 生成 qingbird-git 应用图标：朱砂印章圆角方（同兄弟项目 qingbird-md-rust 的
+// 「青」印底色 #B3483A）+ 暖白 "git" 字标 + 内描边 + 整印倾斜（字不斜）。
 // 用法: node scripts/gen-icons.mjs  （在项目根目录执行）
 import zlib from "node:zlib";
 import fs from "node:fs";
@@ -101,47 +102,69 @@ function birdCoverage(px, py) {
 function render(size, ss = 4) {
   const S = size * ss;
   const rgba = Buffer.alloc(size * size * 4);
-  // 渐变色：青 → 蓝（青鸟）
-  const c1 = [56, 189, 248]; // #38BDF8
-  const c2 = [37, 99, 235]; // #2563EB
-  const radius = size * 0.2237; // squircle-ish
+  // 印章设计参数（与 TitleBar 的 seal-btn / 兄弟项目 gen-app-icon.py 同源）：
+  // 朱砂底 #B3483A、暖白字 #F9F3EA、圆角比例 0.214、整印倾斜（CSS rotate(-3deg) 同视觉）
+  const SEAL = 86; // 印章边长（100 设计稿内留透明边距：倾斜 + 平台圆角安全区）
+  const RADIUS = SEAL * 0.214;
+  const BG = [179, 72, 58]; // --zhu #B3483A
+  const FG = [249, 243, 234]; // 暖白
+  const STROKE_A = 0.18; // 内描边 rgba(255,255,255,.18)
+  const STROKE_INSET = SEAL * 0.008;
+  const STROKE_W = SEAL * 0.005;
+  const TILT = (4 * Math.PI) / 180; // 视觉逆时针（CSS rotate(-4deg) 同向）
+  const LETTER_K = 0.7; // 字标缩放：100 稿字形 → 印章内占比
+  // 字形包围盒中心（100 稿）：x 12.5..95 / y 23.5..84
+  const GC = [53.75, 53.75];
+  const cosT = Math.cos(TILT);
+  const sinT = Math.sin(TILT);
   const scale = 100 / S;
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       // 超采样
-      let aBg = 0, aBird = 0;
+      let aBg = 0, aStr = 0, aLet = 0;
       let rBg = 0, gBg = 0, bBg = 0;
       for (let sy = 0; sy < ss; sy++) {
         for (let sx = 0; sx < ss; sx++) {
           const px = (x * ss + sx + 0.5) * scale;
           const py = (y * ss + sy + 0.5) * scale;
-          // 背景：圆角矩形 + 对角渐变
-          const d = roundRectSDF(px, py, 100, 22.37);
-          const bgCov = Math.min(1, Math.max(0, 0.5 - d));
-          if (bgCov > 0) {
-            const t = Math.min(1, Math.max(0, (px + py) / 200));
-            rBg += (c1[0] + (c2[0] - c1[0]) * t) * bgCov;
-            gBg += (c1[1] + (c2[1] - c1[1]) * t) * bgCov;
-            bBg += (c1[2] + (c2[2] - c1[2]) * t) * bgCov;
-            aBg += bgCov;
+          // 世界点 → 印章局部系（逆倾斜回正，视觉逆时针 = CSS rotate(-4deg) 同向），
+          // 印章 0..SEAL 居中于 100 稿
+          const dx = px - 50;
+          const dy = py - 50;
+          const lx = 43 + dx * cosT - dy * sinT;
+          const ly = 43 + dx * sinT + dy * cosT;
+          const d = roundRectSDF(lx, ly, SEAL, RADIUS);
+          if (d <= 0) {
+            aBg += 1;
+            rBg += BG[0];
+            gBg += BG[1];
+            bBg += BG[2];
+            // 内描边：贴印章内缘的一圈白纱（对应 CSS inset box-shadow）
+            if (d <= -STROKE_INSET && d >= -(STROKE_INSET + STROKE_W)) aStr += 1;
+            // 字标正置（底斜字不斜）：按未旋转坐标采样字形，缩放后对中
+            const gx = GC[0] + (px - 50) / LETTER_K;
+            const gy = GC[1] + (py - 50) / LETTER_K;
+            if (birdCoverage(gx, gy)) aLet += 1;
           }
-          if (birdCoverage(px, py)) aBird += 1;
         }
       }
       const n = ss * ss;
-      aBg /= n; rBg /= n || 1; gBg /= n || 1; bBg /= n || 1;
-      aBird /= n;
-      // 合成：白色飞鸟覆盖在渐变上
-      let r = rBg, g = gBg, b = bBg, a = aBg;
-      const birdA = aBird * aBg;
-      r = r * (1 - birdA) + 255 * birdA;
-      g = g * (1 - birdA) + 255 * birdA;
-      b = b * (1 - birdA) + 255 * birdA;
+      aBg /= n; aStr /= n; aLet /= n;
+      rBg /= n || 1; gBg /= n || 1; bBg /= n || 1;
+      // 合成：朱砂底 → 内描边白纱 → 暖白字标
+      let r = rBg, g = gBg, b = bBg;
+      const strMix = aStr * STROKE_A;
+      r = r * (1 - strMix) + 255 * strMix;
+      g = g * (1 - strMix) + 255 * strMix;
+      b = b * (1 - strMix) + 255 * strMix;
+      r = r * (1 - aLet) + FG[0] * aLet;
+      g = g * (1 - aLet) + FG[1] * aLet;
+      b = b * (1 - aLet) + FG[2] * aLet;
       const i = (y * size + x) * 4;
       rgba[i] = Math.round(r);
       rgba[i + 1] = Math.round(g);
       rgba[i + 2] = Math.round(b);
-      rgba[i + 3] = Math.round(a * 255);
+      rgba[i + 3] = Math.round(aBg * 255);
     }
   }
   return encodePNG(size, size, rgba);
