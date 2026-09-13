@@ -530,8 +530,6 @@ export function listenTrayScan() {
 /** 自动同步间隔档位；mins = -1 表示"每天定时"模式（时间点由 daily_time 指定） */
 export const AUTO_SYNC_OPTIONS = [
   { mins: 0, label: "关闭" },
-  { mins: 15, label: "15分钟" },
-  { mins: 30, label: "30分钟" },
   { mins: 60, label: "1小时" },
   { mins: 360, label: "6小时" },
   { mins: 720, label: "12小时" },

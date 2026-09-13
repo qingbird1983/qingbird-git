@@ -1059,11 +1059,10 @@ body {
   color: var(--fg3);
 }
 
-/* 自动同步弹层的分段控件：7 个档位排成 4+3 网格，
-   沿用单行胶囊（flex:1 + nowrap）会溢出背景 */
+/* 自动同步弹层的分段控件：5 个档位排成一行 */
 .auto-sync-seg {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 4px;
   background: var(--bg3);
   border-radius: var(--r-lg);
