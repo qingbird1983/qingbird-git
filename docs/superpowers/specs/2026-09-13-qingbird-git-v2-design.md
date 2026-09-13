@@ -163,6 +163,7 @@ light 主题用 #1a1c1f 替代 #fff。
 | README 打开 按钮 | 顶部 icon | **设置 → 文件关联**(默认系统关联) | 删除入口,设置里改 |
 | 语言统计 | 主面板底部 footer | **设置 → 仓库 → 语言统计**(默认折叠) | 不再出现在主面板 |
 | 主题切换 | 侧栏底部 icon-btn | 侧栏底部 + topbar 右侧 两处可点 | 行为不变 |
+| 工具栏溢出菜单(kebab) | 新增 | topbar 右上 ⋯ 下拉菜单 | 收纳「跑测试 / 构建 / 命令面板 / 磁盘清理 / 语言统计」,按设置中保存的命令触发 |
 
 ### 5.1 三键 Hero(核心)
 
@@ -249,10 +250,10 @@ light 主题用 #1a1c1f 替代 #fff。
     │   │   · 代理设置(代理探测、强制启用开关)
     │   │   · 自启开关(已存在,移到这)
     │   ├── 「命令预设」
+    │   │   · 仓库下拉框选择要编辑的仓库
     │   │   · 测试命令 input + 保存按钮
     │   │   · 构建命令 input + 保存按钮
-    │   │   · 开发命令 input + 保存按钮
-    │   │   · (已存命令的 repo 列表,可在主面板下拉触发)
+    │   │   · (本期不做全局命令预设,沿用每个仓库单独存;命令执行入口见 §10)
     │   ├── 「维护」
     │   │   · 扫描仓库磁盘空间 + 清理缓存按钮(搬自 SpaceModal)
     │   │   · README 关联程序(默认系统关联)
@@ -286,7 +287,7 @@ light 主题用 #1a1c1f 替代 #fff。
 | `src/main.tsx` | 加 `import "./styles/tokens.css"`;字体栈换 token。 |
 | `src/App.tsx` | 微调:新增 settings modal 的 show 状态(由 topbar/侧栏入口触发)。 |
 | `src/components/RepoList.tsx` | 类名调整:`repo-item` → `repo-row`,active 用 `--ds-raised`;footer 加分组容器;host badge 重排。 |
-| `src/components/RepoPanel.tsx` | 大改:① 删除"打开 README/磁盘"两个 icon-btn;② 5 按钮行 → 3 键 Hero;③ status chips 单独一行;④ log 区头部加终止按钮(已有);⑤ 语言统计改为可选折叠(默认隐藏)。 |
+| `src/components/RepoPanel.tsx` | 大改:① 新增 topbar 块(仓库名 + 分支 + 主题 + 设置 + kebab 溢出);② 删除"打开 README/磁盘"两个 icon-btn;③ 5 按钮行 → 3 键 Hero;④ status chips 单独一行;⑤ log 区头部加终止按钮(已有);⑥ 语言统计改为可选折叠(默认隐藏)。 |
 | `src/components/SettingsModal.tsx` | 大改:分节、分组;命令预设、维护、文件关联三个新区块。 |
 | `src/components/CloneModal.tsx` / `NewRepoModal.tsx` / `InitRepoModal.tsx` | 仅类名调整,视觉用 token 化。 |
 | `src/components/HistoryModal.tsx` | 类名调整,history-item 改 raised tile。 |
