@@ -27,7 +27,10 @@ Windows 桌面工具：本地 Git 仓库一键同步（Tauri 2 + React + TypeScr
 
 运行测试：`cd src-tauri && cargo test`
 
-前端测试：`pnpm test:web`（`src/repoCmds.test.mjs` 运行命令面板的保存逻辑、`src/forkCard.test.mjs` 分叉卡片该出哪些按钮）
+前端测试：`pnpm test:web`（零依赖，node 自带测试运行器）
+- `src/repoCmds.test.mjs` 运行命令面板的保存/预填逻辑
+- `src/forkCard.test.mjs` 分叉卡片该出哪些按钮
+- `src/pinnedCmds.test.mjs` 操作区自定义按钮的列表编辑规则（上限/空行/文案兜底）
 
 代码检查：`pnpm build`（含 tsc 类型检查）
 
@@ -51,17 +54,22 @@ Rust 快速检查：`cd src-tauri && cargo check`
   - `fork.rs` 分叉恢复向导：`ForkInfo` 组装（附两边的提交列表）+ 备份并变基 + 撤销变基。
     变基序列的 runner 是注入的（`LocalRun`/`RemoteRun`），单测用临时目录里的真实仓库跑真实 git
   - `create.rs` 云端新建仓库（GitHub / Gitee API）；`clone.rs` 克隆
-  - `run_cmd.rs` 一键运行命令（测试/构建/开发/安装依赖，后台运行并流式回传输出）
-  - `settings.rs` 设置与凭证；`shell.rs` 快捷打开与代理探测；`space.rs` 磁盘占用与缓存清理
+  - `run_cmd.rs` 一键运行命令（测试/构建/开发/安装依赖，后台运行并流式回传输出）+
+    操作区自定义按钮 `set_pinned_cmds`（上限 3 个，超了报错不静默截断）
+  - `settings.rs` 设置与凭证；`shell.rs` 快捷打开与代理探测；
+    `space.rs` 磁盘占用、大文件 Top 10、缓存清理与 `.gitignore` 建议（写入只接受白名单目录名）
   - 新增 command 时：写进对应领域模块，再到 `lib.rs` 的 `generate_handler!` 注册；
     跨模块复用的私有项用 `pub(super)`，不要为了省事把所有东西都 `pub`
-- `src-tauri/src/store.rs`：配置持久化（`%APPDATA%/com.qingbird.git/config.json`，含代理、主题、每仓库命令/定时设置）
+- `src-tauri/src/store.rs`：配置持久化（`%APPDATA%/com.qingbird.git/config.json`，含代理、主题、
+  每仓库命令/定时设置/操作区按钮）
 - `src-tauri/src/lib.rs`：托盘图标与菜单（显示/扫描/退出）、关窗最小化到托盘、启动时应用持久化主题、开机自启与系统通知插件注册
 - 前端状态：zustand（`src/store.ts` 只放 state + actions）；
   `src/lib/` 放与 store 解耦的纯逻辑（`theme.ts` 主题、`sidebar.ts` 侧栏宽度、`autoSync.ts` 自动同步档位文案、
   `repos.ts` 排序、`appEvents.ts` 托盘与自动同步的后台事件桥接、
-  `forkGuide.ts` 分叉卡片该出哪些按钮与文案）；
+  `forkGuide.ts` 分叉卡片该出哪些按钮与文案、`pinnedCmds.ts` 操作区自定义按钮的列表编辑规则）；
   `src/repoCmds.ts` 一键运行命令的保存/预填纯逻辑（配 `pnpm test:web` 回归测试）
+  - 这类模块里**不要**写返回 `?? []` 的帮手函数：每次渲染新建数组，拿它当 `useEffect` 依赖会让 effect 每轮重跑。
+    需要默认值时由调用方声明模块级的空数组常量（见 `RepoPanel` 的 `EMPTY_PINNED`）
 - 前端 UI：`src/components/`（`RepoList` 列表 + `RepoItem` 单条目、`RepoPanel` 主面板骨架 +
   `panel/` 下的浮层组件（含 `ForkCard` 分叉恢复卡片）、`CmdPanel`/`SpacePanel`/各对话框）
 - 样式：`src/App.css` 只留文件头与 `@import`，实体在 `src/styles/*.css`；

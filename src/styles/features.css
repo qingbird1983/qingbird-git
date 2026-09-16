@@ -305,6 +305,18 @@
   font-family: var(--font-mono);
 }
 
+/* ---------- 操作区自定义按钮的编辑器 ---------- */
+/* 与 `.cmd-row .modal-input` 同权重、位置靠后，所以能覆盖它的 flex 与等宽字体。
+   文案输入框窄一些：按钮上就那么几个字，没必要和命令输入平分宽度 */
+.cmd-row .cmd-pin-label {
+  flex: 0 0 34%;
+  font-family: var(--font-ui);
+}
+
+.cmd-pin-actions .cmd-state {
+  margin-left: auto;
+}
+
 /* ---------- 本次同步内容弹出面板 ---------- */
 .sync-commit-list {
   max-height: 40vh;

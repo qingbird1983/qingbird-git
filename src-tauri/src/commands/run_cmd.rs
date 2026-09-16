@@ -93,6 +93,55 @@ pub fn set_repo_cmds(
     cfg.repos
 }
 
+/// 操作区最多钉几个自定义按钮：再多就把工具栏挤成两行还认不出谁是谁
+pub(super) const MAX_PINNED_CMDS: usize = 3;
+/// 自动兜底的按钮文案最长几个字（中文按字符算，不按字节）
+const PINNED_LABEL_CHARS: usize = 12;
+
+/// 命令 → 按钮文案：取前两个词（"pnpm run lint" → "pnpm run"），够短也够认得出来
+fn derive_pinned_label(cmd: &str) -> String {
+    let joined = cmd.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+    joined.chars().take(PINNED_LABEL_CHARS).collect()
+}
+
+/// 校验并整理要钉到操作区的命令。
+/// 上限是硬约束（超了直接报错，不静默截断——用户以为钉上了却没出现更糟）；
+/// 空命令的行直接丢掉（多半是编辑器里没填完的空行），文案留空则用命令兜底
+fn sanitize_pinned(cmds: Vec<store::PinnedCmd>) -> Result<Vec<store::PinnedCmd>, String> {
+    if cmds.len() > MAX_PINNED_CMDS {
+        return Err(format!("操作区最多只能钉 {MAX_PINNED_CMDS} 个按钮"));
+    }
+    let mut out = Vec::new();
+    for c in cmds {
+        let cmd = c.cmd.trim().to_string();
+        if cmd.is_empty() {
+            continue;
+        }
+        let label = match c.label.trim() {
+            "" => derive_pinned_label(&cmd),
+            l => l.to_string(),
+        };
+        out.push(store::PinnedCmd { label, cmd });
+    }
+    Ok(out)
+}
+
+/// 保存某仓库钉在操作区的自定义命令按钮（最多 MAX_PINNED_CMDS 个）
+#[tauri::command]
+pub fn set_pinned_cmds(
+    app: tauri::AppHandle,
+    path: String,
+    cmds: Vec<store::PinnedCmd>,
+) -> Result<Vec<store::RepoEntry>, String> {
+    let pinned = sanitize_pinned(cmds)?;
+    let mut cfg = store::load(&app);
+    if let Some(e) = cfg.repos.iter_mut().find(|r| r.path == path) {
+        e.pinned_cmds = pinned;
+    }
+    store::save(&app, &cfg)?;
+    Ok(cfg.repos)
+}
+
 /// 设置某仓库的定时自动同步。两种模式：
 /// - 间隔模式：daily_time 为空，mins > 0（分钟）
 /// - 每天定时模式：daily_time = "HH:MM"（本地时区），mins 置 0
@@ -387,6 +436,7 @@ mod tests {
             build_cmd: "cargo build --release".into(),
             dev_cmd: "cargo run".into(),
             install_cmd: "cargo fetch".into(),
+            pinned_cmds: Vec::new(),
             auto_sync_mins: 0,
             daily_time: String::new(),
             auto_pull: false,
@@ -419,5 +469,48 @@ mod tests {
         assert_eq!(e.test_cmd, "cargo test");
         // 清空即回到"未设置"（界面下次打开会用自动识别结果预填）
         assert!(e.build_cmd.is_empty() && e.dev_cmd.is_empty() && e.install_cmd.is_empty());
+    }
+
+    #[test]
+    fn pinned_label_falls_back_to_the_command() {
+        // 文案留空时不能让界面上出现一个没字可点的按钮
+        assert_eq!(derive_pinned_label("pnpm run lint"), "pnpm run");
+        assert_eq!(derive_pinned_label("cargo clippy"), "cargo clippy");
+        assert_eq!(derive_pinned_label("  make  "), "make");
+        // 单行长命令没有空格可切，就按字符截断，且不能把中文截成半个字
+        assert_eq!(derive_pinned_label("一个非常非常长的中文命令名占位"), "一个非常非常长的中文命令");
+        assert!(derive_pinned_label("abcdefghijklmnop").chars().count() <= PINNED_LABEL_CHARS);
+    }
+
+    #[test]
+    fn pinned_cmds_over_the_cap_are_refused_not_silently_dropped() {
+        let make = |n: usize| -> Vec<store::PinnedCmd> {
+            (0..n)
+                .map(|i| store::PinnedCmd {
+                    label: format!("b{i}"),
+                    cmd: format!("cmd{i}"),
+                })
+                .collect()
+        };
+        assert!(sanitize_pinned(make(MAX_PINNED_CMDS)).is_ok());
+        let err = sanitize_pinned(make(MAX_PINNED_CMDS + 1)).unwrap_err();
+        assert!(err.contains("最多"), "{err}");
+    }
+
+    #[test]
+    fn pinned_cmds_drop_blank_rows_and_trim() {
+        let got = sanitize_pinned(vec![
+            store::PinnedCmd { label: "  检查  ".into(), cmd: "  pnpm lint  ".into() },
+            // 编辑器里没填完的空行：丢掉而不是报错为难用户
+            store::PinnedCmd { label: "空的".into(), cmd: "   ".into() },
+            // 没写文案：用命令前两个词兜底
+            store::PinnedCmd { label: String::new(), cmd: "cargo clippy --all".into() },
+        ])
+        .unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].label, "检查");
+        assert_eq!(got[0].cmd, "pnpm lint");
+        assert_eq!(got[1].label, "cargo clippy");
+        assert_eq!(got[1].cmd, "cargo clippy --all");
     }
 }

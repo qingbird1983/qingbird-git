@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, remoteHost, type FileChange } from "../api";
 import { useApp, type LogLine } from "../store";
 import { autoSyncLabel } from "../lib/autoSync";
+import type { PinnedCmd } from "../lib/pinnedCmds";
 import HistoryModal from "./HistoryModal";
 import CmdPanel from "./CmdPanel";
 import AutoSyncPopover from "./panel/AutoSyncPopover";
@@ -20,6 +21,8 @@ import {
 // zustand v5 要求选择器返回稳定引用：仓库还没有日志时返回这个共享常量，
 // 不能在 selector 里新建 []，否则 getSnapshot 每次都是新引用导致 React 白屏
 const EMPTY_LOGS: LogLine[] = [];
+/** 同上：仓库没钉自定义按钮时也必须是稳定引用 */
+const EMPTY_PINNED: PinnedCmd[] = [];
 
 export default function RepoPanel() {
   const {
@@ -47,6 +50,8 @@ export default function RepoPanel() {
   const update = selected ? changes[selected] : undefined;
   const repoEntry = selected ? repos.find((r) => r.path === selected) : undefined;
   const displayName = repoEntry?.alias || selected?.split(/[\\/]/).pop() || "";
+  /** 钉在操作区的自定义命令按钮（旧配置没有这个字段，缺省为空） */
+  const pinned = repoEntry?.pinned_cmds ?? EMPTY_PINNED;
 
   useEffect(() => {
     setConfirmStash(false);
@@ -266,6 +271,18 @@ export default function RepoPanel() {
           <IconHammer size={17} />
           构建
         </button>
+        {pinned.map((p, i) => (
+          <button
+            key={`${i}-${p.cmd}`}
+            className="action-btn pill"
+            title={`自定义按钮：${p.cmd}`}
+            disabled={!!busy || !!cmdRunning}
+            onClick={() => selected && void runRepoCmd(selected, p.cmd)}
+          >
+            <IconPlay size={17} />
+            {p.label}
+          </button>
+        ))}
       </div>
 
       {confirmStash && (

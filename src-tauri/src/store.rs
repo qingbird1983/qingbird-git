@@ -4,6 +4,15 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
+/// 钉在操作区的自定义命令按钮
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PinnedCmd {
+    /// 按钮文案（留空时后端用命令前两个词兜底）
+    pub label: String,
+    /// 要运行的命令，走与「跑测试」同一条后台管道
+    pub cmd: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RepoEntry {
     pub path: String,
@@ -25,6 +34,9 @@ pub struct RepoEntry {
     /// 一键运行：安装依赖命令；空串表示未设置（面板用自动识别结果预填，不落盘）
     #[serde(default)]
     pub install_cmd: String,
+    /// 钉在操作区的自定义命令按钮（最多若干个，见 commands::MAX_PINNED_CMDS）
+    #[serde(default)]
+    pub pinned_cmds: Vec<PinnedCmd>,
     /// 定时自动同步间隔（分钟），0 = 关闭或处于"每天定时"模式；只有用户明确开启的仓库才参与调度
     #[serde(default)]
     pub auto_sync_mins: u32,

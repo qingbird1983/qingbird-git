@@ -1,5 +1,6 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type { RepoCmds } from "./repoCmds";
+import type { PinnedCmd } from "./lib/pinnedCmds";
 
 export interface RepoEntry {
   path: string;
@@ -16,6 +17,8 @@ export interface RepoEntry {
   dev_cmd?: string;
   /** 一键运行：安装依赖命令，空串表示未设置（此时用自动识别结果预填） */
   install_cmd?: string;
+  /** 钉在操作区的自定义命令按钮（旧配置可能缺省） */
+  pinned_cmds?: PinnedCmd[];
   /** 定时自动同步间隔（分钟），0 = 关闭或"每天定时"模式（旧配置可能缺省） */
   auto_sync_mins?: number;
   /** "每天定时"模式的执行时刻（本地时区 "HH:MM"），非空即每天定时模式 */
@@ -251,6 +254,9 @@ export const api = {
       devCmd: cmds.dev,
       installCmd: cmds.install,
     }),
+  /** 保存操作区自定义按钮（最多 3 个；空命令行会被后端丢掉） */
+  setPinnedCmds: (path: string, cmds: PinnedCmd[]) =>
+    invoke<RepoEntry[]>("set_pinned_cmds", { path, cmds }),
   setAutoSync: (path: string, mins: number, autoPull: boolean, dailyTime = "") =>
     invoke<RepoEntry[]>("set_auto_sync", { path, mins, autoPull, dailyTime }),
   pinRepo: (path: string, pinned: boolean) =>

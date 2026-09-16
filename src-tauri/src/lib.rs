@@ -85,6 +85,7 @@ pub fn run() {
             commands::open_repo_website,
             commands::stop_repo_cmd,
             commands::set_repo_cmds,
+            commands::set_pinned_cmds,
             commands::set_auto_sync,
             commands::pin_repo,
             commands::detect_cmds,

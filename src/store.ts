@@ -6,6 +6,7 @@ import { sortRepos } from "./lib/repos";
 import { loadSidebarWidth, saveSidebarWidth } from "./lib/sidebar";
 import { applyThemeClass, normalizeTheme, type ThemeMode } from "./lib/theme";
 import type { RepoCmds } from "./repoCmds";
+import type { PinnedCmd } from "./lib/pinnedCmds";
 
 export interface LogLine {
   time: string;
@@ -100,6 +101,8 @@ interface AppState {
   removeRepo: (path: string) => Promise<void>;
   renameRepo: (path: string, alias: string) => Promise<void>;
   setRepoCmds: (path: string, cmds: RepoCmds) => Promise<void>;
+  /** 保存操作区自定义命令按钮（最多 3 个） */
+  setPinnedCmds: (path: string, cmds: PinnedCmd[]) => Promise<void>;
   pinRepo: (path: string, pinned: boolean) => Promise<void>;
   setAutoSync: (path: string, mins: number, autoPull: boolean, dailyTime?: string) => Promise<void>;
   log: (text: string, kind?: LogLine["kind"], key?: string) => void;
@@ -225,6 +228,12 @@ export const useApp = create<AppState>((set, get) => ({
 
   setRepoCmds: async (path, cmds) => {
     const repos = await api.setRepoCmds(path, cmds);
+    sortRepos(repos);
+    set({ repos });
+  },
+
+  setPinnedCmds: async (path, cmds) => {
+    const repos = await api.setPinnedCmds(path, cmds);
     sortRepos(repos);
     set({ repos });
   },

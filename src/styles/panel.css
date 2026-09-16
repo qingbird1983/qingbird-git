@@ -132,10 +132,14 @@
 .actions {
   display: flex;
   gap: 10px;
+  /* 钉住的自定义按钮会让这里超过一行：允许换行，别把按钮压成挤在一起的窄条 */
+  flex-wrap: wrap;
 }
 
 .action-btn {
-  flex: 1;
+  /* 下限按最宽的固定文案（检测云端更新）定，窄窗口下刚好还是一行 */
+  flex: 1 1 108px;
+  min-width: 108px;
   display: inline-flex;
   align-items: center;
   justify-content: center;

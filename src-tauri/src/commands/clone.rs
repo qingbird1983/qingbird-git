@@ -106,6 +106,7 @@ pub fn clone_repo(
             build_cmd: String::new(),
             dev_cmd: String::new(),
             install_cmd: String::new(),
+            pinned_cmds: Vec::new(),
             auto_sync_mins: 0,
             daily_time: String::new(),
             auto_pull: false,
