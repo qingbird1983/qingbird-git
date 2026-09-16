@@ -48,6 +48,10 @@ export interface OpResult {
   status: RepoStatus | null;
   need_stash: boolean;
   changes: UpdateChanges | null;
+  /** 发现分叉时的结构化信息（检测/拉取/推送三处都可能带） */
+  fork?: ForkInfo | null;
+  /** 本次变基刚建好的备份分支名：有这个值才给"撤销变基"（后端只在变基动作里返回） */
+  backup_branch?: string | null;
 }
 
 export interface ProgressEvent {
@@ -59,6 +63,22 @@ export interface ProgressEvent {
 export interface UpdateChanges {
   commits: string[];
   diff_stat: string;
+}
+
+/** 本地与云端各自都有对方没有的提交时的结构化信息（后端算好，前端不做字符串匹配） */
+export interface ForkInfo {
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  branch: string;
+  /** 上游分支全名，如 origin/main */
+  upstream: string;
+  /** 本地未推送的提交（@{u}..HEAD） */
+  local_commits: string[];
+  /** 云端新增的提交（HEAD..@{u}） */
+  remote_commits: string[];
+  /** 非空时卡片只说明原因、不给动作（仓库正处于用户自己的变基/合并中途） */
+  blocked_reason: string | null;
 }
 
 export interface ScanItem {
@@ -163,6 +183,11 @@ export const api = {
   pull: (path: string, stash: boolean, onProgress: Channel<ProgressEvent>) =>
     invoke<OpResult>("pull_repo", { path, stash, onProgress }),
   push: (path: string) => invoke<OpResult>("push_repo", { path }),
+  /** 备份并变基到云端：动手前强制建备份分支，冲突自动中止复原 */
+  rebaseFork: (path: string, stash: boolean, onProgress: Channel<ProgressEvent>) =>
+    invoke<OpResult>("rebase_fork", { path, stash, onProgress }),
+  /** 撤销上次变基：硬回退到备份分支（界面需先二次确认，会丢弃变基后的提交） */
+  undoRebase: (path: string) => invoke<OpResult>("undo_rebase", { path }),
   commitPush: (path: string, message: string) => invoke<OpResult>("commit_push", { path, message }),
   listChanges: (path: string) => invoke<FileChange[]>("list_changes", { path }),
   recentCommits: (path: string) => invoke<CommitInfo[]>("recent_commits", { path }),

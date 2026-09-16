@@ -7,6 +7,7 @@ import CmdPanel from "./CmdPanel";
 import AutoSyncPopover from "./panel/AutoSyncPopover";
 import BusyPop from "./panel/BusyPop";
 import ChangesPopover from "./panel/ChangesPopover";
+import ForkCard from "./panel/ForkCard";
 import LogArea from "./panel/LogArea";
 import StashBar from "./panel/StashBar";
 import SyncContentPopover from "./panel/SyncContentPopover";
@@ -25,9 +26,12 @@ export default function RepoPanel() {
     selected, status, busy, cloning, cmdRunning, progress, changes,
     checkUpdate, pull, push, commitPush, runRepoCmd, stopRepoCmd,
     openInFolder, openInTerminal, openReadme, cancelOp, setAutoSync,
+    rebaseFork, undoRebase,
   } = useApp();
   // 日志按仓库分开：只显示当前选中仓库自己的操作日志
   const logs = useApp((s) => (s.selected ? s.logs[s.selected] : undefined) ?? EMPTY_LOGS);
+  const fork = useApp((s) => (s.selected ? s.forks[s.selected] : undefined));
+  const backup = useApp((s) => (s.selected ? s.backups[s.selected] : undefined));
   const [confirmStash, setConfirmStash] = useState(false);
   const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
   const [commitMsg, setCommitMsg] = useState("");
@@ -276,6 +280,14 @@ export default function RepoPanel() {
           onCancel={() => void cancelOp()}
         />
       )}
+
+      <ForkCard
+        fork={fork}
+        backup={backup}
+        busy={!!busy}
+        onRebase={(stash) => void rebaseFork(stash)}
+        onUndo={() => void undoRebase()}
+      />
 
 <LogArea logs={logs} cmdRunning={cmdRunning} logRef={logRef} onStop={() => void stopRepoCmd()} />
 

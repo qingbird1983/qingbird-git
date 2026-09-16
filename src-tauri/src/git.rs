@@ -28,6 +28,15 @@ fn is_cancelled() -> bool {
     CANCELLED.load(Ordering::SeqCst)
 }
 
+/// 测试用的"别和取消测试同时派生 git"读写锁。
+///
+/// `CANCELLED` 是进程级全局标记（生产环境同一时刻只允许一个忙操作，这样最简单），
+/// 但 `cargo test` 默认并行：取消测试一置位，别的测试正在跑的 git 子进程会被
+/// 整树终止，表现为"没有退出码、stderr 为空"的诡异失败——看起来像 git 挂了，
+/// 其实是被隔壁测试连坐。所以约定：取消测试持写锁独占，其余会派生 git 的测试持读锁。
+#[cfg(test)]
+pub(crate) static GIT_TEST_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 pub const CANCELLED_MSG: &str = "操作已被用户取消";
 
 #[derive(Debug, Clone)]
@@ -325,6 +334,10 @@ mod tests {
 
     #[test]
     fn cancel_kills_running_git() {
+        // 取消是整个进程的全局状态，跑这段时必须独占，否则会杀掉别的测试的 git
+        let _exclusive = GIT_TEST_LOCK
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         clear_cancel();
         // 黑洞地址：TCP 连接会长时间挂起，给取消留出触发窗口
         let t = std::thread::spawn(|| {

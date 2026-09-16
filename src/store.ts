@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { Channel } from "@tauri-apps/api/core";
-import { api, remoteHost, type ProgressEvent, type RepoEntry, type RepoStatus, type UpdateChanges } from "./api";
+import { api, remoteHost, type ForkInfo, type OpResult, type ProgressEvent, type RepoEntry, type RepoStatus, type UpdateChanges } from "./api";
 import { autoSyncLabel } from "./lib/autoSync";
 import { sortRepos } from "./lib/repos";
 import { loadSidebarWidth, saveSidebarWidth } from "./lib/sidebar";
@@ -29,6 +29,33 @@ export interface AutoToast {
 let proxyToastTimer: ReturnType<typeof setTimeout> | null = null;
 let autoToastTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * 把后端返回的分叉信息落进 store。
+ *
+ * `forks` 每次都以后端为准（一次成功的变基就该让卡片消失）；
+ * `backups` 只在后端确实返回时才写入——它是"刚做过变基"的凭据，
+ * 不能被一次普通的检测/拉取顺手抹掉（那样用户就找不到撤销入口了），
+ * 只在推送成功或撤销成功时显式清掉。
+ */
+function forkPatch(path: string, r: OpResult) {
+  return (s: AppState) => {
+    const forks = { ...s.forks };
+    if (r.fork) forks[path] = r.fork;
+    else delete forks[path];
+    const backups = r.backup_branch ? { ...s.backups, [path]: r.backup_branch } : s.backups;
+    return { forks, backups };
+  };
+}
+
+/** 变基结果已经推上去了（或已撤销）：再"回退到备份"只会制造分叉，收起入口 */
+function clearBackup(path: string) {
+  return (s: AppState) => {
+    const backups = { ...s.backups };
+    delete backups[path];
+    return { backups };
+  };
+}
+
 interface AppState {
   repos: RepoEntry[];
   selected: string | null;
@@ -49,6 +76,10 @@ interface AppState {
   progress: ProgressEvent | null;
   /** 每个仓库最近一次拉取的更新内容 */
   changes: Record<string, UpdateChanges>;
+  /** 每个仓库最近一次检测/拉取/推送发现的分叉（后端算好，无分叉即删除） */
+  forks: Record<string, ForkInfo>;
+  /** 每个仓库"刚做过变基"的备份分支名：有它才给撤销入口（会话级，不落盘） */
+  backups: Record<string, string>;
   theme: ThemeMode;
   /** 有文件夹拖入窗口时为 true（显示拖放提示层） */
   dragging: boolean;
@@ -82,6 +113,10 @@ interface AppState {
   setProgress: (p: ProgressEvent | null) => void;
   checkUpdate: () => Promise<void>;
   pull: (stash: boolean) => Promise<"ok" | "dirty" | "fail">;
+  /** 备份并变基到云端（会改写本地历史，动手前后端强制先建备份分支） */
+  rebaseFork: (stash: boolean) => Promise<void>;
+  /** 撤销上次变基：硬回退到备份分支（界面上需二次确认） */
+  undoRebase: () => Promise<void>;
   push: () => Promise<void>;
   commitPush: (message: string) => Promise<boolean>;
   cloneRepo: (url: string, parentDir: string, netMode?: string) => boolean;
@@ -116,6 +151,8 @@ export const useApp = create<AppState>((set, get) => ({
   autoToast: null,
   progress: null,
   changes: {},
+  forks: {},
+  backups: {},
   theme: "dark",
   dragging: false,
   sidebarOpen: true,
@@ -279,11 +316,59 @@ export const useApp = create<AppState>((set, get) => ({
         get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy");
       }
       if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
+      set(forkPatch(path, r));
     } catch (e) {
       get().log(String(e), "error");
     } finally {
       get().setBusy(null);
       get().setProgress(null);
+    }
+  },
+
+  rebaseFork: async (stash) => {
+    const path = get().selected;
+    if (!path || get().busy || get().cloning) return;
+    get().setBusy("正在变基到云端…");
+    const channel = new Channel<ProgressEvent>();
+    channel.onmessage = (p) => get().setProgress(p);
+    try {
+      const r = await api.rebaseFork(path, stash, channel);
+      if (r.output.trim()) get().log(r.output.trim());
+      get().log(r.message, r.ok ? "success" : "error");
+      if (r.used_proxy) {
+        set({ lastProxy: r.used_proxy });
+        get().notifyProxy(r.used_proxy);
+        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy");
+      }
+      if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
+      set(forkPatch(path, r));
+      if (r.ok && r.backup_branch) {
+        get().log(`备份分支 ${r.backup_branch} 停在变基前的位置，随时可以撤销`, "info");
+      }
+    } catch (e) {
+      get().log(String(e), "error");
+    } finally {
+      get().setBusy(null);
+      get().setProgress(null);
+    }
+  },
+
+  undoRebase: async () => {
+    const path = get().selected;
+    if (!path || get().busy || get().cloning) return;
+    get().setBusy("正在撤销变基…");
+    try {
+      const r = await api.undoRebase(path);
+      if (r.output.trim()) get().log(r.output.trim());
+      get().log(r.message, r.ok ? "success" : "error");
+      if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
+      set(forkPatch(path, r));
+      // 撤销完成后收起入口，避免"撤销的撤销"这种绕圈操作
+      if (r.ok) set(clearBackup(path));
+    } catch (e) {
+      get().log(String(e), "error");
+    } finally {
+      get().setBusy(null);
     }
   },
 
@@ -303,6 +388,7 @@ export const useApp = create<AppState>((set, get) => ({
         get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy");
       }
       if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
+      set(forkPatch(path, r));
       if (r.ok && r.changes) {
         set((s) => ({ changes: { ...s.changes, [path]: r.changes! } }));
         const host = remoteHost(r.status?.remote_url ?? "");
@@ -340,6 +426,9 @@ export const useApp = create<AppState>((set, get) => ({
         get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy");
       }
       if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
+      set(forkPatch(path, r));
+      // 变基结果一旦推上去就发布了，再回退只会制造新的分叉
+      if (r.ok) set(clearBackup(path));
     } catch (e) {
       get().log(String(e), "error");
     } finally {
@@ -417,6 +506,9 @@ export const useApp = create<AppState>((set, get) => ({
         get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy");
       }
       if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
+      set(forkPatch(path, r));
+      // 提交并推送成功后同样是"已发布"，收起变基的回退入口
+      if (r.ok) set(clearBackup(path));
       return r.ok;
     } catch (e) {
       get().log(String(e), "error");

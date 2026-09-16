@@ -3,6 +3,7 @@
 use crate::{git, store};
 use tauri::ipc::Channel;
 
+use super::fork::fork_info;
 use super::net::{identity_config, progress_hooks, run_local, run_net_op, NetMode};
 use super::repos::{read_status, touch_repo, valid_repo};
 use super::types::{combined, OpResult, ProgressEvent, UpdateChanges};
@@ -65,6 +66,8 @@ pub fn do_check(
             status: Some(status),
             need_stash: false,
             changes: None,
+            fork: None,
+            backup_branch: None,
         };
     }
 
@@ -82,6 +85,8 @@ pub fn do_check(
     } else {
         "已是最新，无需同步".to_string()
     };
+    // 检测阶段就发现分叉也要给出口：多数用户是从"检测更新"这里撞上分叉的
+    let fork = fork_info(path, &status, &|a| run_local(path, a));
     OpResult {
         ok: true,
         message,
@@ -90,6 +95,8 @@ pub fn do_check(
         status: Some(status),
         need_stash: false,
         changes: None,
+        fork,
+        backup_branch: None,
     }
 }
 
@@ -127,6 +134,8 @@ pub fn do_pull(
             status: Some(status_before),
             need_stash: true,
             changes: None,
+            fork: None,
+            backup_branch: None,
         };
     }
 
@@ -176,17 +185,20 @@ pub fn do_pull(
                 status: Some(status),
                 need_stash: false,
                 changes: None,
+                fork: None,
+                backup_branch: None,
             };
         }
     }
 
     if !pull_out.success {
+        // 分叉用真实状态判定（ahead/behind），不去猜 stderr 里的措辞：
+        // git 版本的提示语会变，但"两边各有对方没有的提交"这个事实不会
+        let fork = fork_info(path, &status, &|a| run_local(path, a));
         let message = if pull_out.stderr.contains("no tracking information") {
             "当前分支没有上游分支，无法拉取".to_string()
-        } else if pull_out.stderr.contains("Not possible to fast-forward")
-            || pull_out.stderr.contains("divergent")
-        {
-            "本地与云端历史分叉，ff 拉取失败，请手动处理".to_string()
+        } else if fork.is_some() {
+            "本地与云端历史分叉，ff 拉取失败——可以用下面的方式合流".to_string()
         } else if used_proxy.is_none() && git::is_network_error(&pull_out) {
             "拉取失败：无法连接远端，且未找到可用代理".to_string()
         } else {
@@ -200,6 +212,8 @@ pub fn do_pull(
             status: Some(status),
             need_stash: false,
             changes: None,
+            fork,
+            backup_branch: None,
         };
     }
 
@@ -218,6 +232,8 @@ pub fn do_pull(
         status: Some(status),
         need_stash: false,
         changes,
+        fork: None,
+        backup_branch: None,
     }
 }
 
@@ -275,6 +291,8 @@ fn do_push(app: &tauri::AppHandle, path: &str) -> OpResult {
             status: Some(status),
             need_stash: false,
             changes: None,
+            fork: None,
+            backup_branch: None,
         };
     }
     if !status.has_upstream {
@@ -297,6 +315,7 @@ fn do_push(app: &tauri::AppHandle, path: &str) -> OpResult {
     touch_repo(app, path);
 
     if !push_out.success {
+        // 推送被拒多半是对面又前进了：这时同样要给分叉出口，而不是丢一句"请先拉取"
         let message =
             if push_out.stderr.contains("fetch first") || push_out.stderr.contains("rejected") {
                 "推送被拒绝：云端有新提交，请先拉取".to_string()
@@ -309,6 +328,7 @@ fn do_push(app: &tauri::AppHandle, path: &str) -> OpResult {
             } else {
                 "推送失败".to_string()
             };
+        let fork = fork_info(path, &status, &|a| run_local(path, a));
         return OpResult {
             ok: false,
             message,
@@ -317,6 +337,8 @@ fn do_push(app: &tauri::AppHandle, path: &str) -> OpResult {
             status: Some(status),
             need_stash: false,
             changes: None,
+            fork,
+            backup_branch: None,
         };
     }
 
@@ -333,6 +355,8 @@ fn do_push(app: &tauri::AppHandle, path: &str) -> OpResult {
         status: Some(status),
         need_stash: false,
         changes: None,
+        fork: None,
+        backup_branch: None,
     }
 }
 
@@ -361,6 +385,8 @@ pub fn commit_push(app: tauri::AppHandle, path: String, message: String) -> OpRe
             status: Some(st),
             need_stash: false,
             changes: None,
+            fork: None,
+            backup_branch: None,
         };
     }
 
@@ -392,4 +418,3 @@ pub fn commit_push(app: tauri::AppHandle, path: String, message: String) -> OpRe
     }
     result
 }
-

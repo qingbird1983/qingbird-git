@@ -9,6 +9,7 @@
 //! - `net`    git 网络操作编排（直连→代理回退、认证注入、进度解析）
 //! - `repos`  仓库增删改查、状态、初始化、变更、语言统计、一键扫描
 //! - `sync`   三键操作与提交推送
+//! - `fork`   分叉恢复向导（备份并变基、撤销变基）
 //! - `create` 云端新建仓库
 //! - `clone`  克隆远端仓库
 //! - `run_cmd` 一键运行命令（测试 / 构建 / 开发 / 安装依赖）
@@ -21,6 +22,7 @@ use std::time::Duration;
 
 mod clone;
 mod create;
+mod fork;
 mod net;
 mod repos;
 mod run_cmd;
@@ -39,6 +41,7 @@ mod types;
 // 只会导出命令函数，隐藏项引用不到，编译期会报 `cannot find __cmd__xxx`。
 pub use clone::*;
 pub use create::*;
+pub use fork::*;
 pub use repos::*;
 pub use run_cmd::*;
 pub use settings::*;
