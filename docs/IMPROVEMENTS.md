@@ -196,9 +196,27 @@ pub(crate) fn terminate_job_tree(_job: isize) {}
 
 ---
 
-### 8. ✨ 提交历史看 diff（M）【来源 FB-B2】
+### 8. ✅ ✨ 提交历史看 diff（M）【来源 FB-B2】
 
-HistoryModal 现在只有提交列表。点击一条 → `git show <hash> --stat` 展示文件级变更摘要，再点文件看 patch（`git show <hash> -- <path>`）。注意大 diff 截断展示 + 「用外部工具打开」兜底。
+**已交付（2026-09-16）**：新增 `commands/history.rs`（`commit_detail` 文件级摘要 + `commit_patch` 单文件 patch），
+HistoryModal 改成左列提交、右列明细（弹窗加宽到 900px）。
+
+- **合并提交是这里最容易踩的坑**：`git show <merge>` 默认什么都不输出（只有 `-m` / `--cc` 才给 diff），
+  不处理的话点开合并提交就是一片空白。所以先看父提交个数，合并提交改走 `git diff <hash>^ <hash>`
+  （相对第一个父提交看变更）——这也是各类 Git 客户端"点开合并提交"的做法。单测专门锁了这条
+- 文件列表带 `+N −M`，二进制文件标「二进制」而不是 `+0 −0`
+- patch 按增 / 删 / 块头 / 元信息 / 上下文逐行上色（`patchLineKind`）；
+  顺序上文件头 `+++`/`---` 必须优先于增删行判断，否则会被染成增删色
+- **两处截断都给出真出口**：后端正文上限 200k 字符、界面只渲染前 1500 行（几千个 div 足够卡住 webview），
+  任一触发就出现「在终端看完整 diff」——在仓库目录打开终端并执行同一条查看命令。
+  为此把 `shell.rs` 里的终端启动抽成 `spawn_terminal(path, command)`，`open_in_terminal` 也改走它
+- **安全**：hash 只接受十六进制（4–64 位）；文件路径拼进终端命令前对单引号做 PowerShell 转义
+  并拒绝控制字符——这条命令的文件名来自界面，不能直接裸拼进 shell
+- 验收：`cargo test` 54/54（新增 7 个：numstat 解析含二进制与中文路径、按字符截断、
+  hash 与终端转义校验、普通提交的摘要与 patch、**合并提交相对第一个父提交**、未知提交报错不 panic）；
+  `pnpm test:web` 21/21（新增 3 个）；`cargo check --all-targets` 零 warning；`pnpm build` 通过
+
+**原方案**：HistoryModal 现在只有提交列表。点击一条 → `git show <hash> --stat` 展示文件级变更摘要，再点文件看 patch（`git show <hash> -- <path>`）。注意大 diff 截断展示 + 「用外部工具打开」兜底。
 
 ---
 
@@ -295,19 +313,26 @@ HistoryModal 现在只有提交列表。点击一条 → `git show <hash> --stat
 | **轮 1 ✅ 已完成** | P0 | 见肉 + 闭环核心链路 | #2 托盘通知（S）+ #1 分叉向导（M） |
 | **轮 2（#5 已完成）** | P1 | 防以后改不动 | #4 前端单测（H）+ #5 commands 拆分（M） |
 | **轮 3 ✅ 已完成** | P2 上半 | 体验延伸 | #7 容量扩展 #9 自定义按钮（都是 S） |
-| **轮 4（建议下一步）** | P2 下半 | 体验延伸 + 小缺陷 | #8 diff + #10 漏跑修复 |
-| 轮 5 | P1 跨平台 | 修跨平台缺陷 | #6 孤儿进程回收 |
+| **轮 4 ✅ 已完成** | P2 下半 | 体验延伸 + 小缺陷 | #8 diff + #10 漏跑修复 |
+| **轮 5（建议下一步）** | P1 跨平台 | 修跨平台缺陷 | #6 孤儿进程回收 |
 | 轮 6+ | P3 | 装机量起来再做 | 增量推进 |
 
 ### 下一步建议
 
-**轮 2 只剩 #4**：`store.ts` 状态流转覆盖 ≥ 80%。注意本文件里给的老方案是"引入 vitest"，
-2026-09-16 已改用 node 自带 `node --test` + 原生 TS 类型擦除（零新增依赖），继续沿用即可——
-把纯逻辑继续往 `src/lib/` 抽（`forkGuide.ts`、`pinnedCmds.ts` 都是这么做的，共 18 个用例），
+轮 1、轮 3、轮 4 已完成，**轮 2 只剩 #4**（`store.ts` 状态流转覆盖 ≥ 80%）。
+注意本文件里给的老方案是"引入 vitest"：2026-09-16 已改用 node 自带 `node --test` +
+原生 TS 类型擦除（零新增依赖），继续沿用即可——把纯逻辑继续往 `src/lib/` 抽
+（`forkGuide.ts`、`pinnedCmds.ts`、`commitDiff.ts` 都是这么做的，共 21 个用例），
 比为了覆盖率去 mock 一个 500 行的 zustand store 更划算。
 
-**轮 4**：#8 提交历史看 diff（`git show --stat` + 单文件 patch）+ #10 自动同步跨天漏跑修复
-（`daily_is_due` 只判"今天跑没跑过"，关机错过时刻就不会补跑）。后者有明确单测写法，适合先做。
+**轮 5** 是 #6 macOS / Linux 孤儿进程回收：Windows 靠 Job Object 整树回收，
+非 Windows 平台是空实现（`terminate_job_tree` 什么都不做），取消/超时后
+`git remote-https` / `index-pack` 会变孤儿。方案 A（进程组 + SIGTERM，需引入 `libc`）
+更简单；这条只有在非 Windows 平台上才能真验证，**当前环境（Windows）做不了端到端验收**，
+要么只写实现 + 单测，要么等有 macOS/Linux 环境再做。
+
+**轮 6+** 是 P3（配置导出/导入、仓库标签、应用自更新、全局快捷键、SSH 私钥进系统密钥库），
+其中 #11 配置导出导入与 #14 全局快捷键都是 S 级，装机量起来后可以随手做。
 
 完成后在本文件对应条目加 ✅，并写一行简短的交付摘要。
 
@@ -315,6 +340,10 @@ HistoryModal 现在只有提交列表。点击一条 → `git show <hash> --stat
 
 ## 历史
 
+- **2026-09-16（深夜 5）**：**轮 4 收官**。#8 提交历史看 diff 完成——新增 `commands/history.rs`
+  （文件级摘要 + 单文件 patch，合并提交按第一个父提交算），HistoryModal 改成左列提交右列明细，
+  diff 过长时给「在终端看完整 diff」的出口（`shell.rs` 抽出 `spawn_terminal`）。
+  `cargo test` 54/54、`pnpm test:web` 21/21
 - **2026-09-16（深夜 4）**：#10 自动同步跨天漏跑修复完成——`daily_is_due` 改为回看
   「最近一个已到点的执行时刻」，错过某天、第二天在时刻之前开机时会补跑一次；
   防抖靠 `last_auto_check` 本身，原方案里的 `last_daily_run_date` 字段确认不需要。

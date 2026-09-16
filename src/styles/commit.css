@@ -74,22 +74,183 @@
 
 /* ---------- 提交历史 ---------- */
 .modal-wide {
-  width: 640px;
+  width: 900px;
+  max-width: calc(100vw - 40px);
+}
+
+/* 左列提交、右列变更明细 */
+.history-body {
+  display: flex;
+  gap: 12px;
+  min-height: 0;
 }
 
 .history-list {
-  max-height: 60vh;
+  flex: 0 0 300px;
+  max-height: 62vh;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
+/* 提交条目本身可点（看它改了什么），所以是 button 而不是 div */
 .history-item {
   border: 1px solid var(--sep-bg);
   border-radius: var(--r-md);
   padding: 9px 13px;
   background: var(--field-bg);
+  text-align: left;
+  font: inherit;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.history-item:hover {
+  border-color: var(--border-strong);
+}
+
+.history-item-active {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+}
+
+/* ---------- 右列：文件级摘要与 patch ---------- */
+.history-detail {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  max-height: 62vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-detail-count,
+.history-detail-warn {
+  font-size: 11.5px;
+  color: var(--fg3);
+}
+
+.history-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.history-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  text-align: left;
+  font: inherit;
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.history-file:hover {
+  background: var(--item-hover-bg);
+}
+
+.history-file-active {
+  background: var(--accent-weak);
+  color: var(--fg);
+}
+
+.history-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.history-file-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--fg3);
+  font-variant-numeric: tabular-nums;
+}
+
+.history-patch {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--sep-bg);
+  padding-top: 8px;
+}
+
+.history-patch-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-patch-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg);
+}
+
+.history-patch-body {
+  margin: 0;
+  max-height: 38vh;
+  overflow: auto;
+  background: var(--bg2);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+/* patch 逐行上色；空白行也要占位，否则上下文的缩进会看着串行 */
+.patch-line {
+  white-space: pre;
+  min-height: 1.55em;
+}
+
+.patch-add {
+  color: var(--success);
+}
+
+.patch-del {
+  color: var(--danger);
+}
+
+.patch-hunk {
+  color: var(--accent);
+}
+
+.patch-meta {
+  color: var(--fg3);
+}
+
+.patch-ctx {
+  color: var(--fg2);
+}
+
+.history-patch-note {
+  font-size: 11px;
+  color: var(--fg3);
 }
 
 .history-top {

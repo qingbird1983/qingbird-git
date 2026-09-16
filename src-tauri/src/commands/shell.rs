@@ -14,24 +14,41 @@ pub fn open_in_folder(path: String) -> Result<(), String> {
     tauri_plugin_opener::open_path(&path, None::<&str>).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn open_in_terminal(path: String) -> Result<(), String> {
-    if !std::path::Path::new(&path).is_dir() {
+/// 在指定目录打开终端；command 非空时在其中执行它（用于「diff 太长，去终端看完整版」这类出口）。
+/// command 由调用方拼好，且必须是自己构造的——见 `history::open_commit_diff_in_terminal`，
+/// 那里对 hash 与文件路径都做了校验和转义。
+pub(super) fn spawn_terminal(path: &str, command: Option<&str>) -> Result<(), String> {
+    if !std::path::Path::new(path).is_dir() {
         return Err("文件夹不存在".into());
     }
-    // 优先 Windows Terminal，失败回退 PowerShell
-    if Command::new("wt").arg("-d").arg(&path).spawn().is_ok() {
+    let quoted = path.replace('\'', "''");
+    let script = match command {
+        Some(c) => format!("Set-Location -LiteralPath '{quoted}'; {c}"),
+        None => format!("Set-Location -LiteralPath '{quoted}'"),
+    };
+    // 优先 Windows Terminal（要执行命令时得显式给出 shell 子命令），失败回退 PowerShell
+    let wt = || {
+        let mut c = Command::new("wt");
+        c.arg("-d").arg(path);
+        if command.is_some() {
+            c.args(["powershell", "-NoExit", "-Command"]).arg(&script);
+        }
+        c.spawn().is_ok()
+    };
+    if wt() {
         return Ok(());
     }
     Command::new("cmd")
         .args(["/C", "start", "powershell", "-NoExit", "-Command"])
-        .arg(format!(
-            "Set-Location -LiteralPath '{}'",
-            path.replace('\'', "''")
-        ))
+        .arg(&script)
         .spawn()
         .map_err(|e| format!("无法打开终端：{e}"))?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn open_in_terminal(path: String) -> Result<(), String> {
+    spawn_terminal(&path, None)
 }
 
 /// 打开仓库根目录的 README 说明文档（调用系统默认 Markdown 关联程序）

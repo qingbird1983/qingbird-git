@@ -10,6 +10,7 @@
 //! - `repos`  仓库增删改查、状态、初始化、变更、语言统计、一键扫描
 //! - `sync`   三键操作与提交推送
 //! - `fork`   分叉恢复向导（备份并变基、撤销变基）
+//! - `history` 提交历史的文件级摘要与逐文件 patch
 //! - `create` 云端新建仓库
 //! - `clone`  克隆远端仓库
 //! - `run_cmd` 一键运行命令（测试 / 构建 / 开发 / 安装依赖）
@@ -23,6 +24,7 @@ use std::time::Duration;
 mod clone;
 mod create;
 mod fork;
+mod history;
 mod net;
 mod repos;
 mod run_cmd;
@@ -42,6 +44,7 @@ mod types;
 pub use clone::*;
 pub use create::*;
 pub use fork::*;
+pub use history::*;
 pub use repos::*;
 pub use run_cmd::*;
 pub use settings::*;

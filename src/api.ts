@@ -115,6 +115,26 @@ export interface CommitInfo {
   summary: string;
 }
 
+/** 某条提交里改动过的文件；二进制文件没有行数增减（两个字段为 null） */
+export interface CommitFile {
+  path: string;
+  additions: number | null;
+  deletions: number | null;
+}
+
+export interface CommitDetail {
+  hash: string;
+  files: CommitFile[];
+  /** 文件太多，只列了前面一部分 */
+  truncated: boolean;
+}
+
+export interface CommitPatch {
+  text: string;
+  /** 太长被后端截断：界面给「在终端查看完整 diff」的出口 */
+  truncated: boolean;
+}
+
 export interface CreateOutcome {
   path: string;
   name: string;
@@ -214,6 +234,15 @@ export const api = {
   commitPush: (path: string, message: string) => invoke<OpResult>("commit_push", { path, message }),
   listChanges: (path: string) => invoke<FileChange[]>("list_changes", { path }),
   recentCommits: (path: string) => invoke<CommitInfo[]>("recent_commits", { path }),
+  /** 某条提交的文件级变更摘要（合并提交按第一个父提交算） */
+  commitDetail: (path: string, hash: string) =>
+    invoke<CommitDetail>("commit_detail", { path, hash }),
+  /** 某个文件在这条提交里的 patch */
+  commitPatch: (path: string, hash: string, file: string) =>
+    invoke<CommitPatch>("commit_patch", { path, hash, file }),
+  /** diff 太长时去终端看完整版（在仓库目录打开终端并执行查看命令） */
+  openCommitDiffInTerminal: (path: string, hash: string, file: string) =>
+    invoke<void>("open_commit_diff_in_terminal", { path, hash, file }),
   clone: (url: string, parentDir: string, onProgress: Channel<ProgressEvent>, netMode = "auto") =>
     invoke<CloneOutcome>("clone_repo", { url, parentDir, onProgress, netMode }),
   createRepo: (name: string, parentDir: string, platform: string, isPrivate: boolean, description: string) =>

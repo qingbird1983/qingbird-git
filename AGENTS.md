@@ -31,6 +31,7 @@ Windows 桌面工具：本地 Git 仓库一键同步（Tauri 2 + React + TypeScr
 - `src/repoCmds.test.mjs` 运行命令面板的保存/预填逻辑
 - `src/forkCard.test.mjs` 分叉卡片该出哪些按钮
 - `src/pinnedCmds.test.mjs` 操作区自定义按钮的列表编辑规则（上限/空行/文案兜底）
+- `src/commitDiff.test.mjs` 提交历史看 diff 的展示规则（行分类/行数标签/超长截断）
 
 代码检查：`pnpm build`（含 tsc 类型检查）
 
@@ -56,7 +57,9 @@ Rust 快速检查：`cd src-tauri && cargo check`
   - `create.rs` 云端新建仓库（GitHub / Gitee API）；`clone.rs` 克隆
   - `run_cmd.rs` 一键运行命令（测试/构建/开发/安装依赖，后台运行并流式回传输出）+
     操作区自定义按钮 `set_pinned_cmds`（上限 3 个，超了报错不静默截断）
-  - `settings.rs` 设置与凭证；`shell.rs` 快捷打开与代理探测；
+  - `history.rs` 提交历史详情：文件级变更摘要（`--numstat`）与逐文件 patch。
+    合并提交走 `git diff <hash>^ <hash>`——`git show <merge>` 默认不输出 diff
+  - `settings.rs` 设置与凭证；`shell.rs` 快捷打开与代理探测（`spawn_terminal` 供"去终端看 diff"复用）；
     `space.rs` 磁盘占用、大文件 Top 10、缓存清理与 `.gitignore` 建议（写入只接受白名单目录名）
   - 新增 command 时：写进对应领域模块，再到 `lib.rs` 的 `generate_handler!` 注册；
     跨模块复用的私有项用 `pub(super)`，不要为了省事把所有东西都 `pub`
@@ -66,7 +69,8 @@ Rust 快速检查：`cd src-tauri && cargo check`
 - 前端状态：zustand（`src/store.ts` 只放 state + actions）；
   `src/lib/` 放与 store 解耦的纯逻辑（`theme.ts` 主题、`sidebar.ts` 侧栏宽度、`autoSync.ts` 自动同步档位文案、
   `repos.ts` 排序、`appEvents.ts` 托盘与自动同步的后台事件桥接、
-  `forkGuide.ts` 分叉卡片该出哪些按钮与文案、`pinnedCmds.ts` 操作区自定义按钮的列表编辑规则）；
+  `forkGuide.ts` 分叉卡片该出哪些按钮与文案、`pinnedCmds.ts` 操作区自定义按钮的列表编辑规则、
+  `commitDiff.ts` 提交历史的 patch 行分类与截断展示）；
   `src/repoCmds.ts` 一键运行命令的保存/预填纯逻辑（配 `pnpm test:web` 回归测试）
   - 这类模块里**不要**写返回 `?? []` 的帮手函数：每次渲染新建数组，拿它当 `useEffect` 依赖会让 effect 每轮重跑。
     需要默认值时由调用方声明模块级的空数组常量（见 `RepoPanel` 的 `EMPTY_PINNED`）
