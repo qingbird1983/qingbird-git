@@ -6,7 +6,8 @@
 // 关闭按钮走 appWindow.close() → Rust 端 CloseRequested 拦截隐藏到托盘（行为不变）。
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useApp, type ThemeMode } from "../store";
+import { useApp } from "../store";
+import type { ThemeMode } from "../lib/theme";
 import { IconGear, IconGitMark, IconMinus, IconMaximize, IconMonitor, IconMoon, IconPanelLeft, IconRestore, IconSun, IconX } from "./icons";
 
 const appWindow = getCurrentWindow();

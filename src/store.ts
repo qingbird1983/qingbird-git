@@ -1,15 +1,17 @@
 import { create } from "zustand";
 import { Channel } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { api, remoteHost, type AutoSyncEvent, type ProgressEvent, type RepoEntry, type RepoStatus, type UpdateChanges } from "./api";
+import { api, remoteHost, type ProgressEvent, type RepoEntry, type RepoStatus, type UpdateChanges } from "./api";
+import { autoSyncLabel } from "./lib/autoSync";
+import { sortRepos } from "./lib/repos";
+import { loadSidebarWidth, saveSidebarWidth } from "./lib/sidebar";
+import { applyThemeClass, normalizeTheme, type ThemeMode } from "./lib/theme";
+import type { RepoCmds } from "./repoCmds";
 
 export interface LogLine {
   time: string;
   text: string;
   kind: "info" | "success" | "error" | "proxy";
 }
-
-export type ThemeMode = "dark" | "light" | "system";
 
 /** 代理回退弹窗通知（用时弹出，自动消失） */
 export interface ProxyToast {
@@ -66,7 +68,7 @@ interface AppState {
   addRepoByPath: (path: string) => Promise<boolean>;
   removeRepo: (path: string) => Promise<void>;
   renameRepo: (path: string, alias: string) => Promise<void>;
-  setRepoCmds: (path: string, testCmd: string, buildCmd: string) => Promise<void>;
+  setRepoCmds: (path: string, cmds: RepoCmds) => Promise<void>;
   pinRepo: (path: string, pinned: boolean) => Promise<void>;
   setAutoSync: (path: string, mins: number, autoPull: boolean, dailyTime?: string) => Promise<void>;
   log: (text: string, kind?: LogLine["kind"], key?: string) => void;
@@ -101,33 +103,6 @@ function nowStr() {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
 }
 
-/** 仓库列表统一排序（原地）：置顶优先，其余按最近使用自动靠前 */
-export function sortRepos(repos: RepoEntry[]): RepoEntry[] {
-  return repos.sort(
-    (a, b) =>
-      Number(b.pinned ?? false) - Number(a.pinned ?? false) || b.last_used - a.last_used,
-  );
-}
-
-/** 侧栏宽度上下限（App.tsx 的拖宽条与 store 双重 clamp） */
-export const SIDEBAR_MIN_W = 300;
-export const SIDEBAR_MAX_W = 440;
-const SIDEBAR_DEFAULT_W = 300;
-const SIDEBAR_W_KEY = "qingbird.sidebarWidth";
-
-function loadSidebarWidth(): number {
-  const raw = Number(localStorage.getItem(SIDEBAR_W_KEY));
-  if (!Number.isFinite(raw) || raw <= 0) return SIDEBAR_DEFAULT_W;
-  return Math.min(SIDEBAR_MAX_W, Math.max(SIDEBAR_MIN_W, raw));
-}
-
-export function applyThemeClass(mode: ThemeMode) {
-  const dark =
-    mode === "dark" ||
-    (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
-}
-
 export const useApp = create<AppState>((set, get) => ({
   repos: [],
   selected: null,
@@ -149,11 +124,7 @@ export const useApp = create<AppState>((set, get) => ({
   openSettings: () => set({ settingsOpen: true }),
   closeSettings: () => set({ settingsOpen: false }),
   sidebarWidth: loadSidebarWidth(),
-  setSidebarWidth: (w) => {
-    const clamped = Math.min(SIDEBAR_MAX_W, Math.max(SIDEBAR_MIN_W, Math.round(w)));
-    localStorage.setItem(SIDEBAR_W_KEY, String(clamped));
-    set({ sidebarWidth: clamped });
-  },
+  setSidebarWidth: (w) => set({ sidebarWidth: saveSidebarWidth(w) }),
 
   loadRepos: async () => {
     const repos = await api.listRepos();
@@ -215,8 +186,8 @@ export const useApp = create<AppState>((set, get) => ({
     set({ repos });
   },
 
-  setRepoCmds: async (path, testCmd, buildCmd) => {
-    const repos = await api.setRepoCmds(path, testCmd, buildCmd);
+  setRepoCmds: async (path, cmds) => {
+    const repos = await api.setRepoCmds(path, cmds);
     sortRepos(repos);
     set({ repos });
   },
@@ -511,7 +482,7 @@ export const useApp = create<AppState>((set, get) => ({
   initTheme: async () => {
     try {
       const s = await api.getSettings();
-      const t = (["dark", "light", "system"].includes(s.theme) ? s.theme : "dark") as ThemeMode;
+      const t = normalizeTheme(s.theme);
       set({ theme: t, lastProxy: s.last_good_proxy });
       applyThemeClass(t);
     } catch {
@@ -519,52 +490,3 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 }));
-
-/** 监听托盘菜单的"一键扫描全部仓库"事件 */
-export function listenTrayScan() {
-  return listen("scan-all", () => {
-    void useApp.getState().scanAll();
-  });
-}
-
-/** 自动同步间隔档位；mins = -1 表示"每天定时"模式（时间点由 daily_time 指定） */
-export const AUTO_SYNC_OPTIONS = [
-  { mins: 0, label: "关闭" },
-  { mins: 60, label: "1小时" },
-  { mins: 360, label: "6小时" },
-  { mins: 720, label: "12小时" },
-  { mins: -1, label: "每天定时" },
-];
-
-/** 每天定时模式的档位哨兵值 */
-export const AUTO_SYNC_DAILY = -1;
-
-/** 档位展示文案；每天定时模式显示时间点，如 "每天 09:30" */
-export function autoSyncLabel(mins: number, dailyTime?: string): string {
-  if (dailyTime) return `每天 ${dailyTime}`;
-  return AUTO_SYNC_OPTIONS.find((o) => o.mins === mins)?.label ?? `${mins}分钟`;
-}
-
-/** 监听后台定时自动同步事件：更新仓库列表 / 更新卡片 / 日志与通知 */
-export function listenAutoSync() {
-  return listen<AutoSyncEvent>("auto-sync-event", (e) => {
-    const ev = e.payload;
-    const { repos } = ev;
-    sortRepos(repos);
-    useApp.setState({ repos });
-    if (ev.kind === "pulled") {
-      useApp.setState((s) => ({
-        changes: {
-          ...s.changes,
-          [ev.path]: { commits: ev.commits, diff_stat: ev.diff_stat },
-        },
-      }));
-    }
-    const { log, notifyAuto, refreshStatus } = useApp.getState();
-    log(`[自动同步] ${ev.message}`, ev.kind === "error" ? "error" : ev.kind === "ok" ? "info" : "success", ev.path);
-    if (ev.kind !== "ok") {
-      notifyAuto(`「${ev.name}」${ev.message}`, ev.kind === "error" ? "error" : "info");
-    }
-    void refreshStatus(ev.path);
-  });
-}

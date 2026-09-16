@@ -8,7 +8,8 @@ import SettingsModal from "./components/SettingsModal";
 import CloneModal from "./components/CloneModal";
 import NewRepoModal from "./components/NewRepoModal";
 import InitRepoModal from "./components/InitRepoModal";
-import { useApp, listenTrayScan, listenAutoSync } from "./store";
+import { useApp } from "./store";
+import { listenAutoSync, listenTrayScan } from "./lib/appEvents";
 import { IconCloudDown, IconSync, IconX } from "./components/icons";
 import "./App.css";
 

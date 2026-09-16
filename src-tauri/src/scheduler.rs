@@ -214,6 +214,8 @@ mod tests {
             last_used: 0,
             test_cmd: String::new(),
             build_cmd: String::new(),
+            dev_cmd: String::new(),
+            install_cmd: String::new(),
             auto_sync_mins: mins,
             daily_time: String::new(),
             auto_pull: false,

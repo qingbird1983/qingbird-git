@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, type SpaceReport } from "../api";
-import { useApp, autoSyncLabel } from "../store";
+import { useApp } from "../store";
 import { fmtSize } from "./SpacePanel";
 import SpacePanel from "./SpacePanel";
+import RepoItem from "./RepoItem";
 import {
-  IconRepo, IconFilePlus, IconDownload, IconPlus,
-  IconPencil, IconX, IconSync, IconPin, IconSearch,
+  IconFilePlus, IconDownload, IconPlus, IconX, IconSync, IconSearch,
 } from "./icons";
 
 export default function RepoList({
@@ -186,122 +186,24 @@ export default function RepoList({
         {repos.length > 0 && visible.length === 0 && (
           <div className="empty-tip">没有匹配「{query.trim()}」的仓库</div>
         )}
-        {visible.map((r) => {
-          const st = status[r.path];
-          const missing = st && !st.is_repo;
-          return (
-            <div
-              key={r.path}
-              className={`repo-item ${selected === r.path ? "active" : ""}`}
-              onClick={() => select(r.path)}
-              onDoubleClick={() => startRename(r.path, r.alias)}
-              title={`${r.path}\n双击可设置自定义显示名`}
-            >
-              <span className="repo-lead">
-                {/* 有云端远端时小图标可点击，用默认浏览器打开仓库主页 */}
-                {st?.remote_url ? (
-                  <button
-                    className="repo-icon repo-icon-btn"
-                    title="打开云端仓库主页（默认浏览器）"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openRepoWebsite(r.path);
-                    }}
-                  >
-                    <IconRepo size={15} />
-                  </button>
-                ) : (
-                  <span className="repo-icon">
-                    <IconRepo size={15} />
-                  </span>
-                )}
-              </span>
-              <div className="repo-info">
-                <div className="repo-item-main">
-                  {editing === r.path ? (
-                    <input
-                      className="rename-input"
-                      autoFocus
-                      value={editValue}
-                      placeholder="自定义显示名（如中文名）"
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => setEditValue(e.target.value)}
-                      onBlur={() => void commitRename()}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") void commitRename();
-                        if (e.key === "Escape") setEditing(null);
-                      }}
-                    />
-                  ) : (
-                    <span className="repo-name">
-                      {r.name}
-                      {r.alias && <span className="alias-flag" title="已设置自定义显示名">名</span>}
-                    </span>
-                  )}
-                  {/* 悬停显示在仓库名右侧的操作钮 */}
-                  <span className="repo-tools">
-                    <button
-                      className={`repo-tool ${r.pinned ? "pinned" : ""}`}
-                      title={r.pinned ? "取消置顶" : "置顶（常驻列表最前）"}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void pinRepo(r.path, !r.pinned);
-                      }}
-                    >
-                      <IconPin size={12} />
-                    </button>
-                    <button
-                      className="repo-tool"
-                      title="重命名（仅改本地显示名）"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        startRename(r.path, r.alias);
-                      }}
-                    >
-                      <IconPencil size={12} />
-                    </button>
-                    <button
-                      className="repo-tool danger"
-                      title="移除"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRemove(r.path, r.name);
-                      }}
-                    >
-                      <IconX size={12} />
-                    </button>
-                  </span>
-                  <span className="repo-badges">
-                    {r.pinned && (
-                      <span className="badge badge-pin" title="已置顶">
-                        顶
-                      </span>
-                    )}
-                    {(r.auto_sync_mins ?? 0) > 0 || r.daily_time ? (
-                      <span
-                        className="badge badge-auto"
-                        title={`定时自动同步：${autoSyncLabel(r.auto_sync_mins ?? 0, r.daily_time)}`}
-                      >
-                        ⟳
-                      </span>
-                    ) : null}
-                    {missing && <span className="badge badge-missing">失联</span>}
-                    {st?.dirty && <span className="badge badge-dirty">●</span>}
-                    {st && st.behind > 0 && <span className="badge badge-behind">↓{st.behind}</span>}
-                    {st && st.ahead > 0 && <span className="badge badge-ahead">↑{st.ahead}</span>}
-                  </span>
-                </div>
-                {r.alias && (
-                  <div className="repo-item-sub">
-                    <span className="repo-alias" title={`自定义显示名（原名：${r.name}）`}>
-                      {r.alias}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
+{visible.map((r) => (
+          <RepoItem
+            key={r.path}
+            repo={r}
+            status={status[r.path]}
+            active={selected === r.path}
+            editing={editing === r.path}
+            editValue={editValue}
+            onSelect={() => select(r.path)}
+            onStartRename={() => startRename(r.path, r.alias)}
+            onEditValue={setEditValue}
+            onCommitRename={() => void commitRename()}
+            onCancelRename={() => setEditing(null)}
+            onRemove={() => handleRemove(r.path, r.name)}
+            onPin={() => void pinRepo(r.path, !r.pinned)}
+            onOpenWebsite={() => openRepoWebsite(r.path)}
+          />
+        ))}
       </div>
         </>
       )}

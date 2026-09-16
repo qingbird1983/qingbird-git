@@ -1,0 +1,243 @@
+/* ---------- 通用控件：按钮、弹窗、分段控件、开关 ---------- */
+
+/* ---------- 按钮 ---------- */
+/* 墨块主按钮：accent 底 + on-accent 暖白字 + 墨影 */
+.btn-sm {
+  padding: 6px 16px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+.btn-sm:hover:not(:disabled) {
+  background: var(--accent-strong);
+  box-shadow: var(--shadow-ink);
+}
+
+.btn-sm:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--btn-border);
+  color: var(--fg2);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg3);
+  color: var(--fg);
+  box-shadow: none;
+}
+
+.btn-danger {
+  background: var(--danger-wash);
+  color: var(--danger);
+  border: none;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: var(--on-accent);
+  box-shadow: none;
+}
+
+/* ---------- 弹窗：脱离纸面 ---------- */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.modal {
+  width: 540px;
+  max-width: calc(100vw - 32px);
+  max-height: 86vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 20px 22px;
+  box-shadow: var(--shadow-strong);
+  animation: modal-in 0.18s var(--ease);
+  /* 弹出面板整体走衬线品牌层；代码/路径类局部仍由 --font-mono 覆盖 */
+  font-family: var(--font-serif);
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.modal h3 {
+  font-family: var(--font-serif);
+  margin-bottom: 6px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.modal-subtitle {
+  font-size: 9.5px;
+  font-weight: 500;
+  color: var(--fg3);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  margin: 16px 0 8px;
+}
+
+.modal-desc {
+  color: var(--fg2);
+  font-size: 12.5px;
+  line-height: 1.7;
+  margin-bottom: 12px;
+}
+
+.modal-desc code {
+  background: var(--bg3);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+}
+
+.modal-row {
+  display: flex;
+  gap: 8px;
+}
+
+.modal-input {
+  flex: 1;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--field-bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.modal-input-full {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.modal-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-weak);
+}
+
+.modal-input:read-only:hover {
+  border-color: var(--accent);
+  cursor: pointer;
+}
+
+.modal-result {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--fg);
+  user-select: text;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+/* ---------- 分段控件（主题） ---------- */
+.segmented {
+  display: flex;
+  gap: 4px;
+  background: var(--bg3);
+  border-radius: var(--r-pill);
+  padding: 3px;
+}
+
+.segment {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 14px;
+  white-space: nowrap;
+  border: none;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--fg3);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+
+.segment:hover {
+  color: var(--fg);
+}
+
+.segment-active {
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: var(--shadow-xs);
+}
+
+/* ---------- 开关 ---------- */
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 2px;
+  font-size: 13px;
+}
+
+.switch {
+  width: 40px;
+  height: 23px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--bg3);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.switch.on {
+  background: var(--accent);
+}
+
+.switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+  transition: transform 0.2s var(--ease);
+}
+
+.switch.on .switch-knob {
+  transform: translateX(17px);
+}

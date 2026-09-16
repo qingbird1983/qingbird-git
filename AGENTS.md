@@ -16,7 +16,8 @@ Windows 桌面工具：本地 Git 仓库一键同步（Tauri 2 + React + TypeScr
 - 正式源码放在：`src/`（React 前端）、`src-tauri/src/`（Rust 后端）
 - 文档资料放在：`README.md`、本文件
 - 临时实验放在：不要提交到仓库
-- 测试文件放在：Rust 单元测试在各模块 `#[cfg(test)]` 中
+- 测试文件放在：Rust 单元测试在各模块 `#[cfg(test)]` 中；前端纯逻辑测试放 `src/*.test.mjs`
+  （node 自带 `node --test` + 原生 TS 类型擦除，不引入测试框架依赖）
 
 ## 常用命令
 
@@ -25,6 +26,8 @@ Windows 桌面工具：本地 Git 仓库一键同步（Tauri 2 + React + TypeScr
 启动开发环境：`pnpm tauri dev`
 
 运行测试：`cd src-tauri && cargo test`
+
+前端测试：`pnpm test:web`（`src/repoCmds.test.mjs`，运行命令面板的保存逻辑）
 
 代码检查：`pnpm build`（含 tsc 类型检查）
 
@@ -36,12 +39,27 @@ Rust 快速检查：`cd src-tauri && cargo check`
 
 - `src-tauri/src/git.rs`：git CLI 子进程封装（超时控制、输出捕获、网络错误分类、stderr 按 \r/\n 逐行流式回调供进度解析）
 - `src-tauri/src/proxy.rs`：代理探测（Windows 注册表系统代理、常见端口扫描、HTTP CONNECT 实测）
-- `src-tauri/src/commands.rs`：Tauri commands（仓库 CRUD、三键操作、克隆、一键扫描、代理回退编排、主题设置；
-  拉取/克隆通过 `tauri::ipc::Channel` 推送进度事件）
-- `src-tauri/src/store.rs`：配置持久化（`%APPDATA%/com.qingbird.git/config.json`，含代理、主题）
+- `src-tauri/src/commands/`：Tauri commands，按领域拆分的模块目录，门面是 `mod.rs`
+  （子模块声明、`pub use` 再导出、超时常量与全局操作互斥锁 `OP_LOCK`/`begin_user_op`）
+  - `types.rs` 前后端共享的 IPC 数据结构（`RepoStatus`/`ProgressEvent`/`OpResult`…）
+  - `net.rs` git 网络操作编排：直连→代理回退、代理竞速、认证注入、进度解析（`run_net_op` 是唯一入口）
+  - `repos.rs` 仓库增删改查、状态、初始化、变更列表、提交历史、语言统计、一键扫描
+  - `sync.rs` 三键操作与提交推送（拉取/克隆通过 `tauri::ipc::Channel` 推送进度事件）
+  - `create.rs` 云端新建仓库（GitHub / Gitee API）；`clone.rs` 克隆
+  - `run_cmd.rs` 一键运行命令（测试/构建/开发/安装依赖，后台运行并流式回传输出）
+  - `settings.rs` 设置与凭证；`shell.rs` 快捷打开与代理探测；`space.rs` 磁盘占用与缓存清理
+  - 新增 command 时：写进对应领域模块，再到 `lib.rs` 的 `generate_handler!` 注册；
+    跨模块复用的私有项用 `pub(super)`，不要为了省事把所有东西都 `pub`
+- `src-tauri/src/store.rs`：配置持久化（`%APPDATA%/com.qingbird.git/config.json`，含代理、主题、每仓库命令/定时设置）
 - `src-tauri/src/lib.rs`：托盘图标与菜单（显示/扫描/退出）、关窗最小化到托盘、启动时应用持久化主题、开机自启插件注册
-- 前端状态：zustand（`src/store.ts`），UI 组件在 `src/components/`（仓库列表支持拖拽添加、克隆对话框、
-  拉取进度条、更新内容卡片、设置弹窗含主题分段控件与自启开关）
+- 前端状态：zustand（`src/store.ts` 只放 state + actions）；
+  `src/lib/` 放与 store 解耦的纯逻辑（`theme.ts` 主题、`sidebar.ts` 侧栏宽度、`autoSync.ts` 自动同步档位文案、
+  `repos.ts` 排序、`appEvents.ts` 托盘与自动同步的后台事件桥接）；
+  `src/repoCmds.ts` 一键运行命令的保存/预填纯逻辑（配 `pnpm test:web` 回归测试）
+- 前端 UI：`src/components/`（`RepoList` 列表 + `RepoItem` 单条目、`RepoPanel` 主面板骨架 +
+  `panel/` 下的浮层组件、`CmdPanel`/`SpacePanel`/各对话框）
+- 样式：`src/App.css` 只留文件头与 `@import`，实体在 `src/styles/*.css`；
+  **`@import` 顺序即级联顺序**，新增样式文件要插在正确位置
 - 图标：`scripts/gen-icons.mjs` 程序化生成（PNG/ICO），改图标后运行 `node scripts/gen-icons.mjs`
 
 ## 工作规则

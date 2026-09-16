@@ -1,0 +1,395 @@
+//! 三键操作与提交推送：检测云端更新 / 一键拉取（--ff-only）/ 一键推送 / 提交并推送。
+
+use crate::{git, store};
+use tauri::ipc::Channel;
+
+use super::net::{identity_config, progress_hooks, run_local, run_net_op, NetMode};
+use super::repos::{read_status, touch_repo, valid_repo};
+use super::types::{combined, OpResult, ProgressEvent, UpdateChanges};
+use super::{begin_user_op, CHECK_TIMEOUT, NET_TIMEOUT};
+
+#[tauri::command(async)]
+pub fn check_update(
+    app: tauri::AppHandle,
+    path: String,
+    on_progress: Channel<ProgressEvent>,
+) -> OpResult {
+    let Some(_guard) = begin_user_op() else {
+        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+    };
+    do_check(&app, &path, Some(&on_progress))
+}
+
+/// 检查云端更新的核心流程（用户操作与后台自动同步共用）；
+/// on_progress 为 None 时进度静默丢弃（后台任务没有前端通道）
+pub fn do_check(
+    app: &tauri::AppHandle,
+    path: &str,
+    on_progress: Option<&Channel<ProgressEvent>>,
+) -> OpResult {
+    if !valid_repo(path) {
+        return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
+    }
+    if let Some(ch) = on_progress {
+        let _ = ch.send(ProgressEvent {
+            stage: "正在连接远端…".into(),
+            detail: String::new(),
+            percent: None,
+        });
+    }
+    let (_tag, forward, stage) = progress_hooks(on_progress);
+    let (fetch_out, used_proxy) = run_net_op(
+        app,
+        path,
+        &["fetch", "--all", "--prune", "--progress"],
+        Some(&forward),
+        None,
+        CHECK_TIMEOUT,
+        true,
+        Some(&stage),
+        NetMode::Auto,
+    );
+    let status = read_status(path);
+    touch_repo(app, path);
+
+    if !fetch_out.success {
+        let mut msg = "检查更新失败：无法连接远端".to_string();
+        if used_proxy.is_none() && git::is_network_error(&fetch_out) {
+            msg.push_str("，且未找到可用代理");
+        }
+        return OpResult {
+            ok: false,
+            message: msg,
+            output: combined(&fetch_out),
+            used_proxy,
+            status: Some(status),
+            need_stash: false,
+            changes: None,
+        };
+    }
+
+    let message = if !status.has_upstream {
+        "当前分支没有设置上游分支，无法对比云端更新".to_string()
+    } else if status.behind > 0 && status.ahead > 0 {
+        format!(
+            "云端有 {0} 个新提交，同时本地有 {1} 个未推送提交",
+            status.behind, status.ahead
+        )
+    } else if status.behind > 0 {
+        format!("云端有 {} 个新提交，可以拉取", status.behind)
+    } else if status.ahead > 0 {
+        format!("已是最新，本地领先 {} 个提交待推送", status.ahead)
+    } else {
+        "已是最新，无需同步".to_string()
+    };
+    OpResult {
+        ok: true,
+        message,
+        output: combined(&fetch_out),
+        used_proxy,
+        status: Some(status),
+        need_stash: false,
+        changes: None,
+    }
+}
+
+#[tauri::command(async)]
+pub fn pull_repo(
+    app: tauri::AppHandle,
+    path: String,
+    stash: bool,
+    on_progress: Channel<ProgressEvent>,
+) -> OpResult {
+    let Some(_guard) = begin_user_op() else {
+        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+    };
+    do_pull(&app, &path, stash, Some(&on_progress))
+}
+
+/// 拉取的核心流程（用户操作与后台自动同步共用），永远 --ff-only
+pub fn do_pull(
+    app: &tauri::AppHandle,
+    path: &str,
+    stash: bool,
+    on_progress: Option<&Channel<ProgressEvent>>,
+) -> OpResult {
+    if !valid_repo(path) {
+        return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
+    }
+    let (_tag, forward, forward_stage) = progress_hooks(on_progress);
+    let status_before = read_status(path);
+    if status_before.dirty && !stash {
+        return OpResult {
+            ok: false,
+            message: "本地有未提交的变更，直接拉取可能冲突".to_string(),
+            output: String::new(),
+            used_proxy: None,
+            status: Some(status_before),
+            need_stash: true,
+            changes: None,
+        };
+    }
+
+    let old_head = run_local(path, &["rev-parse", "HEAD"])
+        .stdout
+        .trim()
+        .to_string();
+
+    let mut log = String::new();
+    let mut stashed = false;
+    if stash && status_before.dirty {
+        let s = run_local(
+            path,
+            &["stash", "push", "-u", "-m", "qingbird-git auto stash"],
+        );
+        log.push_str(&combined(&s));
+        if !s.success {
+            return OpResult::err("暂存本地变更失败，已取消拉取".into(), log);
+        }
+        stashed = true;
+    }
+
+    let (pull_out, used_proxy) = run_net_op(
+        app,
+        path,
+        &["pull", "--ff-only", "--progress"],
+        Some(&forward),
+        None,
+        NET_TIMEOUT,
+        true,
+        Some(&forward_stage),
+        NetMode::Auto,
+    );
+    log.push_str(&combined(&pull_out));
+    let mut status = read_status(path);
+    touch_repo(app, path);
+
+    if stashed {
+        let pop = run_local(path, &["stash", "pop"]);
+        log.push_str(&combined(&pop));
+        if !pop.success {
+            return OpResult {
+                ok: false,
+                message: "拉取完成，但恢复暂存变更时冲突，请在终端执行 git stash pop 处理".into(),
+                output: log,
+                used_proxy: used_proxy.clone(),
+                status: Some(status),
+                need_stash: false,
+                changes: None,
+            };
+        }
+    }
+
+    if !pull_out.success {
+        let message = if pull_out.stderr.contains("no tracking information") {
+            "当前分支没有上游分支，无法拉取".to_string()
+        } else if pull_out.stderr.contains("Not possible to fast-forward")
+            || pull_out.stderr.contains("divergent")
+        {
+            "本地与云端历史分叉，ff 拉取失败，请手动处理".to_string()
+        } else if used_proxy.is_none() && git::is_network_error(&pull_out) {
+            "拉取失败：无法连接远端，且未找到可用代理".to_string()
+        } else {
+            "拉取失败".to_string()
+        };
+        return OpResult {
+            ok: false,
+            message,
+            output: log,
+            used_proxy,
+            status: Some(status),
+            need_stash: false,
+            changes: None,
+        };
+    }
+
+    status = read_status(path);
+    let changes = pull_changes(path, &old_head);
+    let message = if used_proxy.is_some() {
+        "拉取成功（已自动通过代理完成）".to_string()
+    } else {
+        "拉取成功".to_string()
+    };
+    OpResult {
+        ok: true,
+        message,
+        output: log,
+        used_proxy,
+        status: Some(status),
+        need_stash: false,
+        changes,
+    }
+}
+
+/// 对比拉取前的 HEAD，提取本次拉下来的提交列表与文件变更摘要
+fn pull_changes(path: &str, old_head: &str) -> Option<UpdateChanges> {
+    if old_head.is_empty() {
+        return None;
+    }
+    let range = format!("{old_head}..HEAD");
+    let mut changes = UpdateChanges {
+        commits: Vec::new(),
+        diff_stat: String::new(),
+    };
+
+    let log = run_local(path, &["log", "--oneline", "--no-decorate", &range]);
+    if log.success {
+        changes.commits = log
+            .stdout
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+    }
+    let stat = run_local(path, &["diff", "--stat", &range]);
+    if stat.success {
+        changes.diff_stat = stat.stdout.trim_end().to_string();
+    }
+    // 完全没有新内容（Already up to date）时不返回更新卡片
+    if changes.commits.is_empty() && changes.diff_stat.is_empty() {
+        return None;
+    }
+    Some(changes)
+}
+
+#[tauri::command(async)]
+pub fn push_repo(app: tauri::AppHandle, path: String) -> OpResult {
+    if !valid_repo(&path) {
+        return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
+    }
+    let Some(_guard) = begin_user_op() else {
+        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+    };
+    do_push(&app, &path)
+}
+
+/// 推送的核心流程（push_repo 与 commit_push 共用）
+fn do_push(app: &tauri::AppHandle, path: &str) -> OpResult {
+    let status = read_status(path);
+    if status.ahead == 0 && status.has_upstream {
+        return OpResult {
+            ok: true,
+            message: "没有待推送的提交".to_string(),
+            output: String::new(),
+            used_proxy: None,
+            status: Some(status),
+            need_stash: false,
+            changes: None,
+        };
+    }
+    if !status.has_upstream {
+        let remotes = run_local(path, &["remote"]);
+        if remotes.stdout.trim().is_empty() {
+            return OpResult::err(
+                "该仓库没有配置远端仓库，无法推送".into(),
+                combined(&remotes),
+            );
+        }
+    }
+
+    let args: Vec<&str> = if status.has_upstream {
+        vec!["push", "--progress"]
+    } else {
+        vec!["push", "--progress", "--set-upstream", "origin", "HEAD"]
+    };
+    let (push_out, used_proxy) = run_net_op(app, path, &args, None, None, NET_TIMEOUT, true, None, NetMode::Auto);
+    let status = read_status(path);
+    touch_repo(app, path);
+
+    if !push_out.success {
+        let message =
+            if push_out.stderr.contains("fetch first") || push_out.stderr.contains("rejected") {
+                "推送被拒绝：云端有新提交，请先拉取".to_string()
+            } else if used_proxy.is_none() && git::is_network_error(&push_out) {
+                "推送失败：无法连接远端，且未找到可用代理".to_string()
+            } else if push_out.stderr.contains("could not read Username")
+                || push_out.stderr.contains("Authentication failed")
+            {
+                "推送失败：认证未通过，可在设置里填写对应平台的访问令牌".to_string()
+            } else {
+                "推送失败".to_string()
+            };
+        return OpResult {
+            ok: false,
+            message,
+            output: combined(&push_out),
+            used_proxy,
+            status: Some(status),
+            need_stash: false,
+            changes: None,
+        };
+    }
+
+    let message = if used_proxy.is_some() {
+        "推送成功（已自动通过代理完成）".to_string()
+    } else {
+        "推送成功".to_string()
+    };
+    OpResult {
+        ok: true,
+        message,
+        output: combined(&push_out),
+        used_proxy,
+        status: Some(status),
+        need_stash: false,
+        changes: None,
+    }
+}
+
+// ---------- 提交 ----------
+
+/// 一键提交并推送：add -A → commit（自动带 Git 身份）→ push
+#[tauri::command(async)]
+pub fn commit_push(app: tauri::AppHandle, path: String, message: String) -> OpResult {
+    if !valid_repo(&path) {
+        return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
+    }
+    let Some(_guard) = begin_user_op() else {
+        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+    };
+    let msg = message.trim();
+    if msg.is_empty() {
+        return OpResult::err("请先填写提交说明".into(), String::new());
+    }
+    let st = read_status(&path);
+    if !st.dirty {
+        return OpResult {
+            ok: true,
+            message: "没有可提交的变更，直接推送即可".to_string(),
+            output: String::new(),
+            used_proxy: None,
+            status: Some(st),
+            need_stash: false,
+            changes: None,
+        };
+    }
+
+    let cfg = store::load(&app);
+    let add = run_local(&path, &["add", "-A"]);
+    if !add.success {
+        return OpResult::err("添加变更文件失败".into(), combined(&add));
+    }
+
+    let cargs = identity_config(&cfg);
+    let mut argv: Vec<&str> = cargs.iter().map(|s| s.as_str()).collect();
+    argv.extend(["commit", "-m", msg]);
+    let commit = run_local(&path, &argv);
+    if !commit.success {
+        let message = if commit.stderr.contains("Please tell me who you are")
+            || commit.stderr.contains("unable to auto-detect email")
+        {
+            "提交失败：还没有配置 Git 身份，请在「设置 → Git 身份」里填写姓名和邮箱".to_string()
+        } else {
+            "提交失败".to_string()
+        };
+        return OpResult::err(message, combined(&commit));
+    }
+
+    let mut result = do_push(&app, &path);
+    result.output = format!("{}{}", combined(&commit), result.output);
+    if result.ok {
+        result.message = format!("已提交并推送：「{msg}」");
+    }
+    result
+}
+

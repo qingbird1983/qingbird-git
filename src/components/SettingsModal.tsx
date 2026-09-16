@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../api";
-import { useApp, type ThemeMode } from "../store";
+import { useApp } from "../store";
+import type { ThemeMode } from "../lib/theme";
 import { IconMoon, IconSun, IconMonitor } from "./icons";
 
 interface Props {

@@ -1,6 +1,18 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useApp } from "../store";
+import {
+  CMD_KINDS,
+  CMD_META,
+  cmdsFromDetect,
+  cmdsFromEntry,
+  cmdsToSave,
+  emptyCmds,
+  prefillCmds,
+  withCmd,
+  type CmdKind,
+  type RepoCmds,
+} from "../repoCmds";
 import { IconX } from "./icons";
 
 interface Props {
@@ -8,9 +20,12 @@ interface Props {
 }
 
 /**
- * 运行命令面板：测试 / 构建命令在这里随时可改，点启动即保存并后台运行，
- * 输出实时写入日志窗口（可随时在日志头部终止），命令填错也不会被卡死；
- * 另附按项目类型识别的快捷命令（开发 / 安装依赖）。
+ * 运行命令面板：测试 / 构建 / 开发 / 安装依赖四条命令都在这里改，
+ * 点「启动」= 保存并后台运行，输出实时写入日志窗口（可随时在日志头部终止）；
+ * 「自动」= 填入该行的自动识别结果并保存（不运行），识别不准时可直接改输入框。
+ *
+ * 四条命令是四个互相独立的字段，保存时按名字取值（见 repoCmds.ts），
+ * 改一条不会连带改掉其他三条。
  */
 export default function CmdPanel({ onClose }: Props) {
   const selected = useApp((s) => s.selected);
@@ -20,31 +35,52 @@ export default function CmdPanel({ onClose }: Props) {
   const cmdRunning = useApp((s) => s.cmdRunning);
   const log = useApp((s) => s.log);
   const entry = selected ? repos.find((r) => r.path === selected) : undefined;
-  const [testCmd, setTestCmd] = useState(entry?.test_cmd ?? "");
-  const [buildCmd, setBuildCmd] = useState(entry?.build_cmd ?? "");
-  const [presets, setPresets] = useState<{ name: string; cmd: string }[]>([]);
+
+  // 已保存的命令（旧配置里没有 dev/install，缺省读成空串）
+  const saved = cmdsFromEntry(entry);
+  const { test: savedTest, build: savedBuild, dev: savedDev, install: savedInstall } = saved;
+
+  // 自动识别结果：只用来预填空行 + 供「自动」按钮回填，不直接落盘
+  const [detected, setDetected] = useState<RepoCmds>(emptyCmds);
+  const [cmds, setCmds] = useState<RepoCmds>(emptyCmds);
   const [running, setRunning] = useState(false);
 
-  // 已保存的命令优先展示；没保存过才用自动识别结果预填
+  // 已保存的命令优先展示；没保存过（含旧配置缺字段）才用自动识别结果预填
   useEffect(() => {
     if (!selected) return;
+    const path = selected;
+    let stale = false;
+    setCmds({ test: savedTest, build: savedBuild, dev: savedDev, install: savedInstall });
     void api
-      .detectCmds(selected)
+      .detectCmds(path)
       .then((d) => {
-        const list: { name: string; cmd: string }[] = [];
-        if (d.dev_cmd) list.push({ name: "开发", cmd: d.dev_cmd });
-        if (d.install_cmd) list.push({ name: "安装依赖", cmd: d.install_cmd });
-        setPresets(list);
-        setTestCmd((v) => v || d.test_cmd);
-        setBuildCmd((v) => v || d.build_cmd);
+        // 识别期间用户切换了仓库：这条结果已经不属于当前面板，丢弃
+        if (stale) return;
+        const det = cmdsFromDetect(d);
+        setDetected(det);
+        // 只补空：用户已经看到 / 改过的值不被识别结果顶掉
+        setCmds((cur) => prefillCmds(cur, det));
       })
       .catch(() => {});
-  }, [selected]);
+    return () => {
+      stale = true;
+    };
+  }, [selected, savedTest, savedBuild, savedDev, savedInstall]);
 
-  const run = async (cmd: string) => {
+  const busy = running || !!cmdRunning;
+
+  /** 保存四条命令（统一去首尾空白；空串=未设置，下次打开重新用识别结果预填） */
+  const saveCmds = async (next: RepoCmds) => {
+    if (!selected) return;
+    await setRepoCmds(selected, next);
+  };
+
+  /** 点某行「启动」：先保存再运行，只有该行用输入框里的最新值，其余三行原样 */
+  const saveAndRun = async (kind: CmdKind, cmd: string) => {
     if (!selected || !cmd.trim()) return;
     setRunning(true);
     try {
+      await saveCmds(cmdsToSave(kind, cmd, cmds));
       await runRepoCmd(selected, cmd.trim());
       onClose();
     } catch (e) {
@@ -54,19 +90,15 @@ export default function CmdPanel({ onClose }: Props) {
     }
   };
 
-  // 一键命令：先保存再运行，保证下次主面板按钮直接用上最新命令
-  const saveAndRun = async (kind: "test" | "build", cmd: string) => {
-    if (!selected || !cmd.trim()) return;
+  /** 点某行「自动」：该行恢复成自动识别结果并保存，不影响其他三行 */
+  const restoreDetected = async (kind: CmdKind) => {
+    if (!selected || !detected[kind]) return;
+    const next = cmdsToSave(kind, detected[kind], cmds);
+    setCmds(next);
     setRunning(true);
     try {
-      await setRepoCmds(
-        selected,
-        kind === "test" ? cmd.trim() : (buildCmd.trim() || entry?.build_cmd || ""),
-        kind === "build" ? cmd.trim() : (testCmd.trim() || entry?.test_cmd || ""),
-      );
-      log("已保存一键运行命令", "success");
-      await runRepoCmd(selected, cmd.trim());
-      onClose();
+      await saveCmds(next);
+      log(`已恢复「${CMD_META[kind].label}」的自动识别命令：${detected[kind]}`, "success");
     } catch (e) {
       log(String(e), "error");
     } finally {
@@ -85,60 +117,50 @@ export default function CmdPanel({ onClose }: Props) {
         </h3>
         <div className="modal-desc">
           命令在后台运行，输出实时写入下方日志窗口，可随时在日志头部点「终止」；
-          测试 / 构建命令点「启动」自动保存，出错时改好再点一次即可。
+          点「启动」即保存并运行，出错时改好再点一次即可。四条命令各自独立保存，
+          识别不准时直接改输入框，点「自动」可恢复自动识别结果。
         </div>
         <div className="modal-col">
-          <label className="modal-label">测试</label>
-          <div className="cmd-row">
-            <input
-              className="modal-input"
-              placeholder="如：cargo test / pnpm test / pytest"
-              value={testCmd}
-              onChange={(e) => setTestCmd(e.target.value)}
-            />
-            <button
-              className="btn-sm"
-              disabled={running || !!cmdRunning || !testCmd.trim()}
-              onClick={() => void saveAndRun("test", testCmd)}
-            >
-              启动
-            </button>
-          </div>
-          <label className="modal-label">构建</label>
-          <div className="cmd-row">
-            <input
-              className="modal-input"
-              placeholder="如：cargo build --release / pnpm run build"
-              value={buildCmd}
-              onChange={(e) => setBuildCmd(e.target.value)}
-            />
-            <button
-              className="btn-sm"
-              disabled={running || !!cmdRunning || !buildCmd.trim()}
-              onClick={() => void saveAndRun("build", buildCmd)}
-            >
-              启动
-            </button>
-          </div>
-        </div>
-        {presets.length > 0 && (
-          <div className="modal-col" style={{ marginTop: 12 }}>
-            <label className="modal-label">快捷命令（按项目类型自动识别，直接运行不保存）</label>
-            {presets.map((p) => (
-              <div className="cmd-row" key={p.name}>
-                <span className="cmd-name">{p.name}</span>
-                <code className="cmd-text">{p.cmd}</code>
+          {CMD_KINDS.map((kind) => (
+            <div className="cmd-field" key={kind}>
+              <label className="modal-label">
+                {CMD_META[kind].label}
+                <span className="cmd-state">
+                  {cmds[kind].trim() !== saved[kind]
+                    ? "未保存"
+                    : saved[kind]
+                      ? "已自定义"
+                      : detected[kind]
+                        ? `自动识别：${detected[kind]}`
+                        : "未识别到命令"}
+                </span>
+              </label>
+              <div className="cmd-row">
+                <input
+                  className="modal-input"
+                  placeholder={CMD_META[kind].placeholder}
+                  value={cmds[kind]}
+                  onChange={(e) => setCmds((cur) => withCmd(cur, kind, e.target.value))}
+                />
                 <button
                   className="btn-sm btn-ghost"
-                  disabled={running || !!cmdRunning}
-                  onClick={() => void run(p.cmd)}
+                  title="填入自动识别结果并保存（不运行）"
+                  disabled={busy || !detected[kind]}
+                  onClick={() => void restoreDetected(kind)}
+                >
+                  自动
+                </button>
+                <button
+                  className="btn-sm"
+                  disabled={busy || !cmds[kind].trim()}
+                  onClick={() => void saveAndRun(kind, cmds[kind])}
                 >
                   启动
                 </button>
               </div>
-            ))}
-          </div>
-        )}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

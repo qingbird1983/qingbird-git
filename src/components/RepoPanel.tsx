@@ -1,11 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { api, remoteHost, type FileChange } from "../api";
-import { useApp, autoSyncLabel, AUTO_SYNC_OPTIONS, AUTO_SYNC_DAILY, type LogLine } from "../store";
+import { useApp, type LogLine } from "../store";
+import { autoSyncLabel } from "../lib/autoSync";
 import HistoryModal from "./HistoryModal";
 import CmdPanel from "./CmdPanel";
+import AutoSyncPopover from "./panel/AutoSyncPopover";
+import BusyPop from "./panel/BusyPop";
+import ChangesPopover from "./panel/ChangesPopover";
+import LogArea from "./panel/LogArea";
+import StashBar from "./panel/StashBar";
+import SyncContentPopover from "./panel/SyncContentPopover";
 import {
   IconCloud, IconCloudDown, IconCloudUp,
-  IconFolder, IconTerminal, IconHistory, IconDiff, IconX, IconFile,
+  IconFolder, IconTerminal, IconHistory, IconDiff, IconFile,
   IconFlask, IconHammer, IconSync, IconPlay, IconClock,
 } from "./icons";
 
@@ -122,14 +129,6 @@ export default function RepoPanel() {
           return mins < 60 ? `${mins} 分钟前` : `${Math.round(mins / 60)} 小时前`;
         })()
       : null;
-  // 切换档位：每天定时首次点入默认 09:00，切回间隔模式清空时间点
-  const applyAutoSync = (mins: number) => {
-    if (mins === AUTO_SYNC_DAILY) {
-      void setAutoSync(selected, 0, autoPullOn, autoDaily || "09:00");
-    } else {
-      void setAutoSync(selected, mins, autoPullOn, "");
-    }
-  };
 
   return (
     <main className="panel">
@@ -177,65 +176,15 @@ export default function RepoPanel() {
                 <IconClock size={15} />
               </button>
               {showAutoSync && (
-                <div className="commit-popover auto-sync-pop">
-                  <div className="update-header">
-                    <span className="commit-title">定时自动同步</span>
-                    <button className="popover-close" title="关闭" onClick={() => setShowAutoSync(false)}>
-                      <IconX size={13} />
-                    </button>
-                  </div>
-                  <p className="auto-sync-desc">
-                    在后台按间隔检测云端更新（自动走直连/代理回退），仅对此仓库生效；
-                    只做快进合并（--ff-only），本地分叉或有未提交变更时不会动你的代码。
-                  </p>
-                  <div className="segmented auto-sync-seg">
-                    {AUTO_SYNC_OPTIONS.map((o) => (
-                      <button
-                        key={o.mins}
-                        className={`segment ${
-                          (o.mins === AUTO_SYNC_DAILY ? !!autoDaily : autoMins === o.mins)
-                            ? "segment-active"
-                            : ""
-                        }`}
-                        onClick={() => applyAutoSync(o.mins)}
-                      >
-                        {o.label}
-                      </button>
-                    ))}
-                  </div>
-                  {autoDaily && (
-                    <div className="auto-sync-daily-row">
-                      <span>每天执行时刻</span>
-                      <input
-                        type="time"
-                        className="auto-sync-time"
-                        value={autoDaily}
-                        onChange={(e) => void setAutoSync(selected, 0, autoPullOn, e.target.value)}
-                      />
-                    </div>
-                  )}
-                  <label className="switch-row auto-sync-switch">
-                    <span>检测到更新后自动拉取</span>
-                    <button
-                      className={`switch ${autoPullOn ? "on" : ""}`}
-                      role="switch"
-                      aria-checked={autoPullOn}
-                      title={autoOn ? undefined : "请先选择间隔或每天定时开启"}
-                      onClick={() => {
-                        if (autoOn) void setAutoSync(selected, autoMins, !autoPullOn, autoDaily);
-                      }}
-                    >
-                      <span className="switch-knob" />
-                    </button>
-                  </label>
-                  <div className="auto-sync-meta">
-                    {lastCheckText
-                      ? `上次自动检查：${lastCheckText}${lastAutoResult ? ` · ${lastAutoResult}` : ""}`
-                      : autoOn
-                        ? "已开启，稍后自动进行首次检查"
-                        : "尚未开启，选择间隔或每天定时即可启用"}
-                  </div>
-                </div>
+<AutoSyncPopover
+                  mins={autoMins}
+                  daily={autoDaily}
+                  autoPull={autoPullOn}
+                  lastCheckText={lastCheckText}
+                  lastResult={lastAutoResult}
+                  onChange={(mins, autoPull, daily) => void setAutoSync(selected, mins, autoPull, daily)}
+                  onClose={() => setShowAutoSync(false)}
+                />
               )}
             </span>
             {update && !busy && (
@@ -249,30 +198,7 @@ export default function RepoPanel() {
                   {update.commits.length > 0 && <span className="btn-badge">{update.commits.length}</span>}
                 </button>
                 {showSync && (
-                  <div className="commit-popover">
-                    <div className="update-header">
-                      <span className="commit-title">
-                        本次同步内容
-                        {host === "gitee" ? "（来自 Gitee）" : host === "github" ? "（来自 GitHub）" : ""}
-                      </span>
-                      <span className="update-count">{update.commits.length} 个新提交</span>
-                      <button className="popover-close" title="关闭" onClick={() => setShowSync(false)}>
-                        <IconX size={13} />
-                      </button>
-                    </div>
-                    {update.commits.length === 0 ? (
-                      <div className="commit-more">本次没有新提交（可能只是文件变更同步）</div>
-                    ) : (
-                      <div className="sync-commit-list">
-                        {update.commits.map((c, i) => (
-                          <div key={i} className="sync-commit-line">
-                            {c}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <div className="commit-more">文件变更明细见下方操作日志</div>
-                  </div>
+<SyncContentPopover commits={update.commits} host={host} onClose={() => setShowSync(false)} />
                 )}
               </span>
             )}
@@ -287,44 +213,14 @@ export default function RepoPanel() {
                   {fileChanges.length > 0 && <span className="btn-badge">{fileChanges.length}</span>}
                 </button>
                 {showChanges && (
-                  <div className="commit-popover">
-                    <div className="update-header">
-                      <span className="commit-title">待提交变更（{fileChanges.length} 个文件）</span>
-                      <button className="popover-close" title="关闭" onClick={() => setShowChanges(false)}>
-                        <IconX size={13} />
-                      </button>
-                    </div>
-                    {fileChanges.length === 0 ? (
-                      <div className="commit-more">正在读取变更列表…</div>
-                    ) : (
-                      <div className="file-list">
-                        {fileChanges.slice(0, 8).map((f, i) => (
-                          <div key={i} className="file-line">
-                            <span className={`file-code file-${f.code.replace("?", "u")}`}>{f.code}</span>
-                            <span className="file-path">{f.path}</span>
-                          </div>
-                        ))}
-                        {fileChanges.length > 8 && (
-                          <div className="commit-more">…还有 {fileChanges.length - 8} 个文件</div>
-                        )}
-                      </div>
-                    )}
-                    <div className="commit-row">
-                      <input
-                        className="modal-input"
-                        placeholder="提交说明，如：修复登录问题"
-                        value={commitMsg}
-                        disabled={netBusy}
-                        onChange={(e) => setCommitMsg(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && commitMsg.trim()) void handleCommitPush();
-                        }}
-                      />
-                      <button className="btn-sm" disabled={netBusy || !commitMsg.trim()} onClick={() => void handleCommitPush()}>
-                        提交并推送
-                      </button>
-                    </div>
-                  </div>
+<ChangesPopover
+                      files={fileChanges}
+                      commitMsg={commitMsg}
+                      netBusy={netBusy}
+                      onCommitMsg={setCommitMsg}
+                      onSubmit={() => void handleCommitPush()}
+                      onClose={() => setShowChanges(false)}
+                    />
                 )}
               </span>
             )}
@@ -369,64 +265,19 @@ export default function RepoPanel() {
       </div>
 
       {confirmStash && (
-        <div className="stash-bar">
-          <span>本地有未提交变更，是否先暂存（stash）再拉取，完成后自动恢复？</span>
-          <div>
-            <button className="btn-sm" onClick={() => void handleStashPull()}>
-              暂存并拉取
-            </button>
-            <button className="btn-sm btn-ghost" onClick={() => setConfirmStash(false)}>
-              取消
-            </button>
-          </div>
-        </div>
+<StashBar onConfirm={() => void handleStashPull()} onCancel={() => setConfirmStash(false)} />
       )}
 
       {(busy || cloning) && (
-        <div className="busy-pop">
-          <div className="busy-row">
-            <span className="spinner" />
-            <span>
-              {(busy ?? cloning ?? "").replace(/…$/, "")}
-              {progress ? ` · ${progress.stage}` : ""}
-              {progress?.detail ? ` · ${progress.detail}` : ""}
-            </span>
-            {progressPct != null && <span className="busy-pct">{Math.round(progressPct)}%</span>}
-          </div>
-          <div className="progress-track">
-            <div
-              className={`progress-fill ${progressPct == null ? "indeterminate" : ""}`}
-              style={progressPct != null ? { width: `${progressPct}%` } : undefined}
-            />
-          </div>
-          <button className="busy-cancel" title="取消当前操作" onClick={() => void cancelOp()}>
-            <IconX size={13} />
-            取消
-          </button>
-        </div>
+<BusyPop
+          label={(busy ?? cloning ?? "").replace(/…$/, "")}
+          progress={progress}
+          percent={progressPct}
+          onCancel={() => void cancelOp()}
+        />
       )}
 
-      <div className="log-area card">
-        <div className="log-header">
-          <span>操作日志</span>
-          {cmdRunning ? (
-            <button className="btn-sm btn-danger" title={`终止后台命令：${cmdRunning}`} onClick={() => void stopRepoCmd()}>
-              终止
-            </button>
-          ) : (
-            <span className="log-hint">后台命令运行时可在此终止</span>
-          )}
-        </div>
-        <div className="log-body" ref={logRef}>
-          {logs.length === 0 && <div className="log-empty">暂无日志</div>}
-          {logs.map((l, i) => (
-            <div key={i} className={`log-line log-${l.kind}`}>
-              <span className="log-time">{l.time}</span>
-              <span className="log-text">{l.text}</span>
-            </div>
-          ))}
-        </div>
-      </div>
+<LogArea logs={logs} cmdRunning={cmdRunning} logRef={logRef} onStop={() => void stopRepoCmd()} />
 
       {showHistory && <HistoryModal onClose={() => setShowHistory(false)} />}
       {showCmd && <CmdPanel onClose={() => setShowCmd(false)} />}

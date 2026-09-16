@@ -1,0 +1,278 @@
+/* ---------- 功能弹层：待提交变更、定时自动同步、初始化排除列表 ---------- */
+
+/* ---------- 待提交变更弹出面板 ---------- */
+.changes-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.btn-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 4px;
+  background: var(--warning);
+  color: var(--on-accent);
+  border-radius: var(--r-pill);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+/* 浮卡：脱离纸面（surface + 大投影 + r-lg） */
+.commit-popover {
+  position: absolute;
+  top: 34px;
+  right: 0;
+  width: 400px;
+  max-width: 76vw;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+  padding: 12px 14px;
+  z-index: 40;
+  animation: rise 0.18s var(--ease);
+  text-align: left;
+  font-family: var(--font-serif);
+}
+
+.popover-close {
+  border: none;
+  background: transparent;
+  color: var(--fg3);
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.popover-close:hover {
+  color: var(--fg);
+  background: var(--item-hover-bg);
+}
+
+/* ---------- 定时自动同步弹层 ---------- */
+.auto-sync-pop {
+  width: 340px;
+}
+
+.auto-sync-desc {
+  margin: 6px 0 10px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--fg3);
+}
+
+/* 自动同步弹层的分段控件：5 个档位排成一行 */
+.auto-sync-seg {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+  background: var(--bg3);
+  border-radius: var(--r-lg);
+  padding: 4px;
+  margin-bottom: 8px;
+}
+
+.auto-sync-seg .segment {
+  padding: 5px 4px;
+}
+
+/* 每天定时模式的执行时刻输入行 */
+.auto-sync-daily-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  margin-bottom: 8px;
+}
+
+.auto-sync-time {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--field-bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.auto-sync-time:focus {
+  border-color: var(--accent);
+}
+
+.auto-sync-switch {
+  font-size: 12.5px;
+}
+
+.auto-sync-meta {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 11px;
+  color: var(--fg3);
+  line-height: 1.5;
+}
+
+/* 自动同步已开启：时钟图标染成绿色（不用角标圆点） */
+.icon-btn.auto-on {
+  color: var(--success);
+}
+
+.icon-btn.auto-on:hover {
+  color: var(--success);
+}
+
+/* 仓库列表：定时自动同步角标 */
+.badge-auto {
+  background: var(--success-wash);
+  color: var(--success);
+}
+
+/* 仓库列表：置顶角标与悬停工具钮的置顶态 */
+.badge-pin {
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+
+.repo-tool.pinned {
+  color: var(--accent);
+}
+
+/* 自动同步结果通知的语义色 */
+.auto-toast-warn .proxy-toast-icon {
+  color: var(--warning);
+}
+
+.auto-toast-error {
+  border-color: var(--danger);
+}
+
+.auto-toast-error .proxy-toast-icon {
+  color: var(--danger);
+}
+
+/* ---------- 初始化排除列表 ---------- */
+.exclude-list {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 6px;
+  background: var(--field-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.exclude-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.exclude-row:hover {
+  background: var(--item-hover-bg);
+}
+
+.exclude-row input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
+.exclude-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+
+.exclude-icon {
+  color: var(--fg3);
+  flex-shrink: 0;
+}
+
+.exclude-name.excluded {
+  color: var(--fg3);
+  text-decoration: line-through;
+}
+
+/* 语言统计：全窗通铺页脚（App 布局最底一行，仓库栏下方 → 右缘），
+   底色与仓库栏相同（bg2），顶部发丝线分隔。 */
+.lang-footer {
+  flex: none;
+  padding: 7px 22px 9px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+}
+
+.lang-bar {
+  display: flex;
+  height: 5px;
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  background: var(--bg3);
+  filter: saturate(0.4);
+}
+
+.lang-seg {
+  height: 100%;
+  transition: width 0.3s var(--ease);
+}
+
+.lang-seg:first-child {
+  border-radius: var(--r-pill) 0 0 var(--r-pill);
+}
+
+.lang-seg:last-child {
+  border-radius: 0 var(--r-pill) var(--r-pill) 0;
+}
+
+.lang-seg:only-child {
+  border-radius: var(--r-pill);
+}
+
+.lang-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 14px;
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--fg3);
+}
+
+.lang-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.lang-item b {
+  color: var(--fg3);
+  font-weight: 500;
+}
+
+.lang-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  filter: saturate(0.4);
+}

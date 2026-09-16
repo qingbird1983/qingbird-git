@@ -1,4 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import type { RepoCmds } from "./repoCmds";
 
 export interface RepoEntry {
   path: string;
@@ -11,6 +12,10 @@ export interface RepoEntry {
   test_cmd?: string;
   /** 一键运行：构建命令，空串表示未设置 */
   build_cmd?: string;
+  /** 一键运行：开发调试命令，空串表示未设置（此时用自动识别结果预填） */
+  dev_cmd?: string;
+  /** 一键运行：安装依赖命令，空串表示未设置（此时用自动识别结果预填） */
+  install_cmd?: string;
   /** 定时自动同步间隔（分钟），0 = 关闭或"每天定时"模式（旧配置可能缺省） */
   auto_sync_mins?: number;
   /** "每天定时"模式的执行时刻（本地时区 "HH:MM"），非空即每天定时模式 */
@@ -187,8 +192,15 @@ export const api = {
   openReadme: (path: string) => invoke<void>("open_readme", { path }),
   openRepoWebsite: (path: string) => invoke<void>("open_repo_website", { path }),
   cancelBusyOp: () => invoke<void>("cancel_busy_op"),
-  setRepoCmds: (path: string, testCmd: string, buildCmd: string) =>
-    invoke<RepoEntry[]>("set_repo_cmds", { path, testCmd, buildCmd }),
+  /** 保存四条一键运行命令；按名字传参，四个字段互相独立 */
+  setRepoCmds: (path: string, cmds: RepoCmds) =>
+    invoke<RepoEntry[]>("set_repo_cmds", {
+      path,
+      testCmd: cmds.test,
+      buildCmd: cmds.build,
+      devCmd: cmds.dev,
+      installCmd: cmds.install,
+    }),
   setAutoSync: (path: string, mins: number, autoPull: boolean, dailyTime = "") =>
     invoke<RepoEntry[]>("set_auto_sync", { path, mins, autoPull, dailyTime }),
   pinRepo: (path: string, pinned: boolean) =>
