@@ -45,7 +45,7 @@ pub struct RepoEntry {
     pub pinned: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Settings {
     /// 用户手动指定的代理，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080；为空表示全自动探测
     #[serde(default)]
@@ -66,6 +66,32 @@ pub struct Settings {
     /// SSH 私钥路径（远端为 ssh 协议时对该次 git 操作注入 GIT_SSH_COMMAND）
     #[serde(default)]
     pub ssh_key_path: String,
+    /// 后台自动同步结果是否发 Windows 系统通知。
+    /// 默认开：能进调度器的仓库本身就是用户显式开了自动同步的，结果理应被告知
+    /// （主窗口可见且聚焦时 notify 会自行静默，不会打扰正在看界面的人）。
+    #[serde(default = "default_true")]
+    pub notify_auto_sync: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 手写而非 derive：`notify_auto_sync` 默认 true，derive 出来的默认值会是 false，
+/// 导致"配置文件不存在/字段缺失"时开关状态与新建配置不一致
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            manual_proxy: String::new(),
+            theme: String::new(),
+            git_name: String::new(),
+            git_email: String::new(),
+            github_token: String::new(),
+            gitee_token: String::new(),
+            ssh_key_path: String::new(),
+            notify_auto_sync: true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

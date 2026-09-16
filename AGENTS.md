@@ -39,6 +39,9 @@ Rust 快速检查：`cd src-tauri && cargo check`
 
 - `src-tauri/src/git.rs`：git CLI 子进程封装（超时控制、输出捕获、网络错误分类、stderr 按 \r/\n 逐行流式回调供进度解析）
 - `src-tauri/src/proxy.rs`：代理探测（Windows 注册表系统代理、常见端口扫描、HTTP CONNECT 实测）
+- `src-tauri/src/notify.rs`：后台自动同步结果的系统通知。`toast_for` 是"结果 → 文案"的纯逻辑（`ok` 不发），
+  主窗口可见且聚焦时静默；由 Rust 侧直接发，不依赖前端存活。
+  开发模式下通知来源会显示成 PowerShell，装成 NSIS 包后才显示本应用名称与图标（插件在 Windows 上的已知行为）
 - `src-tauri/src/commands/`：Tauri commands，按领域拆分的模块目录，门面是 `mod.rs`
   （子模块声明、`pub use` 再导出、超时常量与全局操作互斥锁 `OP_LOCK`/`begin_user_op`）
   - `types.rs` 前后端共享的 IPC 数据结构（`RepoStatus`/`ProgressEvent`/`OpResult`…）
@@ -51,7 +54,7 @@ Rust 快速检查：`cd src-tauri && cargo check`
   - 新增 command 时：写进对应领域模块，再到 `lib.rs` 的 `generate_handler!` 注册；
     跨模块复用的私有项用 `pub(super)`，不要为了省事把所有东西都 `pub`
 - `src-tauri/src/store.rs`：配置持久化（`%APPDATA%/com.qingbird.git/config.json`，含代理、主题、每仓库命令/定时设置）
-- `src-tauri/src/lib.rs`：托盘图标与菜单（显示/扫描/退出）、关窗最小化到托盘、启动时应用持久化主题、开机自启插件注册
+- `src-tauri/src/lib.rs`：托盘图标与菜单（显示/扫描/退出）、关窗最小化到托盘、启动时应用持久化主题、开机自启与系统通知插件注册
 - 前端状态：zustand（`src/store.ts` 只放 state + actions）；
   `src/lib/` 放与 store 解耦的纯逻辑（`theme.ts` 主题、`sidebar.ts` 侧栏宽度、`autoSync.ts` 自动同步档位文案、
   `repos.ts` 排序、`appEvents.ts` 托盘与自动同步的后台事件桥接）；

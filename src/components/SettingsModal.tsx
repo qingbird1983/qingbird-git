@@ -16,6 +16,7 @@ export default function SettingsModal({ onClose }: Props) {
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [autostart, setAutostart] = useState(false);
+  const [notify, setNotify] = useState(true);
 
   const [gitName, setGitName] = useState("");
   const [gitEmail, setGitEmail] = useState("");
@@ -27,7 +28,9 @@ export default function SettingsModal({ onClose }: Props) {
   useEffect(() => {
     void (async () => {
       try {
-        setAddr((await api.getSettings()).manual_proxy);
+        const s = await api.getSettings();
+        setAddr(s.manual_proxy);
+        setNotify(s.notify_auto_sync);
         setAutostart(await api.autostartIsEnabled());
         const c = await api.getCredentials();
         setGitName(c.git_name);
@@ -77,6 +80,17 @@ export default function SettingsModal({ onClose }: Props) {
       }
     } catch (e) {
       setResult(`❌ 开机自启设置失败：${e}`);
+    }
+  };
+
+  const toggleNotify = async () => {
+    const next = !notify;
+    setNotify(next);
+    try {
+      await api.setNotifyAutoSync(next);
+    } catch (e) {
+      setNotify(!next);
+      setResult(`❌ 通知设置失败：${e}`);
     }
   };
 
@@ -131,6 +145,21 @@ export default function SettingsModal({ onClose }: Props) {
             <span className="switch-knob" />
           </button>
         </label>
+        <label className="switch-row">
+          <span>同步结果发系统通知</span>
+          <button
+            className={`switch ${notify ? "on" : ""}`}
+            role="switch"
+            aria-checked={notify}
+            onClick={() => void toggleNotify()}
+          >
+            <span className="switch-knob" />
+          </button>
+        </label>
+        <p className="modal-desc">
+          后台值守时，检测到新提交 / 自动拉取完成 / 同步失败会弹 Windows 通知
+          （主窗口正在前台时不打扰）。关掉后仍会照常自动同步，只是不再提醒。
+        </p>
 
         <p className="modal-subtitle">Git 身份（提交时使用）</p>
         <div className="modal-row">

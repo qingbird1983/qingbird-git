@@ -1,5 +1,6 @@
 mod commands;
 mod git;
+mod notify;
 mod proxy;
 mod scheduler;
 mod store;
@@ -49,6 +50,8 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // 后台自动同步结果的系统通知（Rust 侧直接发，见 notify.rs）
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             commands::list_repos,
             commands::add_repo,
@@ -71,6 +74,7 @@ pub fn run() {
             commands::get_settings,
             commands::set_settings,
             commands::set_theme,
+            commands::set_notify_auto_sync,
             commands::get_credentials,
             commands::set_credentials,
             commands::open_in_folder,

@@ -33,11 +33,24 @@
 
 ---
 
-### 2. ✨ 托盘系统通知（S，性价比最高）【来源 FB-A2】
+### 2. ✅ ✨ 托盘系统通知（S，性价比最高）【来源 FB-A2】
 
-**现状**：调度器已经产生 `behind` / `pulled` / `error` 事件并推给前端，但后台值守时用户看不到。
+**已交付（2026-09-16）**：新增 `src-tauri/src/notify.rs`，由 Rust 侧直接发 Windows 通知（不依赖前端存活）；
+调度器每轮结束后按结果发——`behind`「云端有 N 个新提交，可手动拉取」、`pulled`「自动拉取成功（N 个新提交）」、
+`skip`（本地脏跳过）、`error`（标题直接写「同步失败」，正文是失败原因）。两条不打扰规则：`ok`（已是最新 / 无上游）
+不发；主窗口可见且聚焦时静默（关窗后 Webview 已销毁，正是最该通知的场景）。
+设置弹窗「系统」区加总开关 `set_notify_auto_sync`（即时生效，**打开时立刻发一条示例通知**，不用等下一次自动同步就能确认系统弹不弹）。
+配置项 `Settings.notify_auto_sync` 默认开；为让"存量配置缺字段"与"新建配置"结果一致，`Settings` 改为手写 `Default`。
+接入 `tauri-plugin-notification`（Cargo 依赖 + `lib.rs` 注册）；只在 Rust 侧调用，前端不需要权限声明与 capability。
+验收：`cargo test` 24/24（新增 5 个 `toast_for` 文案与截断单测）；`cargo check --all-targets` 零 warning
+（顺带清掉 `scheduler.rs` 测试里一个从未被使用的 `entry` 辅助函数）；`pnpm test:web` 6/6；`pnpm build` 通过。
 
-**方案**：事件同时发 Windows 系统通知（tauri-plugin-notification）：
+**与原提案的差异**：不做"点击通知唤起主窗口并定位到该仓库"——`tauri-plugin-notification` 桌面端未暴露通知点击/激活事件
+（Windows 侧要注册 COM 激活器，等于把应用做成 MSIX 包），本期通知只承担"告知"。免打扰时段同样留作二期。
+**Windows 注意**：`pnpm tauri dev` 下通知来源显示成 PowerShell；NSIS 安装包会创建带 AppUserModelID 的快捷方式
+（已在 `installer.nsi` 确认 `SetLnkAppUserModelId`），装好后才显示本应用名称与图标。
+
+**原方案**：事件同时发 Windows 系统通知（tauri-plugin-notification）：
 
 - 「xxx 有 3 个新提交」→ 点击唤起主窗口并定位到该仓库
 - 「xxx 已自动同步完成」/「同步失败：…」按 `last_auto_result` 汇总
@@ -234,6 +247,9 @@ HistoryModal 现在只有提交列表。点击一条 → `git show <hash> --stat
 
 ## 历史
 
+- **2026-09-16（深夜）**：#2 托盘系统通知完成——新增 `notify.rs` 由 Rust 侧直接发通知（不依赖前端存活），
+  `ok` 结果与"主窗口在前台"两种情况静默，设置弹窗加总开关且打开时发示例通知便于当场验证；
+  #1 分叉恢复向导同步开工
 - **2026-09-16**：#5 `commands.rs` 模块化拆分完成（原文件 2686 行 → `commands/` 10 个领域模块），
   `App.css`（2040 行）按域拆到 `src/styles/`、`store.ts` 抽出 `src/lib/`、面板浮层抽出子组件；
   #4 部分交付（`pnpm test:web` 零依赖测试跑起来，store 覆盖率未做）；

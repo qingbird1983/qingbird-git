@@ -1,8 +1,9 @@
 //! 定时自动同步调度器：后台线程每 30 秒扫描一次配置，
 //! 对用户开启了自动同步的仓库按各自间隔执行"检测云端更新（→ 自动拉取）"。
 //! 只处理 auto_sync_mins > 0 的仓库；与用户操作通过 commands::try_begin_op 互斥。
+//! 每轮结果推给前端（`auto-sync-event`），并按设置开关同时发系统通知（见 `notify.rs`）。
 
-use crate::{commands, store};
+use crate::{commands, notify, store};
 use serde::Serialize;
 use std::time::Duration;
 use tauri::Emitter;
@@ -71,6 +72,8 @@ fn daily_is_due<Tz: chrono::TimeZone>(
 /// 扫描一遍到期仓库并逐个同步；任何时刻只处理一个仓库（串行，不做并发轰炸）
 fn tick(app: &tauri::AppHandle) {
     let cfg = store::load(app);
+    // 通知总开关在设置弹窗里；关掉后仍然照常推前端事件，只是不弹系统通知
+    let notify_on = cfg.settings.notify_auto_sync;
     let now = store::now_secs();
     let now_local = chrono::Local::now();
     let due: Vec<String> = cfg
@@ -97,6 +100,10 @@ fn tick(app: &tauri::AppHandle) {
         };
         let event = run_one(app, entry);
         drop(_guard);
+        // 前端不在（关窗后 Webview 已销毁）时系统通知是唯一的出口，所以不依赖 emit 的成败
+        if notify_on {
+            notify::auto_sync(app, &event);
+        }
         let _ = app.emit("auto-sync-event", event);
         std::thread::sleep(Duration::from_secs(BETWEEN_REPOS_DELAY_SECS));
     }
@@ -204,26 +211,6 @@ fn sync_repo(
 mod tests {
     use super::*;
     use chrono::TimeZone;
-
-    fn entry(mins: u32, last_check: u64) -> store::RepoEntry {
-        store::RepoEntry {
-            path: "C:/repo".into(),
-            name: "repo".into(),
-            alias: String::new(),
-            added_at: 0,
-            last_used: 0,
-            test_cmd: String::new(),
-            build_cmd: String::new(),
-            dev_cmd: String::new(),
-            install_cmd: String::new(),
-            auto_sync_mins: mins,
-            daily_time: String::new(),
-            auto_pull: false,
-            last_auto_check: last_check,
-            last_auto_result: String::new(),
-            pinned: false,
-        }
-    }
 
     #[test]
     fn interval_due_only_enabled_and_expired() {

@@ -9,6 +9,8 @@ pub struct AppSettings {
     pub manual_proxy: String,
     pub last_good_proxy: Option<String>,
     pub theme: String,
+    /// 后台自动同步结果是否发系统通知
+    pub notify_auto_sync: bool,
 }
 
 #[tauri::command]
@@ -18,6 +20,7 @@ pub fn get_settings(app: tauri::AppHandle) -> AppSettings {
         manual_proxy: cfg.settings.manual_proxy,
         last_good_proxy: cfg.last_good_proxy,
         theme: cfg.settings.theme,
+        notify_auto_sync: cfg.settings.notify_auto_sync,
     }
 }
 
@@ -84,4 +87,18 @@ pub fn set_settings(app: tauri::AppHandle, manual_proxy: String) -> Result<(), S
     let mut cfg = store::load(&app);
     cfg.settings.manual_proxy = manual_proxy.trim().to_string();
     store::save(&app, &cfg)
+}
+
+/// 系统通知总开关。与设置弹窗里的"开机自动启动"一样即时生效，
+/// 不挂在"保存"按钮上——否则用户拨了开关又点取消，状态会与界面不一致
+#[tauri::command]
+pub fn set_notify_auto_sync(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let mut cfg = store::load(&app);
+    cfg.settings.notify_auto_sync = enabled;
+    store::save(&app, &cfg)?;
+    // 打开时立刻发一条示例：用户当场确认通知能弹出来，不用等下一次自动同步
+    if enabled {
+        crate::notify::sample(&app);
+    }
+    Ok(())
 }

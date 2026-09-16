@@ -76,6 +76,8 @@ export interface AppSettings {
   manual_proxy: string;
   last_good_proxy: string | null;
   theme: string;
+  /** 后台自动同步结果是否发系统通知（默认开） */
+  notify_auto_sync: boolean;
 }
 
 export interface FileChange {
@@ -172,6 +174,9 @@ export const api = {
   getSettings: () => invoke<AppSettings>("get_settings"),
   setSettings: (manualProxy: string) => invoke<void>("set_settings", { manualProxy }),
   setTheme: (theme: string) => invoke<void>("set_theme", { theme }),
+  /** 系统通知总开关，即时生效 */
+  setNotifyAutoSync: (enabled: boolean) =>
+    invoke<void>("set_notify_auto_sync", { enabled }),
   getCredentials: () => invoke<AppCredentials>("get_credentials"),
   setCredentials: (c: {
     gitName: string;
