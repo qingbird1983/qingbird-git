@@ -152,6 +152,108 @@
   flex-shrink: 0;
 }
 
+/* ---------- 容量面板下半部分：.gitignore 建议与「最大的文件」 ---------- */
+.space-block {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.space-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg2);
+}
+
+.space-block-note {
+  font-weight: 400;
+  color: var(--fg3);
+}
+
+.space-block-hint {
+  margin-top: 6px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--fg3);
+}
+
+.space-suggest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 4px;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.space-suggest-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.space-tag-warn {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
+/* 「最大的文件」整行可点：点了打开所在文件夹 */
+.space-file {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  color: var(--fg);
+  font: inherit;
+  border-radius: var(--r-sm);
+}
+
+.space-file:hover {
+  background: var(--item-hover-bg);
+}
+
+.space-file-icon {
+  flex-shrink: 0;
+  color: var(--fg3);
+}
+
+.space-file-text {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 文件名是重点，保证完整；所在目录在后面省略——长路径截断时丢掉的是不重要的部分 */
+.space-file-name {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.space-file-dir {
+  font-size: 10.5px;
+  color: var(--fg3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.space-file .space-size {
+  min-width: 60px;
+}
+
 .modal-close-right {
   margin-left: auto;
 }

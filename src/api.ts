@@ -145,10 +145,30 @@ export interface DirSize {
   is_cache: boolean;
 }
 
+/** 工作区里的大文件（不含 .git 与缓存目录，那些的体积由 dirs 单独展示） */
+export interface BigFile {
+  /** 相对仓库根目录的路径，分隔符统一为 / */
+  name: string;
+  /** 所在文件夹的绝对路径：open_in_folder 只接受目录 */
+  dir: string;
+  size: number;
+}
+
+export interface IgnoreSuggestion {
+  /** 顶层目录名 */
+  name: string;
+  /** 目录里已有被 git 跟踪的文件：写 .gitignore 不会取消跟踪，得靠 git rm -r --cached */
+  tracked: boolean;
+}
+
 export interface SpaceReport {
   /** 仓库文件夹总占用（字节） */
   total: number;
   dirs: DirSize[];
+  /** 最大的若干个工作区文件 */
+  largest: BigFile[];
+  /** 存在但没被 git 忽略的缓存目录 */
+  ignorable: IgnoreSuggestion[];
 }
 
 export interface CmdDetect {
@@ -241,6 +261,9 @@ export const api = {
   stopRepoCmd: () => invoke<void>("stop_repo_cmd"),
   scanRepoSpace: (path: string) => invoke<SpaceReport>("scan_repo_space", { path }),
   deleteCacheDir: (path: string, name: string) => invoke<number>("delete_cache_dir", { path, name }),
+  /** 把缓存目录追加进 .gitignore，返回真正写入的条目（已被忽略的会跳过） */
+  addGitignoreEntries: (path: string, entries: string[]) =>
+    invoke<string[]>("add_gitignore_entries", { path, entries }),
   probe: (addr: string) => invoke<boolean>("probe_proxy", { addr }),
   autostartIsEnabled: () => invoke<boolean>("plugin:autostart|is_enabled"),
   autostartEnable: () => invoke<void>("plugin:autostart|enable"),

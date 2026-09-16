@@ -91,6 +91,7 @@ pub fn run() {
             commands::run_repo_cmd,
             commands::scan_repo_space,
             commands::delete_cache_dir,
+            commands::add_gitignore_entries,
             commands::probe_proxy
         ])
         .setup(|app| {
