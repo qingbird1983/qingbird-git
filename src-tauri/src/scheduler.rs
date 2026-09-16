@@ -2,6 +2,7 @@
 //! 对用户开启了自动同步的仓库按各自间隔执行"检测云端更新（→ 自动拉取）"。
 //! 只处理 auto_sync_mins > 0 的仓库；与用户操作通过 commands::try_begin_op 互斥。
 //! 每轮结果推给前端（`auto-sync-event`），并按设置开关同时发系统通知（见 `notify.rs`）。
+//! "每天定时"模式在时刻没跑到时会补跑一次（见 `daily_is_due`）。
 
 use crate::{commands, notify, store};
 use serde::Serialize;
@@ -48,8 +49,35 @@ fn interval_due(mins: u32, last_check: u64, now: u64) -> bool {
     mins > 0 && now.saturating_sub(last_check) >= u64::from(mins) * 60
 }
 
-/// 每天定时模式到期判定：今天的执行时刻已过，且本轮（今天该时刻之后）还没跑过。
+/// now 之前（含）最近一次的执行时刻（秒）；今天还没到点就是昨天那次。
 /// tz 抽象成参数便于单测；实际调用传 chrono::Local。
+fn last_due_moment<Tz: chrono::TimeZone>(
+    now: chrono::DateTime<Tz>,
+    h: u32,
+    m: u32,
+) -> Option<i64> {
+    let at = |date: chrono::NaiveDate| {
+        date.and_hms_opt(h, m, 0)
+            .and_then(|t| t.and_local_timezone(now.timezone()).single())
+    };
+    let today = at(now.date_naive())?;
+    if now.timestamp() >= today.timestamp() {
+        return Some(today.timestamp());
+    }
+    // 昨天先按"日期减一天"再本地化，而不是给 DateTime 减 24 小时——
+    // 后者遇到夏令时切换会整体偏一小时
+    Some(at(now.date_naive().pred_opt()?)?.timestamp())
+}
+
+/// 每天定时模式到期判定：**最近一个已经到点的执行时刻**还没被跑过，就补跑一次。
+///
+/// 只盯"今天这个时刻"会整段漏掉一天：09-14 09:30 该跑时机器关着，
+/// 09-15 08:00 开机时 `now < 今天的 09:30` → 不触发，于是 09-14 一次都没同步，
+/// 还得干等到 09-15 09:30。改成回看"最近一个已到点的时刻"（今天过了算今天，
+/// 没过算昨天）之后，开机那一轮就会补上。
+///
+/// 补跑会把 `last_auto_check` 刷新到当前时刻，而它只可能大于"昨天那个时刻"，
+/// 所以连续关机几天也只补一次，不会攒成一串。
 fn daily_is_due<Tz: chrono::TimeZone>(
     daily_time: &str,
     now: chrono::DateTime<Tz>,
@@ -58,15 +86,10 @@ fn daily_is_due<Tz: chrono::TimeZone>(
     let Some((h, m)) = store::parse_hhmm(daily_time) else {
         return false;
     };
-    let Some(today_run) = now
-        .date_naive()
-        .and_hms_opt(h, m, 0)
-        .and_then(|t| t.and_local_timezone(now.timezone()).single())
-    else {
-        return false;
-    };
-    let today_run = today_run.timestamp();
-    now.timestamp() >= today_run && (last_check as i64) < today_run
+    match last_due_moment(now, h, m) {
+        Some(target) => (last_check as i64) < target,
+        None => false,
+    }
 }
 
 /// 扫描一遍到期仓库并逐个同步；任何时刻只处理一个仓库（串行，不做并发轰炸）
@@ -238,16 +261,85 @@ mod tests {
         let run_today = tz.with_ymd_and_hms(2026, 9, 14, 9, 30, 0).unwrap();
         let before_run = tz.with_ymd_and_hms(2026, 9, 14, 8, 0, 0).unwrap();
         let after_run = tz.with_ymd_and_hms(2026, 9, 14, 10, 0, 0).unwrap();
-        // 昨天 20:00 跑过
+        // 昨天 20:00 跑过（晚于昨天 09:30 那次，所以昨天那次已被覆盖）
         let last_yesterday = tz.with_ymd_and_hms(2026, 9, 13, 20, 0, 0).unwrap().timestamp() as u64;
         // 今天跑完之后的时刻
         let last_today = (run_today.timestamp() + 300) as u64;
 
-        assert!(!daily_is_due("09:30", before_run, last_yesterday), "还没到今天的执行时刻");
+        assert!(
+            !daily_is_due("09:30", before_run, last_yesterday),
+            "今天还没到点、昨天那次也跑过了 → 不触发"
+        );
+        assert!(
+            daily_is_due("09:30", run_today, last_yesterday),
+            "刚好到点、还没跑过 → 该跑（判定含等号）"
+        );
         assert!(daily_is_due("09:30", after_run, last_yesterday), "过了执行时刻且今天没跑过 → 到期");
         assert!(!daily_is_due("09:30", after_run, last_today), "今天执行时刻之后已跑过 → 不重复");
         assert!(!daily_is_due("bad", after_run, last_yesterday), "非法时间串 → 永不到期");
         assert!(!daily_is_due("", after_run, last_yesterday), "空串 → 非每天定时模式");
+    }
+
+    #[test]
+    fn daily_due_catches_up_a_missed_previous_target() {
+        // 回归：09-14 09:30 该跑时机器关着，09-15 08:00 才开机（还没到今天的 09:30）。
+        // 旧实现只在"今天的时刻已过"时才判到期，于是 09-14 整天没同步，
+        // 还要干等到 09-15 09:30；现在开机那一刻就会补一次。
+        let tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let boot = tz.with_ymd_and_hms(2026, 9, 15, 8, 0, 0).unwrap();
+        let stamp = |d: u32, h: u32, mi: u32| {
+            tz.with_ymd_and_hms(2026, 9, d, h, mi, 0).unwrap().timestamp() as u64
+        };
+
+        let missed_yesterday = stamp(13, 9, 31); // 最后一次跑在 09-13
+        let covered_yesterday = stamp(14, 9, 31); // 09-14 那次跑过了
+
+        assert!(
+            daily_is_due("09:30", boot, missed_yesterday),
+            "昨天那次没跑 → 开机就该补"
+        );
+        assert!(
+            !daily_is_due("09:30", boot, covered_yesterday),
+            "昨天那次跑过了 → 不该多跑一次"
+        );
+
+        // 补跑会把 last_auto_check 刷到当前时刻，而它只可能大于"昨天那个时刻"：
+        // 所以紧接着的下一轮、以及连续关机好几天，都只补这一次
+        let after_catchup = (boot.timestamp() + 30) as u64;
+        assert!(!daily_is_due("09:30", boot, after_catchup), "刚补过就不再补");
+        let last_week = stamp(8, 9, 31);
+        assert!(daily_is_due("09:30", boot, last_week), "关了一周也只补一次（本次）");
+        assert!(
+            !daily_is_due("09:30", boot, after_catchup),
+            "补完之后不管上次跑得多早，都不再重复补"
+        );
+    }
+
+    #[test]
+    fn last_due_moment_picks_today_or_yesterday() {
+        let tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let at = |d: u32, h: u32, mi: u32| {
+            tz.with_ymd_and_hms(2026, 9, d, h, mi, 0).unwrap().timestamp()
+        };
+        // 已过点 → 今天那次
+        assert_eq!(
+            last_due_moment(tz.with_ymd_and_hms(2026, 9, 15, 10, 0, 0).unwrap(), 9, 30),
+            Some(at(15, 9, 30))
+        );
+        // 没到点 → 昨天那次
+        assert_eq!(
+            last_due_moment(tz.with_ymd_and_hms(2026, 9, 15, 8, 0, 0).unwrap(), 9, 30),
+            Some(at(14, 9, 30))
+        );
+        // 跨月：9 月 1 日没到点，要落到 8 月 31 日
+        assert_eq!(
+            last_due_moment(tz.with_ymd_and_hms(2026, 9, 1, 8, 0, 0).unwrap(), 9, 30),
+            Some(
+                tz.with_ymd_and_hms(2026, 8, 31, 9, 30, 0)
+                    .unwrap()
+                    .timestamp()
+            )
+        );
     }
 
     #[test]
