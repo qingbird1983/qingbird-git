@@ -1,0 +1,1216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>青鸟 Git · 界面重设计方案</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* ============================================================
+   报告层（暖白纸面 · 衬线标题）
+   ============================================================ */
+:root{
+  --paper:#f7f5f0;
+  --card:#ffffff;
+  --line:#e9e3d6;
+  --line-soft:#f0ece3;
+  --ink:#14171e;
+  --ink2:#3a4256;
+  --muted:#7c7a72;
+  --primary:#2f6f5e;
+  --primary-wash:rgba(47,111,94,.09);
+  --warn:#b4762a;
+
+  /* 产品色板（灰白 · 中性） */
+  --p-canvas:#FAFAFA;
+  --p-surface:#FFFFFF;
+  --p-sunken:#F4F4F5;
+  --p-line:#E4E4E7;
+  --p-line-soft:#EFEFF1;
+  --p-ink:#18181B;
+  --p-ink2:#52525B;
+  --p-ink3:#A1A1AA;
+  --p-accent:#0D9488;
+  --p-accent-wash:rgba(13,148,136,.10);
+  --p-ok:#059669;
+  --p-warn:#D97706;
+  --p-danger:#DC2626;
+  --p-fork:#7C3AED;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:"Outfit","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:15px;
+  line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.mono{font-family:"JetBrains Mono",Consolas,monospace}
+.serif{font-family:"DM Serif Display","Songti SC",serif;font-weight:400}
+.wrap{max-width:1120px;margin:0 auto;padding:0 28px 100px}
+
+/* ---------- Hero ---------- */
+.hero{padding:64px 0 40px;position:relative;overflow:hidden}
+.hero::before,.hero::after{
+  content:"";position:absolute;border-radius:50%;pointer-events:none;
+}
+.hero::before{width:520px;height:520px;right:-180px;top:-200px;
+  background:radial-gradient(circle,rgba(47,111,94,.07),transparent 70%)}
+.hero::after{width:420px;height:420px;left:-200px;bottom:-260px;
+  background:radial-gradient(circle,rgba(180,118,42,.05),transparent 70%)}
+.eyebrow{
+  display:inline-flex;align-items:center;gap:8px;
+  font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--primary);font-weight:500;margin-bottom:20px;
+}
+.eyebrow::before{content:"";width:22px;height:1px;background:var(--primary);opacity:.5}
+h1{
+  font-family:"DM Serif Display","Songti SC",serif;font-weight:400;
+  font-size:clamp(30px,4.6vw,44px);line-height:1.24;letter-spacing:-.01em;
+  margin:0 0 18px;max-width:17em;position:relative;
+}
+h1 em{font-style:normal;color:var(--primary)}
+.lede{font-size:16.5px;color:var(--ink2);max-width:36em;margin:0 0 32px;position:relative}
+.lede b{color:var(--ink);font-weight:600}
+
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:14px;overflow:hidden;position:relative}
+.kpi{background:var(--card);padding:20px 18px}
+.kpi-n{font-family:"DM Serif Display",serif;font-size:34px;line-height:1;letter-spacing:-.02em}
+.kpi-n.s{color:var(--muted);text-decoration:line-through;text-decoration-color:rgba(124,122,114,.4);text-decoration-thickness:2px}
+.kpi-n.a{color:var(--primary)}
+.kpi-l{margin-top:10px;font-size:12.5px;color:var(--muted);line-height:1.45}
+
+/* ---------- Section ---------- */
+section{padding-top:60px}
+.sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:8px}
+.sec-n{font-family:"DM Serif Display",serif;font-size:13px;color:var(--primary);
+  border:1px solid rgba(47,111,94,.3);border-radius:50%;width:26px;height:26px;
+  display:grid;place-items:center;flex:none;transform:translateY(-3px)}
+h2{font-family:"DM Serif Display","Songti SC",serif;font-weight:400;
+  font-size:26px;letter-spacing:-.01em;margin:0;line-height:1.3}
+h3{font-size:16.5px;margin:0 0 8px;font-weight:600;letter-spacing:-.005em}
+.sec-sub{color:var(--muted);font-size:14.5px;margin:0 0 28px;max-width:44em;padding-left:40px}
+p{margin:0 0 12px}
+.lead{color:var(--ink2)}
+
+/* ---------- Card / grid ---------- */
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+@media(max-width:860px){.g2,.g3,.g4{grid-template-columns:1fr}.kpis{grid-template-columns:1fr 1fr}}
+
+/* bench bar */
+.bench{display:grid;grid-template-columns:132px 1fr 78px;gap:12px;align-items:center;padding:7px 0}
+.bench-label{font-size:13px;color:var(--ink2)}
+.bench-track{height:14px;background:var(--line-soft);border-radius:5px;overflow:hidden;position:relative}
+.bench-fill{height:100%;background:var(--primary);border-radius:5px}
+.bench-val{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--muted);text-align:right}
+
+/* problem list */
+.prob{display:flex;gap:14px;padding:18px 0;border-top:1px solid var(--line)}
+.prob:first-of-type{border-top:none}
+.prob-n{flex:none;width:26px;height:26px;border-radius:8px;background:var(--ink);
+  color:#fff;font-size:12.5px;font-weight:600;display:grid;place-items:center;margin-top:2px}
+.prob-b{flex:1}
+.prob-b p{margin:0;color:var(--ink2);font-size:14px}
+.tag{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:11px;
+  padding:2px 7px;border-radius:5px;background:var(--primary-wash);color:var(--primary);
+  margin-right:6px;font-weight:500}
+
+/* ---------- mockup shell ---------- */
+.mock{margin:22px 0 0;background:var(--card);border:1px solid var(--line);
+  border-radius:16px;padding:20px;overflow:hidden}
+.mock-cap{font-size:12px;color:var(--muted);margin-bottom:14px;display:flex;
+  justify-content:space-between;align-items:center;gap:6px 12px;flex-wrap:wrap}
+.mock-cap b{color:var(--ink2);font-weight:600}
+.viewport{background:
+  linear-gradient(var(--line-soft) 1px,transparent 1px) 0 0/100% 24px,
+  linear-gradient(90deg,var(--line-soft) 1px,transparent 1px) 0 0/24px 100%,
+  var(--paper);
+  border-radius:12px;padding:20px;border:1px solid var(--line-soft);
+  overflow-x:auto}
+.win{
+  --u:1;
+  width:1180px;height:700px;margin:0 auto;background:var(--p-canvas);
+  border:1px solid #D8D8DC;border-radius:10px;overflow:hidden;
+  font-family:"Outfit","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:12px;color:var(--p-ink);line-height:1.4;
+  box-shadow:0 8px 30px rgba(20,23,30,.08);
+  display:flex;flex-direction:column;
+  zoom:var(--u);
+}
+@media(max-width:1200px){.win{--u:.78}}
+@media(max-width:1000px){.win{--u:.58}}
+@media(max-width:800px){.win{--u:.47}}
+@media(max-width:660px){.win{--u:.4}}
+@media(max-width:480px){.win{--u:.3}}
+.i{width:1em;height:1em;flex:none;stroke:currentColor;fill:none;
+  stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+/* titlebar */
+.wbar{flex:none;height:38px;display:flex;align-items:center;gap:12px;
+  padding:0 10px 0 12px;background:var(--p-surface);border-bottom:1px solid var(--p-line)}
+.wbar-brand{display:flex;align-items:center;gap:7px;font-weight:600;font-size:12.5px;letter-spacing:.01em}
+.wbar-mark{width:17px;height:17px;color:var(--p-accent);flex:none;display:block}
+.wbar-search{margin-left:10px;flex:1;max-width:340px;height:24px;border-radius:6px;
+  background:var(--p-sunken);border:1px solid var(--p-line);display:flex;align-items:center;
+  gap:6px;padding:0 8px;color:var(--p-ink3);font-size:11px}
+.wbar-kbd{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:9.5px;
+  border:1px solid var(--p-line);border-radius:4px;padding:0 4px;background:var(--p-surface)}
+.wbar>.wbtn:first-of-type{margin-left:auto}
+.wbtn{width:26px;height:24px;border-radius:5px;display:grid;place-items:center;
+  color:var(--p-ink2)}
+.wbtn.on{background:var(--p-sunken);color:var(--p-ink)}
+.wbtn.close:hover{background:#E5484D;color:#fff}
+
+/* body split */
+.wbody{flex:1;display:flex;min-height:0}
+.rail{flex:none;width:46px;background:var(--p-surface);border-right:1px solid var(--p-line);
+  display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:3px}
+.rail-i{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;
+  color:var(--p-ink3)}
+.rail-i.on{background:var(--p-accent-wash);color:var(--p-accent)}
+.rail-i .i{width:16px;height:16px}
+.rail-gap{height:10px}
+.rail-av{margin-top:auto;width:26px;height:26px;border-radius:50%;background:var(--p-sunken);
+  border:1px solid var(--p-line);display:grid;place-items:center;font-size:10px;color:var(--p-ink2);font-weight:600}
+
+/* repo list */
+.rlist{flex:none;width:232px;background:var(--p-surface);border-right:1px solid var(--p-line);
+  display:flex;flex-direction:column;min-height:0}
+.rlist-hd{padding:10px 10px 8px;border-bottom:1px solid var(--p-line-soft)}
+.rlist-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.rlist-title{font-size:12.5px;font-weight:600;letter-spacing:.01em}
+.rlist-n{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--p-ink3)}
+.rsearch{height:26px;border-radius:7px;background:var(--p-sunken);display:flex;
+  align-items:center;gap:6px;padding:0 8px;color:var(--p-ink3);font-size:11px;margin-bottom:8px}
+.rsearch .i{width:12px;height:12px}
+.rfilter{display:flex;gap:4px}
+.fchip{font-size:10.5px;padding:2.5px 8px;border-radius:99px;color:var(--p-ink2);
+  border:1px solid var(--p-line);white-space:nowrap}
+.fchip.on{background:var(--p-ink);color:#fff;border-color:var(--p-ink)}
+.fchip b{font-family:"JetBrains Mono",monospace;font-weight:500;opacity:.65;margin-left:2px}
+.rlist-body{flex:1;overflow:hidden;padding:5px 6px}
+.rsec-lbl{font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--p-ink3);
+  padding:8px 6px 4px;font-weight:600}
+.ritem{padding:7px 8px;border-radius:8px;display:flex;align-items:center;gap:8px;margin-bottom:1px}
+.ritem.on{background:var(--p-sunken)}
+.rdot{width:7px;height:7px;border-radius:50%;flex:none}
+.ritem-main{flex:1;min-width:0}
+.ritem-name{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  display:flex;align-items:center;gap:5px}
+.ritem-sub{font-size:10.5px;color:var(--p-ink3);display:flex;align-items:center;gap:6px;margin-top:1px}
+/* 领先/落后微型双向条 */
+.rbar{width:38px;height:4px;border-radius:2px;background:var(--p-line-soft);display:flex;
+  overflow:hidden;flex:none;gap:1px}
+.rbar i{display:block;height:100%}
+.rbar .ahead{background:var(--p-accent)}
+.rbar .behind{background:var(--p-warn)}
+.rlist-ft{flex:none;border-top:1px solid var(--p-line-soft);padding:8px 10px;display:flex;
+  align-items:center;gap:7px;font-size:10.5px;color:var(--p-ink2)}
+.diskbar{flex:1;height:5px;border-radius:3px;background:var(--p-line-soft);display:flex;overflow:hidden;gap:1px}
+.diskbar i{height:100%}
+
+/* work area */
+.work{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--p-canvas)}
+.work-hd{flex:none;padding:14px 18px 12px;border-bottom:1px solid var(--p-line);
+  background:var(--p-surface);display:flex;align-items:flex-start;gap:14px}
+.work-name{font-size:19px;font-weight:600;letter-spacing:-.015em;display:flex;align-items:center;gap:8px}
+.work-path{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--p-ink3);
+  margin-top:3px}
+.work-meta{display:flex;gap:5px;margin-top:7px;flex-wrap:wrap}
+.pchip{font-size:10px;padding:2px 7px;border-radius:5px;background:var(--p-sunken);
+  color:var(--p-ink2);border:1px solid var(--p-line-soft);white-space:nowrap}
+.pchip.h{color:var(--p-warn);background:rgba(217,119,6,.09);border-color:rgba(217,119,6,.2)}
+.pchip.a{color:var(--p-accent);background:var(--p-accent-wash);border-color:rgba(13,148,136,.2)}
+.pchip.f{color:var(--p-fork);background:rgba(124,58,237,.09);border-color:rgba(124,58,237,.2)}
+.work-act{margin-left:auto;display:flex;gap:6px;align-items:center}
+.obtn{height:26px;padding:0 9px;border-radius:7px;background:var(--p-surface);
+  border:1px solid var(--p-line);color:var(--p-ink2);display:flex;align-items:center;gap:5px;font-size:11px}
+.obtn .i{width:13px;height:13px}
+.obtn.ghost{background:transparent;border-color:transparent;width:26px;padding:0;justify-content:center}
+
+.work-body{flex:1;display:flex;min-height:0}
+.work-main{flex:1;padding:14px 18px;display:flex;flex-direction:column;gap:12px;min-width:0;overflow:hidden}
+.pcard{background:var(--p-surface);border:1px solid var(--p-line);border-radius:11px;padding:13px}
+.pcard-hd{display:flex;align-items:center;gap:7px;margin-bottom:11px}
+.pcard-t{font-size:11.5px;font-weight:600;letter-spacing:.02em}
+.pcard-x{margin-left:auto;font-size:10px;color:var(--p-ink3);display:flex;align-items:center;gap:4px}
+
+/* sync hero */
+.synchero{display:grid;grid-template-columns:104px 1fr;gap:12px 16px;
+  align-items:center;padding:15px 16px}
+.ring{position:relative;width:104px;height:104px;flex:none}
+.ring svg{transform:rotate(-90deg)}
+.ring-c{position:absolute;inset:0;display:grid;place-content:center;text-align:center}
+.ring-v{font-size:24px;font-weight:600;letter-spacing:-.03em;line-height:1;font-family:"JetBrains Mono",monospace}
+.ring-l{font-size:9.5px;color:var(--p-ink3);margin-top:4px;letter-spacing:.04em}
+.synctext{flex:1;min-width:0}
+.synctitle{font-size:15px;font-weight:600;display:flex;align-items:center;gap:7px;margin-bottom:5px}
+.syncdesc{font-size:11.5px;color:var(--p-ink2);line-height:1.55}
+.syncdesc .hl{color:var(--p-warn);font-weight:600}
+.syncbtns{display:flex;gap:7px;grid-column:1/-1}
+.sbtn{height:31px;padding:0 13px;border-radius:8px;font-size:12px;font-weight:500;
+  display:inline-flex;align-items:center;gap:6px;border:1px solid var(--p-line);
+  background:var(--p-surface);color:var(--p-ink);white-space:nowrap;flex:none}
+.sbtn .i{width:14px;height:14px}
+.sbtn.pri{background:var(--p-ink);color:#fff;border-color:var(--p-ink)}
+.sbtn.acc{background:var(--p-accent);color:#fff;border-color:var(--p-accent)}
+.sbtn:disabled{opacity:.4}
+
+/* command list */
+.cmdrow{display:flex;align-items:center;gap:9px;padding:6.5px 0;border-top:1px solid var(--p-line-soft)}
+.cmdrow:first-of-type{border-top:none}
+.cmd-ic{width:24px;height:24px;border-radius:6px;background:var(--p-sunken);
+  display:grid;place-items:center;color:var(--p-ink2);flex:none}
+.cmd-ic .i{width:13px;height:13px}
+.cmd-t{font-size:11.5px;font-weight:500}
+.cmd-s{font-family:"JetBrains Mono",monospace;font-size:9.5px;color:var(--p-ink3);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cmd-row-m{flex:1;min-width:0}
+.cmd-run{margin-left:auto;display:flex;align-items:center;gap:8px;flex:none}
+.st{font-family:"JetBrains Mono",monospace;font-size:9.5px;padding:1.5px 6px;border-radius:4px;
+  white-space:nowrap;flex:none}
+.st.ok{color:var(--p-ok);background:rgba(5,150,105,.10)}
+.st.run{color:var(--p-accent);background:var(--p-accent-wash)}
+.st.idle{color:var(--p-ink3);background:var(--p-sunken)}
+.spin{width:9px;height:9px;border-radius:50%;border:1.5px solid var(--p-accent);
+  border-top-color:transparent;animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.cbtn{width:22px;height:22px;border-radius:6px;border:1px solid var(--p-line);
+  background:var(--p-surface);display:grid;place-items:center;color:var(--p-ink2);
+  flex:none;white-space:nowrap}
+.cbtn .i{width:11px;height:11px}
+
+/* stats card */
+.langbar{height:7px;border-radius:4px;display:flex;overflow:hidden;gap:1.5px;margin-bottom:9px}
+.langbar i{height:100%}
+.langrow{display:flex;align-items:center;gap:6px;font-size:10.5px;padding:2.5px 0;color:var(--p-ink2)}
+.langrow .sw{width:7px;height:7px;border-radius:2px;flex:none}
+.langrow b{margin-left:auto;font-family:"JetBrains Mono",monospace;font-weight:500;font-size:10px;color:var(--p-ink)}
+.spark{display:flex;align-items:flex-end;gap:2px;height:34px;margin:6px 0 4px}
+.spark i{flex:1;background:var(--p-accent);opacity:.28;border-radius:1.5px 1.5px 0 0;min-height:2px}
+.spark i.hot{opacity:1}
+.mini-stat{display:flex;justify-content:space-between;font-size:10.5px;padding:3.5px 0;color:var(--p-ink2)}
+.mini-stat b{font-family:"JetBrains Mono",monospace;color:var(--p-ink);font-weight:500}
+
+/* inspector */
+.insp{flex:none;width:316px;background:var(--p-surface);border-left:1px solid var(--p-line);
+  display:flex;flex-direction:column;min-height:0}
+.insp-hd{flex:none;display:flex;align-items:center;gap:2px;padding:7px 8px;
+  border-bottom:1px solid var(--p-line)}
+.itab{font-size:11px;padding:4.5px 9px;border-radius:6px;color:var(--p-ink2);display:flex;
+  align-items:center;gap:5px}
+.itab .i{width:12px;height:12px}
+.itab.on{background:var(--p-sunken);color:var(--p-ink);font-weight:500}
+.itab .n{font-family:"JetBrains Mono",monospace;font-size:9px;background:var(--p-ink);
+  color:#fff;border-radius:99px;padding:0 4px;line-height:13px}
+.insp-body{flex:1;padding:10px;overflow:hidden}
+.filerow{display:flex;align-items:center;gap:6px;padding:5px 0;font-size:11px;border-bottom:1px solid var(--p-line-soft)}
+.filerow .st-code{font-family:"JetBrains Mono",monospace;font-size:9.5px;width:22px;
+  border-radius:3px;text-align:center;padding:1px 0;flex:none}
+.st-code.m{color:var(--p-warn);background:rgba(217,119,6,.12)}
+.st-code.a{color:var(--p-ok);background:rgba(5,150,105,.12)}
+.filerow .fp{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  color:var(--p-ink2)}
+.filerow .fd{font-family:"JetBrains Mono",monospace;font-size:9.5px;flex:none}
+.fd.a{color:var(--p-ok)}.fd.d{color:var(--p-danger)}
+.cinput{width:100%;height:28px;border-radius:7px;border:1px solid var(--p-line);
+  background:var(--p-canvas);margin-top:10px;font-size:11px}
+.full{width:100%;height:29px;border-radius:7px;background:var(--p-ink);color:#fff;
+  font-size:11.5px;font-weight:500;margin-top:7px;display:flex;align-items:center;
+  justify-content:center;gap:5px;border:none}
+.commitrow{display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--p-line-soft);align-items:flex-start}
+.cmt-h{font-family:"JetBrains Mono",monospace;font-size:9.5px;color:var(--p-ink3);flex:none;padding-top:1px}
+.cmt-s{font-size:11px;color:var(--p-ink);line-height:1.35}
+.cmt-m{font-size:9.5px;color:var(--p-ink3);margin-top:2px}
+
+/* status bar */
+.wstatus{flex:none;height:26px;border-top:1px solid var(--p-line);background:var(--p-surface);
+  display:flex;align-items:center;gap:10px;padding:0 12px;font-size:10.5px;color:var(--p-ink2)}
+.wstatus .ok{color:var(--p-ok);display:flex;align-items:center;gap:4px}
+.wstatus .ok .i{width:11px;height:11px}
+.wstatus .sep{color:var(--p-line)}
+.wstatus-r{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--p-ink3)}
+
+/* palette */
+.sw-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:4px}
+.sw{width:74px}
+.sw-b{height:46px;border-radius:8px;border:1px solid rgba(0,0,0,.07)}
+.sw-n{font-family:"JetBrains Mono",monospace;font-size:9.5px;color:var(--muted);margin-top:5px}
+.sw-r{font-size:10px;color:var(--ink3);margin-top:1px}
+.sem{display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px solid var(--line-soft)}
+.sem:last-child{border-bottom:none}
+.sem-d{width:11px;height:11px;border-radius:3.5px;flex:none}
+.sem-n{font-size:13px;font-weight:500;width:74px;flex:none}
+.sem-ds{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--muted);width:76px;flex:none}
+.sem-u{font-size:12.5px;color:var(--ink2)}
+
+/* table */
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+th{text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);
+  font-weight:600;padding:0 12px 9px;border-bottom:1px solid var(--line)}
+td{padding:10px 12px;border-bottom:1px solid var(--line-soft);color:var(--ink2);vertical-align:top}
+td:first-child{color:var(--ink);font-weight:500;white-space:nowrap}
+td code{font-family:"JetBrains Mono",monospace;font-size:11px;background:var(--p-sunken);
+  padding:1px 5px;border-radius:4px;color:var(--ink2)}
+.arrow{color:var(--p-ink3);padding:0 4px}
+
+/* timeline */
+.tl{list-style:none;padding:0;margin:0;position:relative}
+.tl::before{content:"";position:absolute;left:9px;top:8px;bottom:8px;width:2px;background:var(--primary);opacity:.28}
+.tl li{position:relative;padding:0 0 26px 34px}
+.tl li:last-child{padding-bottom:0}
+.tl li::before{content:"";position:absolute;left:2px;top:5px;width:15px;height:15px;
+  border-radius:50%;background:var(--paper);border:2px solid var(--primary)}
+.tl li::after{content:"";position:absolute;left:6.5px;top:9.5px;width:6px;height:6px;
+  border-radius:50%;background:var(--primary)}
+.tl-h{font-size:14.5px;font-weight:600;margin-bottom:3px}
+.tl-h span{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--muted);
+  font-weight:400;margin-left:8px}
+.tl-b{font-size:13px;color:var(--ink2);margin:0}
+.tl-tag{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10px;
+  padding:1px 6px;border-radius:4px;margin-right:6px}
+.tl-tag.fe{background:rgba(47,111,94,.1);color:var(--primary)}
+.tl-tag.rs{background:rgba(180,118,42,.12);color:var(--warn)}
+
+/* decision */
+.ask{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;
+  margin-bottom:14px}
+.ask-n{font-family:"DM Serif Display",serif;font-size:12px;color:#fff;background:var(--ink);
+  width:20px;height:20px;border-radius:50%;display:grid;place-items:center;margin-bottom:12px}
+.ask h3{margin-bottom:6px}
+.ask p{color:var(--ink2);font-size:13.5px;margin:0}
+.rec{display:inline-block;margin-top:11px;font-size:12px;padding:3px 10px;border-radius:99px;
+  background:var(--primary-wash);color:var(--primary);font-weight:500}
+
+.foot{margin-top:70px;padding-top:24px;border-top:1px solid var(--line);
+  font-size:12.5px;color:var(--muted)}
+.note{font-size:12.5px;color:var(--muted);margin-top:10px;padding-left:14px;
+  border-left:2px solid var(--line);line-height:1.6}
+</style>
+</head>
+<body>
+
+<!-- icon sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<g id="i-git"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></g>
+<g id="i-grid"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></g>
+<g id="i-list"><path d="M3 6h.01M3 12h.01M3 18h.01M8 6h13M8 12h13M8 18h13"/></g>
+<g id="i-gear"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></g>
+<g id="i-search"><circle cx="11" cy="11" r="7.5"/><path d="m21 21-4.3-4.3"/></g>
+<g id="i-down"><path d="M12 4v15"/><path d="m18.5 13.5-6.5 6.5-6.5-6.5"/></g>
+<g id="i-up"><path d="M12 20V5"/><path d="m5.5 10.5 6.5-6.5 6.5 6.5"/></g>
+<g id="i-sync"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></g>
+<g id="i-check"><path d="M20 6 9 17l-5-5"/></g>
+<g id="i-diff"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 21h16"/></g>
+<g id="i-clock"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></g>
+<g id="i-history"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7.5V12l3 1.8"/></g>
+<g id="i-drive"><path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M6 16h.01M10 16h.01"/></g>
+<g id="i-play"><polygon points="6.5 4 20 12 6.5 20 6.5 4"/></g>
+<g id="i-flask"><path d="M10 2v7.5a2 2 0 0 1-.2.9L4.7 20.5a1 1 0 0 0 .9 1.5h12.8a1 1 0 0 0 .9-1.5L14.2 10.4a2 2 0 0 1-.2-.9V2"/><path d="M8.5 2h7M7 16h10"/></g>
+<g id="i-box"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></g>
+<g id="i-zap"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></g>
+<g id="i-pkg"><path d="m7.5 4.3 9 5.2"/><path d="M21 8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></g>
+<g id="i-plus"><path d="M5 12h14M12 5v14"/></g>
+<g id="i-fork"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v3a6 6 0 0 0 6 6h3"/><path d="M18 15v-3a6 6 0 0 0-3-5.2"/></g>
+<g id="i-file"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v5h5"/><path d="M10 13h4M10 17h4"/></g>
+<g id="i-terminal"><path d="m4.5 16.5 6-6-6-6"/><path d="M12 18h7.5"/></g>
+<g id="i-folder"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></g>
+<g id="i-moon"><path d="M12.5 3a9 9 0 1 0 8.5 11.5A7 7 0 0 1 12.5 3Z"/></g>
+<g id="i-sun"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/></g>
+<g id="i-minus"><path d="M5 12h14"/></g>
+<g id="i-square"><rect x="3" y="3" width="18" height="18" rx="2.5"/></g>
+<g id="i-x"><path d="M18 6 6 18M6 6l12 12"/></g>
+<g id="i-pause"><rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/></g>
+<g id="i-panel"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="M15 3v18"/></g>
+<g id="i-branch"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></g>
+<g id="i-alert"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3"/><path d="M12 9.5v4M12 17.5h.01"/></g>
+<g id="i-activity"><path d="M22 12h-4l-3 8-6-16-3 8H2"/></g>
+<g id="i-cmd"><path d="M15 6a3 3 0 1 1 3 3h-3V6ZM9 6a3 3 0 1 0-3 3h3V6ZM15 18a3 3 0 1 0 3-3h-3v3ZM9 18a3 3 0 1 1-3-3h3v3Z"/><rect x="9" y="9" width="6" height="6" rx="1"/></g>
+<g id="i-rmd"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></g>
+<g id="i-cloud"><path d="M17.5 19H9a7 7 0 1 1 6.7-9h1.8a4.5 4.5 0 1 1 0 9Z"/></g>
+<g id="i-scan"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></g>
+<g id="i-globe"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18Z"/></g>
+<g id="i-dots"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></g>
+</defs></svg>
+
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">青鸟 Git · 界面重设计提案</div>
+  <h1>把 28 个按钮，收进 <em>1 个动作中枢</em></h1>
+  <p class="lede">
+    现在的主面板里挤着 8 个只靠 tooltip 说明的图标按钮、5～8 个胶囊按钮、6 种锚定在按钮上的浮层。
+    问题不是功能多，而是<b>所有东西都摊在同一层</b>——用户每次都要重新扫一遍全找一遍。
+    下面的方案按「<b>导航 / 动作 / 查看</b>」三层重新分流，并用可视化控件替代表情式文字标签。
+  </p>
+  <div class="kpis">
+    <div class="kpi"><div class="kpi-n s">28</div><div class="kpi-l">当前首屏可点元素<br>（标题栏 6 + 侧栏 6 + 头部 8 + 胶囊 8）</div></div>
+    <div class="kpi"><div class="kpi-n a">10</div><div class="kpi-l">重设计后首屏可点元素<br>其余全部收进 ⌘K 与检视抽屉</div></div>
+    <div class="kpi"><div class="kpi-n s">6</div><div class="kpi-l">锚定在按钮上的浮层<br>（自动同步 / 同步内容 / 变更 / 忙碌 / stash / 分叉）</div></div>
+    <div class="kpi"><div class="kpi-n a">1</div><div class="kpi-l">右侧检视抽屉<br>承接全部「查看类」功能</div></div>
+  </div>
+</header>
+
+<!-- ============ 1 诊断 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">1</div><h2>现在为什么挤</h2></div>
+  <p class="sec-sub">把当前界面的可点元素按区域铺开看，问题不在数量，而在<b>缺少层级</b>：主动作、查看动作、危险动作、设置动作全部用了同一种视觉权重。</p>
+
+  <div class="g2">
+    <div class="card">
+      <h3>首屏元素按区域分布</h3>
+      <div class="bench"><span class="bench-label">主面板头部</span><div class="bench-track"><div class="bench-fill" style="width:100%"></div></div><span class="bench-val">8 图标 + 5 chip</span></div>
+      <div class="bench"><span class="bench-label">操作区胶囊</span><div class="bench-track"><div class="bench-fill" style="width:100%;background:#c9c3b4"></div></div><span class="bench-val">5 + 3 自定义</span></div>
+      <div class="bench"><span class="bench-label">侧栏头部</span><div class="bench-track"><div class="bench-fill" style="width:75%;background:#c9c3b4"></div></div><span class="bench-val">2 tab + 4 图标</span></div>
+      <div class="bench"><span class="bench-label">列表项悬停</span><div class="bench-track"><div class="bench-fill" style="width:50%;background:#c9c3b4"></div></div><span class="bench-val">3 工具 + 6 徽标</span></div>
+      <div class="bench"><span class="bench-label">标题栏</span><div class="bench-track"><div class="bench-fill" style="width:38%;background:#c9c3b4"></div></div><span class="bench-val">6 按钮</span></div>
+      <div class="bench"><span class="bench-label">底部页脚</span><div class="bench-track"><div class="bench-fill" style="width:100%;background:#c9c3b4"></div></div><span class="bench-val">语言条 1 条</span></div>
+    </div>
+    <div class="card">
+      <h3>四个具体症结</h3>
+      <div class="prob"><div class="prob-n">1</div><div class="prob-b">
+        <h3 style="font-size:14.5px">图标按钮靠 tooltip 认命</h3>
+        <p><span class="tag">打开文件夹</span><span class="tag">终端</span><span class="tag">历史</span><span class="tag">README</span><span class="tag">运行命令</span><span class="tag">定时</span><span class="tag">同步内容</span><span class="tag">待提交</span>——8 个 15px 图标一字排开，鼠标不动就完全不知道是什么。</p>
+      </div></div>
+      <div class="prob"><div class="prob-n">2</div><div class="prob-b">
+        <h3 style="font-size:14.5px">6 种浮层各挂各的按钮</h3>
+        <p>自动同步、同步内容、待提交都锚在头部某个 icon 上，位置随按钮排布漂移；再叠上 stash 确认条、忙碌进度条、分叉恢复卡片，纵向节奏被打断。</p>
+      </div></div>
+      <div class="prob"><div class="prob-n">3</div><div class="prob-b">
+        <h3 style="font-size:14.5px">仓库列表和容量面板抢同一个 tab</h3>
+        <p>「容量」是当前仓库的纵向深入信息，却被塞进全局仓库栏里横向切换，切换成本与心智负担都不对位。</p>
+      </div></div>
+      <div class="prob"><div class="prob-n">4</div><div class="prob-b">
+        <h3 style="font-size:14.5px">状态全是文字 chip</h3>
+        <p>「落后云端 3 个提交 / 待推送 5 个提交」要读两遍；<code>↓3 ↑5 ●</code> 这类徽标又太短、缺语义色，只能靠记忆。</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 2 原则 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">2</div><h2>三条重排原则</h2></div>
+  <p class="sec-sub">先定规则，再画界面。后面每个控件都能追溯到这三条。</p>
+  <div class="g3">
+    <div class="card">
+      <h3>动作分三层，一层一个视觉重量</h3>
+      <p class="lead" style="font-size:13.5px">
+        <b>执行</b>（检测/拉取/推送）占视觉中心，用大控件和实心按钮；<br>
+        <b>命令</b>（测试/构建/开发/依赖）变成带状态的列表行；<br>
+        <b>查看</b>（历史/变更/定时/空间/README）全部退出主面板，进右侧检视抽屉与 ⌘K。
+      </p>
+    </div>
+    <div class="card">
+      <h3>状态用图形，不用句子</h3>
+      <p class="lead" style="font-size:13.5px">
+        文字 chip「落后云端 3 个提交」→「同步环中心大字 <b>↓3</b>」+ 环色。<br>
+        徽标 <code>↓3 ↑5</code> → 列表项右侧 <b>双向微型条</b>，长度即比例。<br>
+        语义色只表达状态，绝不用于装饰。
+      </p>
+    </div>
+    <div class="card">
+      <h3>就近原则：谁的属性，放谁那里</h3>
+      <p class="lead" style="font-size:13.5px">
+        定时同步是<b>单仓库</b>设置 → 放检视抽屉的「定时」页，不占全局位置。<br>
+        磁盘占用是<b>单仓库</b>深入信息 → 归检视抽屉，不再抢仓库列表的 tab。<br>
+        语言构成是<b>单仓库</b>统计 → 从通铺页脚收进工作区统计卡。
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 3 主方案 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">3</div><h2>主推方案 · Command Deck</h2></div>
+  <p class="sec-sub">四区结构：<b>导航轨</b>（全局）· <b>仓库列表</b>（选择）· <b>工作区</b>（执行 + 统计）· <b>检视抽屉</b>（按需滑出）。下面全部是可直接对照的高保真稿。</p>
+
+  <div class="mock">
+    <div class="mock-cap"><span><b>主界面 · 仓库工作区</b>　执行层只有同步环 + 三键，查看层全部让位给右侧抽屉</span><span>下方三态可点击切换</span></div>
+    <div class="viewport">
+      <div class="win" id="winA">
+        <!-- titlebar -->
+        <div class="wbar">
+          <div class="wbar-brand"><svg class="wbar-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/><path d="M12 8.6v6.8"/><circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/><circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/></svg>青鸟 Git</div>
+          <div class="wbar-search"><svg class="i"><use href="#i-search"/></svg>搜索仓库或执行命令<span class="wbar-kbd">Ctrl K</span></div>
+          <div class="wbtn"><svg class="i"><use href="#i-moon"/></svg></div>
+          <div class="wbtn"><svg class="i"><use href="#i-gear"/></svg></div>
+          <div class="wbtn"><svg class="i"><use href="#i-minus"/></svg></div>
+          <div class="wbtn"><svg class="i"><use href="#i-square"/></svg></div>
+          <div class="wbtn close"><svg class="i"><use href="#i-x"/></svg></div>
+        </div>
+        <div class="wbody">
+          <!-- rail -->
+          <div class="rail">
+            <div class="rail-i on"><svg class="i"><use href="#i-git"/></svg></div>
+            <div class="rail-i"><svg class="i"><use href="#i-grid"/></svg></div>
+            <div class="rail-i"><svg class="i"><use href="#i-activity"/></svg></div>
+            <div class="rail-gap"></div>
+            <div class="rail-i"><svg class="i"><use href="#i-plus"/></svg></div>
+            <div class="rail-i"><svg class="i"><use href="#i-scan"/></svg></div>
+            <div class="rail-i"><svg class="i"><use href="#i-drive"/></svg></div>
+            <div class="rail-av">42527</div>
+          </div>
+          <!-- list -->
+          <div class="rlist">
+            <div class="rlist-hd">
+              <div class="rlist-top"><span class="rlist-title">仓库</span><span class="rlist-n">8</span></div>
+              <div class="rsearch"><svg class="i"><use href="#i-search"/></svg>搜索名称 / 别名</div>
+              <div class="rfilter">
+                <span class="fchip on">全部<b>8</b></span>
+                <span class="fchip">待同步<b>3</b></span>
+                <span class="fchip">有改动<b>2</b></span>
+                <span class="fchip">失联<b>1</b></span>
+              </div>
+            </div>
+            <div class="rlist-body">
+              <div class="rsec-lbl">置顶</div>
+              <div class="ritem on">
+                <span class="rdot" style="background:var(--p-warn)"></span>
+                <div class="ritem-main">
+                  <div class="ritem-name">qingbird-git</div>
+                  <div class="ritem-sub">落后 3 · 2 处改动</div>
+                </div>
+                <div class="rbar"><i class="behind" style="width:60%"></i><i class="ahead" style="width:20%"></i></div>
+              </div>
+              <div class="ritem">
+                <span class="rdot" style="background:var(--p-ok)"></span>
+                <div class="ritem-main">
+                  <div class="ritem-name">qingbird-md</div>
+                  <div class="ritem-sub">已同步 · 3 小时前</div>
+                </div>
+                <div class="rbar"><i class="behind" style="width:16%"></i><i class="ahead" style="width:8%"></i></div>
+              </div>
+              <div class="rsec-lbl">最近使用</div>
+              <div class="ritem">
+                <span class="rdot" style="background:var(--p-accent)"></span>
+                <div class="ritem-main">
+                  <div class="ritem-name">atlas-web</div>
+                  <div class="ritem-sub">待推送 5</div>
+                </div>
+                <div class="rbar"><i class="behind" style="width:14%"></i><i class="ahead" style="width:72%"></i></div>
+              </div>
+              <div class="ritem">
+                <span class="rdot" style="background:var(--p-fork)"></span>
+                <div class="ritem-main">
+                  <div class="ritem-name">efo-api</div>
+                  <div class="ritem-sub">已分叉 · 需处理</div>
+                </div>
+                <div class="rbar"><i class="behind" style="width:48%"></i><i class="ahead" style="width:44%"></i></div>
+              </div>
+              <div class="ritem">
+                <span class="rdot" style="background:var(--p-ink3)"></span>
+                <div class="ritem-main">
+                  <div class="ritem-name">notes</div>
+                  <div class="ritem-sub">目录已失联</div>
+                </div>
+                <div class="rbar"></div>
+              </div>
+            </div>
+            <div class="rlist-ft">
+              <svg class="i" style="width:12px;height:12px;color:var(--p-ink3)"><use href="#i-drive"/></svg>
+              <div class="diskbar"><i style="width:34%;background:#A1A1AA"></i><i style="width:41%;background:#0D9488"></i><i style="width:25%;background:#D97706"></i></div>
+              <b class="mono" style="font-size:10px;font-weight:500">8.4 GB</b>
+            </div>
+          </div>
+          <!-- work -->
+          <div class="work">
+            <div class="work-hd">
+              <div>
+                <div class="work-name">qingbird-git <svg class="i" style="width:14px;height:14px;color:var(--p-ink3)"><use href="#i-branch"/></svg></div>
+                <div class="work-path">F:\AIwork\qingbird-git</div>
+                <div class="work-meta">
+                  <span class="pchip">main</span><span class="pchip">GitHub</span>
+                  <span class="pchip">Rust · Tauri 2</span>
+                  <span class="pchip h">落后云端 3</span><span class="pchip a">待推送 2</span>
+                  <span class="pchip">2 处未提交</span>
+                </div>
+              </div>
+              <div class="work-act">
+                <div class="obtn"><svg class="i"><use href="#i-panel"/></svg>检视</div>
+                <div class="obtn ghost"><svg class="i"><use href="#i-dots"/></svg></div>
+              </div>
+            </div>
+            <div class="work-body">
+              <div class="work-main">
+                <!-- sync -->
+                <div class="pcard synchero">
+                  <div class="ring" id="ringBox"></div>
+                  <div class="synctext">
+                    <div class="synctitle" id="syncTitle">云端有 3 个新提交</div>
+                    <div class="syncdesc" id="syncDesc">上次同步 <span class="hl">2 小时前</span>。拉取使用 <code class="mono" style="font-size:10.5px">--ff-only</code>，遇到分叉只会停下报错，不会自动合并。</div>
+                    <div class="syncbtns">
+                      <div class="sbtn acc" id="btnPull"><svg class="i"><use href="#i-down"/></svg>拉取</div>
+                      <div class="sbtn" id="btnPush"><svg class="i"><use href="#i-up"/></svg>推送</div>
+                      <div class="sbtn" id="btnCheck"><svg class="i"><use href="#i-sync"/></svg>检测</div>
+                    </div>
+                  </div>
+                </div>
+                <!-- commands -->
+                <div class="pcard" style="flex:1;display:flex;flex-direction:column;min-height:0">
+                  <div class="pcard-hd"><svg class="i" style="width:13px;height:13px;color:var(--p-ink2)"><use href="#i-cmd"/></svg>
+                    <span class="pcard-t">命令</span>
+                    <span class="pcard-x">点标题可改命令</span></div>
+                  <div class="cmdrow"><div class="cmd-ic"><svg class="i"><use href="#i-flask"/></svg></div>
+                    <div class="cmd-row-m"><div class="cmd-t">跑测试</div><div class="cmd-s">cargo test --manifest-path src-tauri/Cargo.toml</div></div>
+                    <div class="cmd-run"><span class="st ok">通过 · 12s</span><div class="cbtn"><svg class="i"><use href="#i-play"/></svg></div></div></div>
+                  <div class="cmdrow"><div class="cmd-ic"><svg class="i"><use href="#i-box"/></svg></div>
+                    <div class="cmd-row-m"><div class="cmd-t">构建</div><div class="cmd-s">pnpm tauri build</div></div>
+                    <div class="cmd-run"><span class="st run"><span class="spin" style="display:inline-block;vertical-align:-1px;margin-right:4px"></span>运行中</span><div class="cbtn"><svg class="i"><use href="#i-pause"/></svg></div></div></div>
+                  <div class="cmdrow"><div class="cmd-ic"><svg class="i"><use href="#i-zap"/></svg></div>
+                    <div class="cmd-row-m"><div class="cmd-t">开发</div><div class="cmd-s">pnpm tauri dev</div></div>
+                    <div class="cmd-run"><span class="st idle">未运行</span><div class="cbtn"><svg class="i"><use href="#i-play"/></svg></div></div></div>
+                  <div class="cmdrow"><div class="cmd-ic"><svg class="i"><use href="#i-pkg"/></svg></div>
+                    <div class="cmd-row-m"><div class="cmd-t">安装依赖</div><div class="cmd-s">pnpm install</div></div>
+                    <div class="cmd-run"><span class="st idle">未运行</span><div class="cbtn"><svg class="i"><use href="#i-play"/></svg></div></div></div>
+                  <div class="cmdrow"><div class="cmd-ic" style="border:1px dashed var(--p-line);background:transparent"><svg class="i"><use href="#i-plus"/></svg></div>
+                    <div class="cmd-row-m"><div class="cmd-t" style="color:var(--p-ink2)">自定义命令</div><div class="cmd-s">最多 3 个 · 在此增删</div></div>
+                    <div class="cmd-run"><div class="cbtn" style="width:auto;padding:0 8px;font-size:10px">配置</div></div></div>
+                </div>
+              </div>
+              <!-- stats -->
+              <div class="pcard" style="width:158px;flex:none;display:flex;flex-direction:column;gap:2px">
+                <div class="pcard-hd"><svg class="i" style="width:13px;height:13px;color:var(--p-ink2)"><use href="#i-activity"/></svg>
+                  <span class="pcard-t">统计</span></div>
+                <div style="font-size:10px;color:var(--p-ink3);margin-bottom:5px">语言构成</div>
+                <div class="langbar"><i style="width:61%;background:#dea584"></i><i style="width:24%;background:#3178c6"></i><i style="width:8%;background:#f1e05a"></i><i style="width:7%;background:#8b949e"></i></div>
+                <div class="langrow"><span class="sw" style="background:#dea584"></span>Rust<b>61.2%</b></div>
+                <div class="langrow"><span class="sw" style="background:#3178c6"></span>TypeScript<b>24.0%</b></div>
+                <div class="langrow"><span class="sw" style="background:#f1e05a"></span>CSS<b>8.1%</b></div>
+                <div class="langrow"><span class="sw" style="background:#8b949e"></span>其他<b>6.7%</b></div>
+                <div style="height:1px;background:var(--p-line-soft);margin:11px 0 9px"></div>
+                <div style="font-size:10px;color:var(--p-ink3);margin-bottom:2px">近 14 天提交</div>
+                <div class="spark">
+                  <i style="height:20%"></i><i style="height:45%"></i><i style="height:28%"></i><i class="hot" style="height:100%"></i>
+                  <i style="height:62%"></i><i style="height:35%"></i><i style="height:18%"></i><i style="height:52%"></i>
+                  <i style="height:80%"></i><i style="height:40%"></i><i style="height:22%"></i><i style="height:66%"></i>
+                  <i style="height:34%"></i><i style="height:58%"></i>
+                </div>
+                <div style="height:1px;background:var(--p-line-soft);margin:9px 0 7px"></div>
+                <div class="mini-stat"><span>磁盘占用</span><b>1.24 GB</b></div>
+                <div class="mini-stat"><span>可清理缓存</span><b style="color:var(--p-warn)">318 MB</b></div>
+                <div class="mini-stat"><span>上次同步</span><b>2 h</b></div>
+                <div class="mini-stat"><span>自动同步</span><b>每 30 min</b></div>
+              </div>
+            </div>
+          </div>
+          <!-- inspector -->
+          <div class="insp">
+            <div class="insp-hd">
+              <div class="itab on"><svg class="i"><use href="#i-diff"/></svg>变更<span class="n">2</span></div>
+              <div class="itab"><svg class="i"><use href="#i-history"/></svg>历史</div>
+              <div class="itab"><svg class="i"><use href="#i-clock"/></svg>定时</div>
+              <div class="itab"><svg class="i"><use href="#i-drive"/></svg>空间</div>
+              <div style="margin-left:auto" class="obtn ghost" style="width:22px;height:22px"><svg class="i" style="width:12px;height:12px"><use href="#i-x"/></svg></div>
+            </div>
+            <div class="insp-body">
+              <div class="filerow"><span class="st-code m">M</span><span class="fp">src/store.ts</span><span class="fd a">+48</span><span class="fd d">−12</span></div>
+              <div class="filerow"><span class="st-code m">M</span><span class="fp">src/components/RepoPanel.tsx</span><span class="fd a">+31</span><span class="fd d">−76</span></div>
+              <div class="filerow"><span class="st-code a">A</span><span class="fp">src/lib/syncRing.ts</span><span class="fd a">+96</span></div>
+              <div class="filerow"><span class="st-code a">A</span><span class="fp">src/lib/syncRing.test.mjs</span><span class="fd a">+42</span></div>
+              <div style="margin-top:14px;font-size:10.5px;color:var(--p-ink3)">提交信息</div>
+              <div class="cinput"></div>
+              <div class="full"><svg class="i" style="width:12px;height:12px"><use href="#i-up"/></svg>提交并推送</div>
+              <div style="height:1px;background:var(--p-line-soft);margin:14px 0 10px"></div>
+              <div style="font-size:10.5px;color:var(--p-ink3);margin-bottom:4px">最近提交</div>
+              <div class="commitrow"><span class="cmt-h">a3f9c21</span><div><div class="cmt-s">feat: 分叉恢复向导收进检视抽屉</div><div class="cmt-m">42527 · 今天 20:14</div></div></div>
+              <div class="commitrow"><span class="cmt-h">7b2e014</span><div><div class="cmt-s">chore: 补 pnpm test:web 回归用例</div><div class="cmt-m">42527 · 昨天 23:02</div></div></div>
+              <div class="commitrow"><span class="cmt-h">c1189af</span><div><div class="cmt-s">fix: 进度条 \r 折叠后挤在同一行</div><div class="cmt-m">42527 · 9月24日</div></div></div>
+              <div class="commitrow"><span class="cmt-h">5d0a7b3</span><div><div class="cmt-s">feat: 代理竞速与认证注入</div><div class="cmt-m">42527 · 9月23日</div></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="wstatus">
+          <span class="ok"><svg class="i"><use href="#i-check"/></svg>已从 GitHub 同步 3 个提交</span>
+          <span class="sep">·</span><span>20:31</span>
+          <span class="sep">·</span><span>构建运行中</span>
+          <div class="wstatus-r"><span>代理 127.0.0.1:7897</span><span class="sep">|</span><span>日志 ▴</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note">灰色主按钮=推送（需要你主动做），青色=拉取（应用推荐做），描边=检测（只读）。三键不再平铺，靠<b>颜色权重</b>区分主次；检测退为描边是因为它不改变仓库状态。</div>
+</section>
+
+<!-- ============ 3.2 其他三屏 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">3.2</div><h2>另外三屏</h2></div>
+  <p class="sec-sub">总览负责「有什么要做」，检视抽屉负责「细看某个仓库」，⌘K 负责「找不常用但存在的功能」。</p>
+
+  <div class="mock">
+    <div class="mock-cap"><span><b>总览 Dashboard</b>　点导航轨第二个图标进入，聚合全库待办</span></div>
+    <div class="viewport">
+      <div class="win" style="height:420px">
+        <div class="wbar">
+          <div class="wbar-brand"><svg class="wbar-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/><path d="M12 8.6v6.8"/><circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/><circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/></svg>青鸟 Git</div>
+          <div class="wbar-search"><svg class="i"><use href="#i-search"/></svg>搜索仓库或执行命令<span class="wbar-kbd">Ctrl K</span></div>
+          <div class="wbtn"><svg class="i"><use href="#i-moon"/></svg></div><div class="wbtn"><svg class="i"><use href="#i-gear"/></svg></div>
+          <div class="wbtn"><svg class="i"><use href="#i-minus"/></svg></div><div class="wbtn"><svg class="i"><use href="#i-square"/></svg></div><div class="wbtn close"><svg class="i"><use href="#i-x"/></svg></div>
+        </div>
+        <div class="wbody">
+          <div class="rail">
+            <div class="rail-i"><svg class="i"><use href="#i-git"/></svg></div>
+            <div class="rail-i on"><svg class="i"><use href="#i-grid"/></svg></div>
+            <div class="rail-i"><svg class="i"><use href="#i-activity"/></svg></div>
+            <div class="rail-gap"></div>
+            <div class="rail-i"><svg class="i"><use href="#i-plus"/></svg></div><div class="rail-i"><svg class="i"><use href="#i-scan"/></svg></div>
+            <div class="rail-i"><svg class="i"><use href="#i-drive"/></svg></div>
+            <div class="rail-av">42527</div>
+          </div>
+          <div class="work" style="padding:0;background:var(--p-canvas)">
+            <div style="padding:16px 20px 0">
+              <div style="font-size:19px;font-weight:600;letter-spacing:-.015em">总览</div>
+              <div style="font-size:11px;color:var(--p-ink3);margin-top:2px">8 个仓库 · 上次全量扫描 20:30</div>
+            </div>
+            <div style="padding:14px 20px;display:flex;gap:11px;flex:1;min-height:0">
+              <div class="pcard" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px">
+                <div style="width:76px;height:76px;border-radius:50%;display:grid;place-items:center;
+                     background:conic-gradient(var(--p-ok) 0 62.5%,var(--p-warn) 62.5% 87.5%,var(--p-accent) 87.5% 100%)">
+                  <div style="width:58px;height:58px;border-radius:50%;background:var(--p-surface);display:grid;place-items:center;flex-direction:column">
+                    <div class="mono" style="font-size:16px;font-weight:600;line-height:1">8</div>
+                    <div style="font-size:8px;color:var(--p-ink3)">仓库</div></div>
+                </div>
+                <div style="font-size:10.5px;color:var(--p-ink2);margin-top:8px">状态分布</div>
+                <div style="display:flex;gap:9px;font-size:9px;color:var(--p-ink3);margin-top:4px">
+                  <span>● 同步 5</span><span style="color:var(--p-warn)">● 落后 2</span><span style="color:var(--p-accent)">● 待推 1</span>
+                </div>
+              </div>
+              <div class="pcard" style="flex:1.5;display:flex;flex-direction:column">
+                <div class="pcard-hd"><svg class="i" style="width:12px;height:12px;color:var(--p-ink2)"><use href="#i-list"/></svg><span class="pcard-t">待处理</span><span class="pcard-x">3 项</span></div>
+                <div class="filerow" style="align-items:center;gap:9px">
+                  <span class="rdot" style="background:var(--p-warn)"></span>
+                  <span class="fp" style="font-size:11.5px;color:var(--p-ink)">qingbird-git</span>
+                  <span class="fd" style="font-size:9.5px">落后 3</span>
+                  <div class="obtn" style="height:22px;padding:0 8px;font-size:10px;background:var(--p-accent);color:#fff;border-color:var(--p-accent)">拉取</div>
+                </div>
+                <div class="filerow" style="align-items:center;gap:9px">
+                  <span class="rdot" style="background:var(--p-accent)"></span>
+                  <span class="fp" style="font-size:11.5px;color:var(--p-ink)">atlas-web</span>
+                  <span class="fd" style="font-size:9.5px">待推送 5</span>
+                  <div class="obtn" style="height:22px;padding:0 8px;font-size:10px">推送</div>
+                </div>
+                <div class="filerow" style="align-items:center;gap:9px">
+                  <span class="rdot" style="background:var(--p-fork)"></span>
+                  <span class="fp" style="font-size:11.5px;color:var(--p-ink)">efo-api</span>
+                  <span class="fd" style="font-size:9.5px">已分叉</span>
+                  <div class="obtn" style="height:22px;padding:0 8px;font-size:10px">查看</div>
+                </div>
+                <div class="filerow" style="align-items:center;gap:9px">
+                  <span class="rdot" style="background:var(--p-ink3)"></span>
+                  <span class="fp" style="font-size:11.5px;color:var(--p-ink)">notes</span>
+                  <span class="fd" style="font-size:9.5px">目录失联</span>
+                  <div class="obtn" style="height:22px;padding:0 8px;font-size:10px">移除</div>
+                </div>
+              </div>
+              <div class="pcard" style="flex:1.2;display:flex;flex-direction:column">
+                <div class="pcard-hd"><svg class="i" style="width:12px;height:12px;color:var(--p-ink2)"><use href="#i-drive"/></svg><span class="pcard-t">磁盘占用</span><span class="pcard-x">全库 24.6 GB</span></div>
+                <div style="font-size:10.5px;color:var(--p-ink2);padding:2px 0">qingbird-git <b class="mono" style="float:right">1.24 GB</b></div>
+                <div class="bench" style="grid-template-columns:1fr;gap:3px;padding:2px 0 6px"><div class="bench-track" style="height:6px"><div class="bench-fill" style="width:5%;background:var(--p-ink2)"></div></div></div>
+                <div style="font-size:10.5px;color:var(--p-ink2);padding:2px 0">atlas-web <b class="mono" style="float:right">7.81 GB</b></div>
+                <div class="bench" style="grid-template-columns:1fr;gap:3px;padding:2px 0 6px"><div class="bench-track" style="height:6px"><div class="bench-fill" style="width:32%;background:var(--p-warn)"></div></div></div>
+                <div style="font-size:10.5px;color:var(--p-ink2);padding:2px 0">efo-api <b class="mono" style="float:right">4.20 GB</b></div>
+                <div class="bench" style="grid-template-columns:1fr;gap:3px;padding:2px 0 6px"><div class="bench-track" style="height:6px"><div class="bench-fill" style="width:17%;background:var(--p-ink2)"></div></div></div>
+                <div style="font-size:10.5px;color:var(--p-ink2);padding:2px 0">其余 5 个 <b class="mono" style="float:right">11.4 GB</b></div>
+                <div class="bench" style="grid-template-columns:1fr;gap:3px;padding:2px 0 6px"><div class="bench-track" style="height:6px"><div class="bench-fill" style="width:46%;background:var(--p-line)"></div></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="wstatus"><span class="ok"><svg class="i"><use href="#i-check"/></svg>全量扫描完成</span><div class="wstatus-r"><span>代理 127.0.0.1:7897</span></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="g2" style="margin-top:20px">
+    <div class="mock" style="margin:0">
+      <div class="mock-cap"><span><b>检视抽屉 · 空间页</b>　从原「容量」tab 迁到这里</span></div>
+      <div class="viewport" style="padding:14px">
+        <div class="insp" style="width:100%;height:400px;border:1px solid var(--p-line);border-radius:9px">
+          <div class="insp-hd">
+            <div class="itab"><svg class="i"><use href="#i-diff"/></svg>变更</div>
+            <div class="itab"><svg class="i"><use href="#i-history"/></svg>历史</div>
+            <div class="itab"><svg class="i"><use href="#i-clock"/></svg>定时</div>
+            <div class="itab on"><svg class="i"><use href="#i-drive"/></svg>空间</div>
+          </div>
+          <div class="insp-body">
+            <div style="display:flex;gap:13px;align-items:center;padding-bottom:11px;border-bottom:1px solid var(--p-line-soft)">
+              <div style="width:62px;height:62px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--p-ink3) 0 22%,var(--p-accent) 22% 55%,var(--p-warn) 55% 81%,var(--p-line) 81% 100%)">
+                <div style="width:46px;height:46px;border-radius:50%;background:var(--p-surface);display:grid;place-items:center;flex-direction:column">
+                  <div class="mono" style="font-size:10px;font-weight:600;line-height:1">1.24</div><div style="font-size:7px;color:var(--p-ink3)">GB</div></div>
+              </div>
+              <div style="flex:1">
+                <div class="langrow"><span class="sw" style="background:var(--p-ink3)"></span>.git<b>272 MB</b></div>
+                <div class="langrow"><span class="sw" style="background:var(--p-accent)"></span>node_modules<b>410 MB</b></div>
+                <div class="langrow"><span class="sw" style="background:var(--p-warn)"></span>target<b>322 MB</b></div>
+                <div class="langrow"><span class="sw" style="background:var(--p-line)"></span>其他<b>236 MB</b></div>
+              </div>
+            </div>
+            <div style="font-size:10.5px;color:var(--p-ink3);margin:12px 0 5px">可清理缓存 · 318 MB</div>
+            <div class="filerow"><span class="fp">node_modules</span><div class="obtn" style="height:20px;padding:0 7px;font-size:9.5px;margin-left:auto">清理</div></div>
+            <div class="filerow"><span class="fp">src-tauri/target</span><div class="obtn" style="height:20px;padding:0 7px;font-size:9.5px;margin-left:auto">清理</div></div>
+            <div style="font-size:10.5px;color:var(--p-ink3);margin:12px 0 5px">建议加入 .gitignore</div>
+            <div class="filerow"><span class="fp">src-tauri/target</span><span class="st idle" style="margin-left:auto">未忽略</span></div>
+            <div class="filerow"><span class="fp">dist</span><span class="st idle" style="margin-left:auto">未忽略</span></div>
+            <div class="obtn" style="width:100%;height:26px;justify-content:center;margin-top:9px;font-size:10.5px">全部写入 .gitignore</div>
+            <div style="font-size:10.5px;color:var(--p-ink3);margin:14px 0 5px">最大的文件</div>
+            <div class="filerow"><span class="fp">qingbird-git.exe</span><span class="fd">18.4 MB</span></div>
+            <div class="filerow"><span class="fp">icons/ico/app.ico</span><span class="fd">3.2 MB</span></div>
+            <div class="filerow"><span class="fp">fonts/SourceHanSerif.woff2</span><span class="fd">1.9 MB</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mock" style="margin:0">
+      <div class="mock-cap"><span><b>⌘K 命令面板</b>　低频功能统一入口，可模糊搜</span></div>
+      <div class="viewport" style="padding:14px;display:grid;place-items:center;min-height:428px;position:relative">
+        <div style="width:100%;max-width:430px;background:var(--p-surface);border:1px solid var(--p-line);
+                    border-radius:11px;box-shadow:0 16px 40px rgba(20,23,30,.13);overflow:hidden">
+          <div style="display:flex;align-items:center;gap:8px;padding:11px 13px;border-bottom:1px solid var(--p-line)">
+            <svg class="i" style="width:14px;height:14px;color:var(--p-ink3)"><use href="#i-search"/></svg>
+            <span style="flex:1;font-size:12.5px;color:var(--p-ink)">终端</span>
+            <span class="wbar-kbd" style="margin:0">Esc</span>
+          </div>
+          <div style="padding:6px">
+            <div style="font-size:9px;letter-spacing:.1em;color:var(--p-ink3);padding:7px 8px 4px;font-weight:600">仓库操作</div>
+            <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:var(--p-accent-wash)">
+              <svg class="i" style="width:13px;height:13px;color:var(--p-accent)"><use href="#i-terminal"/></svg>
+              <span style="flex:1;font-size:11.5px">在此文件夹打开终端</span>
+              <span class="wbar-kbd" style="margin:0">Ctrl T</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;padding:6px 8px">
+              <svg class="i" style="width:13px;height:13px;color:var(--p-ink3)"><use href="#i-terminal"/></svg>
+              <span style="flex:1;font-size:11.5px;color:var(--p-ink2)">在终端查看完整 diff</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;padding:6px 8px">
+              <svg class="i" style="width:13px;height:13px;color:var(--p-ink3)"><use href="#i-terminal"/></svg>
+              <span style="flex:1;font-size:11.5px;color:var(--p-ink2)">打开新终端标签页</span>
+            </div>
+            <div style="font-size:9px;letter-spacing:.1em;color:var(--p-ink3);padding:9px 8px 4px;font-weight:600">切换到仓库</div>
+            <div style="display:flex;align-items:center;gap:8px;padding:6px 8px">
+              <span class="rdot" style="background:var(--p-ok)"></span>
+              <span style="flex:1;font-size:11.5px;color:var(--p-ink2)">qingbird-md</span>
+              <span style="font-size:9.5px;color:var(--p-ink3)">已同步</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;padding:6px 8px">
+              <span class="rdot" style="background:var(--p-accent)"></span>
+              <span style="flex:1;font-size:11.5px;color:var(--p-ink2)">atlas-web</span>
+              <span style="font-size:9.5px;color:var(--p-ink3)">待推送 5</span>
+            </div>
+          </div>
+          <div style="border-top:1px solid var(--p-line-soft);padding:7px 13px;font-size:9.5px;color:var(--p-ink3);display:flex;gap:11px">
+            <span>↑↓ 选择</span><span>Enter 执行</span><span>切换仓库用 &gt; 前缀</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 4 交互发明 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">4</div><h2>四个关键交互</h2></div>
+  <p class="sec-sub">这四个是「图形化」真正落地的地方，也是新方案和旧方案体感差别最大的部分。</p>
+
+  <div class="g2">
+    <div class="card">
+      <h3>① 同步环 · 一个控件说完三件事</h3>
+      <div style="display:flex;gap:16px;align-items:center;padding:14px 0 12px">
+        <div style="text-align:center">
+          <div style="width:78px;height:78px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--p-warn) 0 60%,var(--p-line) 60% 100%)">
+            <div style="width:62px;height:62px;border-radius:50%;background:#fff;display:grid;place-items:center;flex-direction:column">
+              <div class="mono" style="font-size:15px;font-weight:600;line-height:1">↓3</div><div style="font-size:7.5px;color:#A1A1AA">待拉取</div></div>
+          </div>
+          <div style="font-size:10px;color:var(--muted);margin-top:7px">落后</div>
+        </div>
+        <div style="text-align:center">
+          <div style="width:78px;height:78px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--p-ok) 0 100%)">
+            <div style="width:62px;height:62px;border-radius:50%;background:#fff;display:grid;place-items:center">
+              <svg class="i" style="width:19px;height:19px;color:var(--p-ok)"><use href="#i-check"/></svg></div>
+          </div>
+          <div style="font-size:10px;color:var(--muted);margin-top:7px">已同步</div>
+        </div>
+        <div style="text-align:center">
+          <div style="width:78px;height:78px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--p-fork) 0 48%,var(--p-warn) 48% 96%,var(--p-line) 96% 100%)">
+            <div style="width:62px;height:62px;border-radius:50%;background:#fff;display:grid;place-items:center;flex-direction:column">
+              <svg class="i" style="width:15px;height:15px;color:var(--p-fork)"><use href="#i-fork"/></svg><div style="font-size:7.5px;color:#A1A1AA">分叉</div></div>
+          </div>
+          <div style="font-size:10px;color:var(--muted);margin-top:7px">需人工处理</div>
+        </div>
+      </div>
+      <p class="lead" style="font-size:13px;margin:0">环的<b>弧长 = 领先/落后的比例</b>，中心是大字数字，环色即语义色。旧的「落后云端 3 个提交」chip 变成一眼可读的形状；点环身即触发检测。同步中环变虚线缓慢旋转，进度直接画在弧上。</p>
+    </div>
+
+    <div class="card">
+      <h3>② 列表双向条 · 不用读就懂比例</h3>
+      <div style="padding:14px 0 12px;display:flex;flex-direction:column;gap:11px">
+        <div style="display:flex;align-items:center;gap:9px"><span class="rdot" style="background:var(--p-warn)"></span><span style="flex:1;font-size:12.5px">qingbird-git</span><div class="rbar" style="width:64px;height:6px"><i class="behind" style="width:60%"></i><i class="ahead" style="width:20%"></i></div></div>
+        <div style="display:flex;align-items:center;gap:9px"><span class="rdot" style="background:var(--p-accent)"></span><span style="flex:1;font-size:12.5px">atlas-web</span><div class="rbar" style="width:64px;height:6px"><i class="behind" style="width:14%"></i><i class="ahead" style="width:72%"></i></div></div>
+        <div style="display:flex;align-items:center;gap:9px"><span class="rdot" style="background:var(--p-ok)"></span><span style="flex:1;font-size:12.5px">qingbird-md</span><div class="rbar" style="width:64px;height:6px"><i class="behind" style="width:16%"></i><i class="ahead" style="width:8%"></i></div></div>
+      </div>
+      <p class="lead" style="font-size:13px;margin:0"><b style="color:var(--p-warn)">橙段 = 落后</b>，<b style="color:var(--p-accent)">青段 = 待推送</b>，其余是空槽。4px 高的条，扫一眼就知道哪个仓库积压多。<b>点条直接拉取/推送</b>，省掉「选中 → 找按钮」两步。</p>
+    </div>
+
+    <div class="card">
+      <h3>③ 命令卡片 · 状态常驻</h3>
+      <div class="pcard" style="margin:12px 0;padding:4px 0;background:var(--p-sunken)">
+        <div class="cmdrow" style="padding:7px 10px"><div class="cmd-ic" style="background:#fff"><svg class="i"><use href="#i-flask"/></svg></div>
+          <div class="cmd-row-m"><div class="cmd-t">跑测试</div><div class="cmd-s">cargo test</div></div>
+          <div class="cmd-run"><span class="st ok">通过 · 12s</span><div class="cbtn"><svg class="i"><use href="#i-play"/></svg></div></div></div>
+        <div class="cmdrow" style="padding:7px 10px"><div class="cmd-ic" style="background:#fff"><svg class="i"><use href="#i-box"/></svg></div>
+          <div class="cmd-row-m"><div class="cmd-t">构建</div><div class="cmd-s">pnpm tauri build</div></div>
+          <div class="cmd-run"><span class="st run"><span class="spin" style="display:inline-block;vertical-align:-1px;margin-right:4px"></span>2分14秒</span><div class="cbtn"><svg class="i"><use href="#i-pause"/></svg></div></div></div>
+        <div class="cmdrow" style="padding:7px 10px"><div class="cmd-ic" style="background:#fff"><svg class="i"><use href="#i-zap"/></svg></div>
+          <div class="cmd-row-m"><div class="cmd-t">开发</div><div class="cmd-s">pnpm tauri dev</div></div>
+          <div class="cmd-run"><span class="st idle">未运行</span><div class="cbtn"><svg class="i"><use href="#i-play"/></svg></div></div></div>
+      </div>
+      <p class="lead" style="font-size:13px;margin:0">旧版「跑测试 / 构建」两个按钮不告诉你上次跑成什么样。新版每条命令常驻 <b>通过 · 12s / 失败 · 退出码 101 / 运行中 2分14秒</b>，按钮图标随状态在 ▶ 和 ⏸ 之间切换。点命令名直接改命令，点图标直接跑。</p>
+    </div>
+
+    <div class="card">
+      <h3>④ 状态栏 + 日志抽屉</h3>
+      <div class="wstatus" style="border-radius:8px;border:1px solid var(--p-line);height:30px;margin:12px 0">
+        <span class="ok"><svg class="i"><use href="#i-check"/></svg>已从 GitHub 同步 3 个提交</span>
+        <span class="sep">·</span><span>20:31</span>
+        <div class="wstatus-r"><span>代理 127.0.0.1:7897</span><span class="sep">|</span><span>日志 ▴</span></div>
+      </div>
+      <p class="lead" style="font-size:13px;margin:0">日志区从「永久占据主面板下半屏」改成<b>一行状态栏 + 点击升起抽屉</b>。平时不占地，需要排查时（代理回退、命令失败）一键展开。<b>关窗最小化到托盘的场景下</b>，这行还兼作托盘之上的状态提示。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 5 视觉系统 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">5</div><h2>视觉系统</h2></div>
+  <p class="sec-sub">从现有「纸墨」国风主题切到中性灰白：宣纸底、纸纹噪点、思源宋体、朱砂印章全部退场，换成中性灰阶 + 单一强调色。品牌改由几何 logo 承载，稿中暂用推荐方案 A（环中枝）。</p>
+
+  <div class="card">
+    <h3>中性灰阶（10 级）</h3>
+    <div class="sw-row">
+      <div class="sw"><div class="sw-b" style="background:#FAFAFA"></div><div class="sw-n">#FAFAFA</div><div class="sw-r">画布</div></div>
+      <div class="sw"><div class="sw-b" style="background:#FFFFFF"></div><div class="sw-n">#FFFFFF</div><div class="sw-r">卡片</div></div>
+      <div class="sw"><div class="sw-b" style="background:#F4F4F5"></div><div class="sw-n">#F4F4F5</div><div class="sw-r">次级面</div></div>
+      <div class="sw"><div class="sw-b" style="background:#EFEFF1"></div><div class="sw-n">#EFEFF1</div><div class="sw-r">分隔</div></div>
+      <div class="sw"><div class="sw-b" style="background:#E4E4E7"></div><div class="sw-n">#E4E4E7</div><div class="sw-r">描边</div></div>
+      <div class="sw"><div class="sw-b" style="background:#A1A1AA"></div><div class="sw-n">#A1A1AA</div><div class="sw-r">弱文字</div></div>
+      <div class="sw"><div class="sw-b" style="background:#71717A"></div><div class="sw-n">#71717A</div><div class="sw-r">中文字</div></div>
+      <div class="sw"><div class="sw-b" style="background:#52525B"></div><div class="sw-n">#52525B</div><div class="sw-r">正文</div></div>
+      <div class="sw"><div class="sw-b" style="background:#27272A"></div><div class="sw-n">#27272A</div><div class="sw-r">强文字</div></div>
+      <div class="sw"><div class="sw-b" style="background:#18181B"></div><div class="sw-n">#18181B</div><div class="sw-r">主按钮</div></div>
+    </div>
+  </div>
+
+  <div class="g2" style="margin-top:18px">
+    <div class="card">
+      <h3>语义色（唯一的彩色层）</h3>
+      <div class="sem"><span class="sem-d" style="background:#0D9488"></span><span class="sem-n">青 accent</span><span class="sem-ds">#0D9488</span><span class="sem-u">推荐动作（拉取）、待推送、聚焦环</span></div>
+      <div class="sem"><span class="sem-d" style="background:#059669"></span><span class="sem-n">绿 ok</span><span class="sem-ds">#059669</span><span class="sem-u">已同步、命令通过、列表状态点</span></div>
+      <div class="sem"><span class="sem-d" style="background:#D97706"></span><span class="sem-n">琥珀 warn</span><span class="sem-ds">#D97706</span><span class="sem-u">落后云端、有未提交、代理回退</span></div>
+      <div class="sem"><span class="sem-d" style="background:#DC2626"></span><span class="sem-n">朱砂 danger</span><span class="sem-ds">#DC2626</span><span class="sem-u">操作失败、仓库目录失联</span></div>
+      <div class="sem"><span class="sem-d" style="background:#7C3AED"></span><span class="sem-n">紫 fork</span><span class="sem-ds">#7C3AED</span><span class="sem-u">本地与云端已分叉（唯一「危险但非错误」态）</span></div>
+      <p class="note" style="margin-top:14px">5 个语义色覆盖全部 git 状态，<b>不允许出现第 6 个</b>。图形化统计（语言构成、大文件 Top10）沿用 GitHub Linguist 原配色，因为它已经在用、用户认得。</p>
+    </div>
+    <div class="card">
+      <h3>排版与动效</h3>
+      <div class="mini-stat" style="font-size:13px;padding:5px 0"><span>仓库名 / 页面标题</span><b>19px · 600 · −0.015em</b></div>
+      <div class="mini-stat" style="font-size:13px;padding:5px 0"><span>卡片标题</span><b>11.5px · 600</b></div>
+      <div class="mini-stat" style="font-size:13px;padding:5px 0"><span>正文 / 列表项</span><b>12px · 400</b></div>
+      <div class="mini-stat" style="font-size:13px;padding:5px 0"><span>辅助说明</span><b>11px · 400 · #A1A1AA</b></div>
+      <div class="mini-stat" style="font-size:13px;padding:5px 0"><span>数字 / 哈希 / 耗时</span><b>等宽 · 500</b></div>
+      <div style="height:1px;background:var(--line-soft);margin:12px 0"></div>
+      <div class="mini-stat" style="font-size:13px;padding:5px 0"><span>圆角</span><b>6 / 8 / 11 px 三档</b></div>
+      <div class="mini-stat" style="font-size:13px;padding:5px 0"><span>抽屉滑出</span><b>240ms · cubic-bezier(.22,1,.36,1)</b></div>
+      <div class="mini-stat" style="font-size:13px;padding:5px 0"><span>环同步动画</span><b>虚线旋转 · 1.2s 线性循环</b></div>
+      <div class="mini-stat" style="font-size:13px;padding:5px 0"><span>过渡原则</span><b>只动 opacity / transform</b></div>
+      <p class="note" style="margin-top:12px">阴影只给浮层（抽屉、⌘K、模态），贴面元素用发丝线分区，不投影——沿用现有 <code>--shadow</code> 那一套的克制程度。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 6 迁移表 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">6</div><h2>功能迁移表</h2></div>
+  <p class="sec-sub">全部现有功能逐个落位，<b>没有功能被删掉</b>，只是换了入口。</p>
+  <div class="card" style="padding:22px 14px">
+    <table>
+      <thead><tr><th style="width:23%">现有入口</th><th style="width:38%">新入口</th><th>变化</th></tr></thead>
+      <tbody>
+        <tr><td>头部 · 检测云端更新</td><td>工作区 · 同步环下方描边按钮 <code>检测</code></td><td>降权为只读动作</td></tr>
+        <tr><td>头部 · 一键拉取</td><td>工作区 · <b>青色实心</b>「拉取」；列表项双向条也可点</td><td>升为推荐动作</td></tr>
+        <tr><td>头部 · 一键推送</td><td>工作区 · 深色实心「推送」</td><td>位置不变，权重区分</td></tr>
+        <tr><td>头部 · 跑测试 / 构建</td><td>工作区 · <b>命令卡片行</b>，带上次结果与耗时</td><td>从按钮变列表行，多开发/安装依赖</td></tr>
+        <tr><td>头部 · 自定义按钮（≤3）</td><td>命令卡片末尾 ·「自定义命令」配置入口</td><td>不再挤占主操作区</td></tr>
+        <tr><td>头部 · 待提交变更浮层</td><td>检视抽屉 · <b>变更</b>页（默认页）</td><td>浮层 → 常驻页</td></tr>
+        <tr><td>头部 · 本次同步内容浮层</td><td>检视抽屉 · 同步后自动切到「历史」并高亮新提交</td><td>浮层 → 结果页</td></tr>
+        <tr><td>头部 · 提交历史按钮</td><td>检视抽屉 · <b>历史</b>页；⌘K 也可直达</td><td>模态 → 页签</td></tr>
+        <tr><td>头部 · 定时自动同步浮层</td><td>检视抽屉 · <b>定时</b>页；状态栏常显当前档位</td><td>浮层 → 页签</td></tr>
+        <tr><td>头部 · 运行命令浮层</td><td>工作区 · 命令卡片行（点标题编辑）</td><td>浮层 → 行内</td></tr>
+        <tr><td>头部 · 打开文件夹 / 终端 / README</td><td>⌘K 命令面板</td><td>三个低频图标退出主面板</td></tr>
+        <tr><td>侧栏 · 容量 tab</td><td>检视抽屉 · <b>空间</b>页</td><td>从全局列表迁到单仓库视图</td></tr>
+        <tr><td>侧栏 · 徽标（顶/⟳/失联/●/↓↑）</td><td>状态点 + 副标题文字 + 双向条</td><td>徽标 → 有语义的图形</td></tr>
+        <tr><td>侧栏 · 置顶 / 重命名 / 移除</td><td>悬停 ⋯ 菜单 + 双击改名（行为不变）</td><td>3 个常显图标 → 1 个菜单</td></tr>
+        <tr><td>侧栏 · 搜索框</td><td>保留 + 新增<b>状态筛选芯片</b></td><td>增加筛选维度</td></tr>
+        <tr><td>标题栏 · 主题 / 设置</td><td>标题栏保留（仅 2 个图标）</td><td>全局动作留在全局</td></tr>
+        <tr><td>页脚 · 语言统计条</td><td>工作区 · <b>统计卡</b>（堆叠条 + Top 明细）</td><td>从通铺收进卡片</td></tr>
+        <tr><td>主面板 · 日志区</td><td>底部<b>状态栏 + 日志抽屉</b></td><td>常驻半屏 → 按需升起</td></tr>
+        <tr><td>主面板 · 进度条（BusyPop）</td><td>同步环进度 + 状态栏 + 日志行</td><td>浮层 → 就地反馈</td></tr>
+        <tr><td>主面板 · stash 确认条</td><td>状态栏内联确认（「有未提交改动，是否暂存后拉取？」）</td><td>独立条 → 内联</td></tr>
+        <tr><td>主面板 · 分叉恢复卡片</td><td>检视抽屉顶部<b>常驻紫条</b>（有分叉才出现）</td><td>卡片 → 状态条</td></tr>
+        <tr><td>代理回退 toast</td><td>状态栏常显代理地址 + toast 提示一次</td><td>提示不消失</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============ 7 备选 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">7</div><h2>备选方案 B · 极简双栏</h2></div>
+  <p class="sec-sub">如果觉得主推方案改动太大，这是保守版：不做仪表盘、不做统计卡，只把按钮重新分层。</p>
+  <div class="g2">
+    <div class="card">
+      <h3>B 方案长什么样</h3>
+      <p class="lead" style="font-size:13.5px">仓库栏（保留，但拆出状态筛选）+ 主面板（同步环 + 三键 + 折叠的「更多」行）。历史 / 变更 / 空间 / 定时收进一个抽屉，命令变成两行紧凑列表。保留现有页脚语言条。</p>
+      <div style="margin-top:14px;padding:13px;background:var(--p-sunken);border-radius:9px">
+        <div style="display:flex;align-items:center;gap:10px;padding-bottom:10px;border-bottom:1px solid #E4E4E7">
+          <div style="width:56px;height:56px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--p-warn) 0 60%,#E4E4E7 60% 100%)">
+            <div style="width:44px;height:44px;border-radius:50%;background:#fff;display:grid;place-items:center" class="mono"><b style="font-size:13px">↓3</b></div></div>
+          <div style="flex:1">
+            <div style="display:flex;gap:6px">
+              <span style="height:27px;padding:0 12px;border-radius:7px;background:#0D9488;color:#fff;display:grid;place-items:center;font-size:11.5px">拉取</span>
+              <span style="height:27px;padding:0 12px;border-radius:7px;background:#18181B;color:#fff;display:grid;place-items:center;font-size:11.5px">推送</span>
+              <span style="height:27px;padding:0 10px;border-radius:7px;border:1px solid #E4E4E7;background:#fff;display:grid;place-items:center;font-size:11.5px">检测</span>
+            </div>
+            <div style="font-size:10.5px;color:#A1A1AA;margin-top:7px">▸ 跑测试 · 构建 · 更多（6 项）</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>什么时候选 B</h3>
+      <p class="lead" style="font-size:13.5px">
+        · 只想解决「按钮太多」，不想要新图表和总览页<br>
+        · 想<b>先小步验证</b>用户是否接受新的信息分层，再决定要不要做统计<br>
+        · 需要在两周内看到成品
+      </p>
+      <p class="note" style="margin-top:12px">B 约为主推方案的 <b>1/3 工作量</b>，只动前端，不新增 Rust command。主推方案里唯一必须动后端的是「近 14 天提交」柱状图。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 8 路线图 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">8</div><h2>实施路线</h2></div>
+  <p class="sec-sub">按「每阶段独立可用」切分，任何时候停下来界面都是完整的。</p>
+  <div class="card">
+    <ol class="tl">
+      <li>
+        <div class="tl-h">阶段 1 · 换色板与骨架<span>纯前端</span></div>
+        <p class="tl-b"><span class="tl-tag fe">前端</span>重写 <code>theme.css</code> 为灰白 10 级灰阶 + 5 语义色；<code>App.css</code> 引入顺序调整；<code>styles/*.css</code> 全部改用新令牌。组件结构不动，保证这一阶段结束时界面已经好看。</p>
+      </li>
+      <li>
+        <div class="tl-h">阶段 2 · 动作分流<span>纯前端</span></div>
+        <p class="tl-b"><span class="tl-tag fe">前端</span>新增 <code>Inspector</code> 抽屉组件（变更 / 历史 / 定时 / 空间 四页签）；头部 8 个 icon-btn 收成 1 个「检视」+ ⌘K；操作区 pill 改命令行；日志区改状态栏 + 抽屉；页脚语言条收进统计卡。<b>这一步解决 80% 的拥挤问题</b>。</p>
+      </li>
+      <li>
+        <div class="tl-h">阶段 3 · 图形化控件<span>前端 + 1 个新 command</span></div>
+        <p class="tl-b"><span class="tl-tag fe">前端</span><span class="tl-tag rs">Rust</span>新增 <code>src/lib/syncRing.ts</code>（环的分段/配色/三态映射，配 <code>.test.mjs</code>）；列表项重设计 + 状态筛选芯片 + 双向条；新增 <code>commit_activity</code> command 供柱状图。同步中进度直接画在环上。</p>
+      </li>
+      <li>
+        <div class="tl-h">阶段 4 · 总览与批量<span>前端</span></div>
+        <p class="tl-b"><span class="tl-tag fe">前端</span>导航轨 + 总览 Dashboard（状态分布环 / 待处理列表 / 全库磁盘条）；「待处理」支持一键逐个执行（串行，遵守现有 <code>OP_LOCK</code> 互斥）；⌌K 完整命令面板；快捷键（<code>1/2/3</code> 三键、<code>↑↓</code> 切仓库、<code>Ctrl K</code> 面板、<code>Ctrl T</code> 终端）。</p>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ 9 拍板 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">9</div><h2>需要你拍板三件事</h2></div>
+  <p class="sec-sub">这三个决定会影响整体观感，越早定越好。</p>
+
+  <div class="ask">
+    <div class="ask-n">1</div>
+    <h3>放弃「纸墨」国风主题，彻底转灰白？</h3>
+    <p>现在的 <code>theme.css</code> 是宣纸底 + 思源宋体 + 纸纹噪点的「纸墨」语言，与你要求的现代极简灰白是两套设计体系。我的建议是<b>彻底切换</b>——两套风格混用（比如灰白底 + 宋体标题）会显得不伦不类。只保留朱砂印章作为 logo。</p>
+    <span class="rec">建议：彻底切换，保留印章 logo</span>
+  </div>
+
+  <div class="ask">
+    <div class="ask-n">2</div>
+    <h3>走主推方案 Command Deck，还是备选 B？</h3>
+    <p>主推 = 四区结构 + 同步环 + 统计卡 + 总览页 + 检视抽屉 + ⌘K，4 个阶段。B = 只做动作分流 + 颜色体系，1/3 工作量。我建议主推，但<b>可以按阶段 1 + 2 先交付</b>看看手感，再决定要不要做阶段 3、4。</p>
+    <span class="rec">建议：主推方案，但先只做阶段 1–2</span>
+  </div>
+
+  <div class="ask">
+    <div class="ask-n">3</div>
+    <h3>命令卡片要不要显示「上次运行结果 + 耗时」？</h3>
+    <p>这是新增能力（现在只写进日志区，不做结构化留存）。好处是一眼看出「测试上次就挂了」，坏处是要在 Rust 侧存一份每个仓库的命令运行记录（写进 config.json）。不做也不影响主结构，只是行内少一个状态标签。</p>
+    <span class="rec">建议：做。落盘一份轻量记录即可，成本很低</span>
+  </div>
+</section>
+
+<div class="foot">
+  青鸟 Git · 界面重设计提案 · 2026-09-27　｜　本稿为静态高保真示意，数据为演示用；确定方向后再落到 <code>src/</code> 与 <code>src-tauri/</code>。
+</div>
+
+</div>
+
+<script>
+// 同步环三态切换
+(function(){
+  const box = document.getElementById('ringBox');
+  if(!box) return;
+  const STATES = {
+    behind:{ pct:60, color:'var(--p-warn)', val:'↓3', label:'待拉取',
+      title:'云端有 3 个新提交',
+      desc:'上次同步 <span class="hl">2 小时前</span>。拉取使用 <code class="mono" style="font-size:10.5px">--ff-only</code>，遇到分叉只会停下报错，不会自动合并。',
+      pull:'拉取', push:'推送', check:'检测' },
+    clean:{ pct:100, color:'var(--p-ok)', val:'✓', label:'已同步',
+      title:'本地与云端一致',
+      desc:'最近一次同步在 <span class="hl">2 小时前</span>完成。检测更新不会改变仓库状态，可以放心随时点。',
+      pull:'拉取', push:'推送', check:'检测' },
+    fork:{ pct:48, color:'var(--p-fork)', val:'⑂', label:'已分叉',
+      title:'本地与云端已分叉',
+      desc:'本地和云端各有对方没有的提交。默认<b>不会</b>自动合并，需要你在检视抽屉里显式选择「备份并变基到云端」。',
+      pull:'拉取', push:'推送', check:'查看分叉' }
+  };
+  let cur='behind';
+  const C=2*Math.PI*46;
+  function draw(){
+    const s=STATES[cur];
+    const off = C*(1-s.pct/100);
+    const val = s.val==='✓'
+      ? '<svg class="i" style="width:20px;height:20px;color:var(--p-ok)"><use href="#i-check"/></svg>'
+      : (s.val==='⑂'
+        ? '<svg class="i" style="width:17px;height:17px;color:var(--p-fork)"><use href="#i-fork"/></svg>'
+        : '<div class="ring-v" style="color:'+s.color+'">'+s.val+'</div>');
+    box.innerHTML =
+      '<svg width="104" height="104" viewBox="0 0 104 104">'+
+      '<circle cx="52" cy="52" r="46" fill="none" stroke="#EFEFF1" stroke-width="7"/>'+
+      '<circle cx="52" cy="52" r="46" fill="none" stroke="'+s.color+'" stroke-width="7" '+
+      'stroke-linecap="round" stroke-dasharray="'+C+'" stroke-dashoffset="'+off+'"/></svg>'+
+      '<div class="ring-c"><div>'+val+'</div><div class="ring-l">'+s.label+'</div></div>';
+    document.getElementById('syncTitle').innerHTML=s.title;
+    document.getElementById('syncDesc').innerHTML=s.desc;
+    document.getElementById('btnPull').lastChild.textContent=s.pull;
+    document.getElementById('btnPush').lastChild.textContent=s.push;
+    document.getElementById('btnCheck').lastChild.textContent=s.check;
+  }
+  const order=['behind','clean','fork'];
+  box.style.cursor='pointer';
+  box.addEventListener('click',function(){ cur=order[(order.indexOf(cur)+1)%3]; draw(); });
+  draw();
+})();
+</script>
+</body>
+</html>
