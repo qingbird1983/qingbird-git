@@ -1,12 +1,13 @@
 /* ============================================================
-   青鸟 Git · 组件样式 —— 消费 theme.css 的「纸墨」令牌
-   布局原则（同 qingbird-md）：贴面元素靠发丝线分区、靠底色深浅分层，
+   青鸟 Git · 组件样式 —— 消费 theme.css 的中性灰白令牌
+   布局原则：贴面元素靠发丝线分区、靠底色深浅分层，
    永远不用阴影和粗边框制造区块感；阴影只给浮层（弹窗/浮卡/菜单）。
    动效统一 var(--ease)，只动 opacity/transform。
    ============================================================ */
 
 /* 样式按功能域拆分到 styles/；@import 必须排在所有规则之前，
-   导入顺序即级联顺序，与拆分前的单文件顺序完全一致。 */
+   导入顺序即级联顺序。inspector.css 放在最后：它定义的是
+   工作区的新结构（同步卡/命令卡/检视抽屉/状态栏），要能覆盖 panel.css。 */
 @import "./styles/base.css";
 @import "./styles/titlebar.css";
 @import "./styles/sidebar.css";
@@ -15,3 +16,4 @@
 @import "./styles/commit.css";
 @import "./styles/controls.css";
 @import "./styles/features.css";
+@import "./styles/inspector.css";

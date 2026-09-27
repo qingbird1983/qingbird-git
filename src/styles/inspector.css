@@ -1,0 +1,532 @@
+/* ============================================================
+   工作区四件套：同步卡 / 命令卡 / 统计卡 / 检视抽屉 + 状态栏
+   动作分三层在这里落地：执行（同步卡）· 命令（命令卡）· 查看（检视抽屉）。
+   ============================================================ */
+
+/* ---------- 主区横向布局：工作区 + 统计卡 + 检视抽屉 ---------- */
+.work-row {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.work-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  min-width: 0;
+}
+
+/* ---------- 同步卡：执行层的唯一中枢 ---------- */
+.sync-card {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+}
+
+/* 同步环 */
+.ring {
+  position: relative;
+  flex: none;
+}
+.ring svg {
+  display: block;
+}
+.ring-c {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  color: var(--fg3);
+}
+.ring-v {
+  font-family: var(--font-mono);
+  font-size: 21px;
+  font-weight: 600;
+  line-height: 1;
+}
+.ring-l {
+  font-size: 9.5px;
+  color: var(--fg3);
+  margin-top: 4px;
+  letter-spacing: 0.03em;
+}
+
+.sync-text {
+  flex: 1;
+  min-width: 0;
+}
+.sync-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: 4px;
+}
+.sync-desc {
+  font-size: 12px;
+  color: var(--fg2);
+  line-height: 1.55;
+}
+
+.sync-btns {
+  display: flex;
+  gap: 7px;
+  flex: none;
+}
+.sbtn {
+  height: 31px;
+  padding: 0 13px;
+  border-radius: var(--r-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
+}
+.sbtn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg3);
+}
+/* 拉取是「应用推荐你做」的动作，给主色；推送是需要你主动决定，用中性深色 */
+.sbtn.acc {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.sbtn.acc:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+/* 检测不改变仓库状态，退为描边 */
+.sbtn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--fg2);
+}
+.sbtn.ghost:hover:not(:disabled) {
+  background: var(--bg3);
+  color: var(--fg);
+}
+.sbtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ---------- 命令卡：四条常用命令 + 钉住的自定义命令 ---------- */
+.cmd-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px 14px;
+}
+.cmd-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 9px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.cmd-head .btn-sm {
+  margin-left: auto;
+}
+
+.cmd-list {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+.cmd-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.cmd-row:last-child {
+  border-bottom: none;
+}
+.cmd-ic {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--bg3);
+  display: grid;
+  place-items: center;
+  color: var(--fg2);
+  flex: none;
+}
+.cmd-name {
+  flex: none;
+  min-width: 66px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.cmd-name:hover:not(.plain) {
+  color: var(--accent);
+}
+.cmd-name.plain {
+  cursor: default;
+}
+.cmd-text {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--fg3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmd-run {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  display: grid;
+  place-items: center;
+  color: var(--fg2);
+  cursor: pointer;
+  transition: color 0.14s, border-color 0.14s;
+}
+.cmd-run:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent-ring);
+}
+.cmd-run:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ---------- 统计卡：语言构成（原来的通铺页脚收在这里）---------- */
+.stats-card {
+  flex: none;
+  width: 176px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  margin: 12px 0;
+}
+.stats-head {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.stats-bar {
+  height: 7px;
+  border-radius: 4px;
+  display: flex;
+  overflow: hidden;
+  gap: 1.5px;
+}
+.stats-seg {
+  height: 100%;
+}
+.stats-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.stats-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--fg2);
+}
+.stats-item b {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.stats-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  flex: none;
+}
+
+/* ---------- 检视抽屉：变更 / 历史 / 定时 / 空间 ---------- */
+.inspector {
+  flex: none;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+}
+.insp-tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.insp-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  padding: 4.5px 9px;
+  border-radius: var(--r-sm);
+  background: none;
+  border: none;
+  color: var(--fg2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.insp-tab.on {
+  background: var(--bg3);
+  color: var(--fg);
+  font-weight: 500;
+}
+.insp-tab:hover:not(.on) {
+  color: var(--fg);
+}
+.insp-tab.has-on:not(.on) {
+  color: var(--accent);
+}
+.insp-badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  background: var(--fg);
+  color: var(--bg2);
+  border-radius: var(--r-pill);
+  padding: 0 4px;
+  line-height: 13px;
+}
+.insp-close {
+  margin-left: auto;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: none;
+  background: none;
+  color: var(--fg3);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+.insp-close:hover {
+  background: var(--bg3);
+  color: var(--fg);
+}
+
+.insp-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 10px 12px;
+}
+.insp-empty {
+  padding: 26px 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--fg3);
+}
+.insp-input {
+  width: 100%;
+  margin-top: 10px;
+}
+.insp-submit {
+  width: 100%;
+  margin-top: 7px;
+  justify-content: center;
+}
+.insp-more {
+  width: 100%;
+  margin-top: 10px;
+  justify-content: center;
+}
+
+/* 历史页的提交行 */
+.insp-sync-block {
+  padding: 9px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--accent-ring);
+  border-radius: var(--r-md);
+  background: var(--accent-weak);
+}
+.insp-block-hd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.insp-block-n {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--fg2);
+}
+.insp-block-hint {
+  margin-top: 7px;
+  font-size: 10.5px;
+  color: var(--fg3);
+}
+.insp-commit {
+  display: flex;
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line-soft);
+  align-items: flex-start;
+}
+.insp-hash {
+  font-size: 9.5px;
+  color: var(--fg3);
+  flex: none;
+  padding-top: 1px;
+}
+.insp-sum {
+  font-size: 11.5px;
+  color: var(--fg);
+  line-height: 1.35;
+}
+.insp-meta {
+  font-size: 9.5px;
+  color: var(--fg3);
+  margin-top: 2px;
+}
+
+/* ---------- 头部工具：检视开关 + 更多菜单 ---------- */
+.head-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+}
+.more-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 5px;
+  min-width: 156px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow);
+  z-index: 60;
+}
+.more-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--fg2);
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+.more-menu button:hover {
+  background: var(--bg3);
+  color: var(--fg);
+}
+
+/* ---------- 底部状态栏：平时一行，需要排查时点日志升起 ---------- */
+.status-bar {
+  flex: none;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg2);
+  font-size: 11px;
+  color: var(--fg2);
+}
+.sb-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg3);
+  flex: none;
+  transition: background 0.2s;
+}
+.sb-dot.on {
+  background: var(--accent);
+  animation: sb-pulse 1.2s var(--ease) infinite;
+}
+@keyframes sb-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+.sb-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sb-proxy {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg3);
+  white-space: nowrap;
+}
+.sb-log {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  color: var(--fg2);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.sb-log:hover {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}

@@ -3,7 +3,6 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import TitleBar from "./components/TitleBar";
 import RepoList from "./components/RepoList";
 import RepoPanel from "./components/RepoPanel";
-import LangFooter from "./components/LangFooter";
 import SettingsModal from "./components/SettingsModal";
 import CloneModal from "./components/CloneModal";
 import NewRepoModal from "./components/NewRepoModal";
@@ -123,8 +122,6 @@ function App() {
         )}
         <RepoPanel />
       </div>
-      {/* 语言统计页脚：全窗通铺（仓库栏下方 → 右缘），底色与仓库栏一致 */}
-      <LangFooter />
       {showSettings && <SettingsModal onClose={useApp.getState().closeSettings} />}
       {showClone && <CloneModal onClose={() => setShowClone(false)} />}
       {showNew && <NewRepoModal onClose={() => setShowNew(false)} />}

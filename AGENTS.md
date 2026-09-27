@@ -74,10 +74,18 @@ Rust 快速检查：`cd src-tauri && cargo check`
   `src/repoCmds.ts` 一键运行命令的保存/预填纯逻辑（配 `pnpm test:web` 回归测试）
   - 这类模块里**不要**写返回 `?? []` 的帮手函数：每次渲染新建数组，拿它当 `useEffect` 依赖会让 effect 每轮重跑。
     需要默认值时由调用方声明模块级的空数组常量（见 `RepoPanel` 的 `EMPTY_PINNED`）
-- 前端 UI：`src/components/`（`RepoList` 列表 + `RepoItem` 单条目、`RepoPanel` 主面板骨架 +
-  `panel/` 下的浮层组件（含 `ForkCard` 分叉恢复卡片）、`CmdPanel`/`SpacePanel`/各对话框）
+- 前端 UI：`src/components/`（`RepoList` 仓库列表 + `RepoItem` 单条目、`RepoPanel` 主工作区、
+  `Inspector` 右侧检视抽屉（变更/历史/定时/空间四页签）、`panel/` 下的浮层与展示组件
+  （`SyncRing` 同步环、`ForkCard` 分叉恢复卡片、`BusyPop`/`StashBar`/`LogArea`）、
+  `CmdPanel`/`SpacePanel`/`HistoryModal`/各对话框）
+- 动作分三层（重构后的核心约定，改动界面时别破坏这个分层）：
+  **执行层**只有 `RepoPanel` 的同步卡（同步环 + 拉取/推送/检测三键）；
+  **命令层**是命令卡列表行（测试/构建/开发/安装依赖 + 钉住的自定义命令）；
+  **查看层**全部收进 `Inspector` 抽屉与日志抽屉，不再在主面板平铺图标按钮。
+  新增功能先想清楚它属于哪一层，再决定放哪——别再往头部加图标按钮
 - 样式：`src/App.css` 只留文件头与 `@import`，实体在 `src/styles/*.css`；
   **`@import` 顺序即级联顺序**，新增样式文件要插在正确位置
+  （`inspector.css` 放最后：工作区新结构要能覆盖 `panel.css`）
 - 图标：`scripts/gen-icons.mjs` 程序化生成（PNG/ICO），改图标后运行 `node scripts/gen-icons.mjs`
 
 ## 工作规则

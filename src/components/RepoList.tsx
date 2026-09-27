@@ -1,13 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, type SpaceReport } from "../api";
+import { api } from "../api";
 import { useApp } from "../store";
-import { fmtSize } from "./SpacePanel";
-import SpacePanel from "./SpacePanel";
 import RepoItem from "./RepoItem";
-import {
-  IconFilePlus, IconDownload, IconPlus, IconX, IconSync, IconSearch,
-} from "./icons";
+import { IconFilePlus, IconDownload, IconPlus, IconX, IconSync, IconSearch } from "./icons";
 
 export default function RepoList({
   onOpenClone,
@@ -18,20 +14,15 @@ export default function RepoList({
   onOpenNew: () => void;
   onNeedInit: (path: string) => void;
 }) {
-  const { repos, selected, status, select, addRepoByPath, removeRepo, renameRepo, busy, scanAll, openRepoWebsite, pinRepo } =
-    useApp();
+  const {
+    repos, selected, status, select, addRepoByPath, removeRepo, renameRepo,
+    busy, scanAll, openRepoWebsite, pinRepo,
+  } = useApp();
   const dragging = useApp((s) => s.dragging);
   const [editing, setEditing] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   // 搜索筛选：匹配仓库名或自定义别名（不区分大小写），只影响显示不影响数据
   const [query, setQuery] = useState("");
-  // 头部双胶囊切换：仓库列表 / 所选仓库的容量面板
-  const [tab, setTab] = useState<"repos" | "space">("repos");
-  // 容量扫描：胶囊上常显所选仓库的总占用；按路径缓存，切换仓库时后台重扫保持新鲜
-  const sizeCache = useRef(new Map<string, number>());
-  const [spaceReport, setSpaceReport] = useState<SpaceReport | null>(null);
-  const [spaceError, setSpaceError] = useState("");
-  const [spaceLoading, setSpaceLoading] = useState(false);
   const q = query.trim().toLowerCase();
   const visible = q
     ? repos.filter(
@@ -72,60 +63,17 @@ export default function RepoList({
     setEditing(null);
   };
 
-  const scanSpace = useCallback(async (path: string) => {
-    setSpaceLoading(true);
-    setSpaceError("");
-    try {
-      const rep = await api.scanRepoSpace(path);
-      sizeCache.current.set(path, rep.total);
-      setSpaceReport(rep);
-    } catch (e) {
-      setSpaceError(String(e));
-    } finally {
-      setSpaceLoading(false);
-    }
-  }, []);
-
+  // 切换仓库时退出重命名/编辑态，避免输入框挂着上一条仓库的名字
   useEffect(() => {
-    setSpaceReport(null);
-    setSpaceError("");
-    if (selected) void scanSpace(selected);
-  }, [selected, scanSpace]);
-
-  const cachedTotal = selected ? sizeCache.current.get(selected) : undefined;
-  const capText = selected
-    ? spaceReport
-      ? fmtSize(spaceReport.total)
-      : cachedTotal != null
-        ? fmtSize(cachedTotal)
-        : "…"
-    : "";
+    setEditing(null);
+  }, [selected]);
 
   return (
     <>
       <div className="sidebar-header">
-        <div className="segmented sidebar-tabs" role="tablist">
-          <button
-            className={`segment seg-repos ${tab === "repos" ? "segment-active" : ""}`}
-            role="tab"
-            aria-selected={tab === "repos"}
-            title="仓库列表"
-            onClick={() => setTab("repos")}
-          >
-            仓库
-            <span className="seg-num">{repos.length}</span>
-          </button>
-          <button
-            className={`segment seg-space ${tab === "space" ? "segment-active" : ""}`}
-            role="tab"
-            aria-selected={tab === "space"}
-            disabled={!selected}
-            title={selected ? "所选仓库的磁盘占用与缓存清理" : "先选择一个仓库"}
-            onClick={() => setTab("space")}
-          >
-            容量
-            <span className="seg-num">{capText}</span>
-          </button>
+        <div className="sidebar-title-row">
+          <span className="sidebar-title">仓库</span>
+          <span className="sidebar-count">{repos.length}</span>
         </div>
         <div className="header-actions">
           <button
@@ -153,9 +101,7 @@ export default function RepoList({
         </div>
       </div>
 
-      {tab === "repos" && (
-        <>
-          <div className="repo-search">
+      <div className="repo-search">
         <IconSearch size={13} className="repo-search-icon" />
         <input
           className="repo-search-input"
@@ -186,7 +132,7 @@ export default function RepoList({
         {repos.length > 0 && visible.length === 0 && (
           <div className="empty-tip">没有匹配「{query.trim()}」的仓库</div>
         )}
-{visible.map((r) => (
+        {visible.map((r) => (
           <RepoItem
             key={r.path}
             repo={r}
@@ -205,26 +151,6 @@ export default function RepoList({
           />
         ))}
       </div>
-        </>
-      )}
-
-      {tab === "space" && (
-        selected ? (
-          <SpacePanel
-            selected={selected}
-            report={spaceReport}
-            error={spaceError}
-            loading={spaceLoading}
-            onRescan={() => selected && void scanSpace(selected)}
-          />
-        ) : (
-          <div className="empty-tip">
-            先选择一个仓库
-            <br />
-            即可查看它的磁盘占用与可清理缓存
-          </div>
-        )
-      )}
 
       {dragging && (
         <div className="drop-overlay">

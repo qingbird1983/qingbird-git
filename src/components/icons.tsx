@@ -295,3 +295,26 @@ export const IconTrash = (p: { size?: number; className?: string }) => (
     <path d="M10 11v6M14 11v6" />
   </Icon>
 );
+
+/** 右侧检视面板（检视抽屉的开关） */
+export const IconPanelRight = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <rect x="3" y="3" width="18" height="18" rx="2.5" />
+    <path d="M14 3v18" />
+  </Icon>
+);
+
+/** 统计（语言构成 / 提交活跃度） */
+export const IconChart = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <path d="M3 3v16.5A1.5 1.5 0 0 0 4.5 21H21" />
+    <path d="M7.5 15.5v-3M12 15.5v-7M16.5 15.5v-5" />
+  </Icon>
+);
+
+/** 上/下箭头（日志抽屉收展） */
+export const IconChevronDown = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <path d="M6 9.5l6 6 6-6" />
+  </Icon>
+);
