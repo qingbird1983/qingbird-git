@@ -156,7 +156,7 @@ export const useApp = create<AppState>((set, get) => ({
   changes: {},
   forks: {},
   backups: {},
-  theme: "dark",
+  theme: "light",
   dragging: false,
   sidebarOpen: true,
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),

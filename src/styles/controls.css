@@ -71,7 +71,7 @@
   box-shadow: var(--shadow-strong);
   animation: modal-in 0.18s var(--ease);
   /* 弹出面板整体走衬线品牌层；代码/路径类局部仍由 --font-mono 覆盖 */
-  font-family: var(--font-serif);
+  font-family: var(--font-ui);
 }
 
 @keyframes modal-in {
@@ -86,7 +86,7 @@
 }
 
 .modal h3 {
-  font-family: var(--font-serif);
+  font-family: var(--font-ui);
   margin-bottom: 6px;
   font-size: 16px;
   font-weight: 700;

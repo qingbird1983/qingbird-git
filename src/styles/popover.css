@@ -39,7 +39,7 @@
   z-index: 40;
   animation: rise 0.18s var(--ease);
   text-align: left;
-  font-family: var(--font-serif);
+  font-family: var(--font-ui);
 }
 
 .popover-close {
