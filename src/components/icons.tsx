@@ -37,7 +37,7 @@ export const IconChevronLeft = (p: { size?: number; className?: string }) => (
   </Icon>
 );
 
-/** 面板开关（侧栏收展：标题栏印章 hover 态） */
+/** 面板开关（侧栏收展：标题栏 logo 的 hover 态） */
 export const IconPanelLeft = (p: { size?: number; className?: string }) => (
   <Icon {...p}>
     <rect x="3" y="4" width="18" height="16" rx="2" />
@@ -63,34 +63,6 @@ export const IconRestore = (p: { size?: number; className?: string }) => (
     <rect x="8" y="8" width="12" height="12" rx="2" />
     <path d="M4 16V6a2 2 0 0 1 2-2h10" />
   </Icon>
-);
-
-/** 品牌 git 字标：与应用图标同一套几何字形（g/i/t），颜色跟随 currentColor。
-    字形坐标即 scripts/gen-icons.mjs 的 birdCoverage 设计稿（0..100 网格）。 */
-export const IconGitMark = ({
-  size = 14,
-  className,
-}: {
-  size?: number;
-  className?: string;
-}) => (
-  <svg
-    width={size}
-    height={(size * 61) / 83}
-    viewBox="12.5 23.5 83 61"
-    fill="none"
-    className={className}
-    aria-hidden
-  >
-    <circle cx="27" cy="48" r="10.5" stroke="currentColor" strokeWidth="8" />
-    <path
-      d="M41.5 48V76M41.5 76L33 79M60 40V62M80 32V70M80 70L88 73M70 42H90"
-      stroke="currentColor"
-      strokeWidth="10"
-      strokeLinecap="round"
-    />
-    <circle cx="60" cy="29" r="5.5" fill="currentColor" />
-  </svg>
 );
 
 /** 仓库（书本形 repo 标） */

@@ -63,51 +63,6 @@
   flex: none;
 }
 
-/* 仓库栏头部双胶囊：仓库（数量）/ 容量（所选仓库占用），替换原品牌小字 */
-.sidebar-tabs {
-  flex: 1;
-  min-width: 0;
-  padding: 2px;
-  gap: 2px;
-}
-
-.sidebar-tabs .segment {
-  min-width: 0;
-  /* 定高 24px + 容器 2px 内边距 = 28px，与下方搜索胶囊同高 */
-  height: 24px;
-  padding: 0 7px;
-  gap: 4px;
-  font-size: 11px;
-}
-
-/* 两个胶囊都按内容分配，容量侧多分一些余量给统计数字（约 4:6） */
-.sidebar-tabs .seg-repos {
-  flex: 1 1 auto;
-}
-
-.sidebar-tabs .seg-space {
-  flex: 1.5 1 auto;
-}
-
-.sidebar-tabs .segment:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.seg-num {
-  font-size: 9px;
-  font-weight: 500;
-  color: var(--fg3);
-  font-variant-numeric: tabular-nums;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.segment-active .seg-num {
-  color: var(--fg2);
-}
-
 /* 图标钮：贴面无边框，hover 才起交互底（qingbird-md .ws-icon 同款） */
 .icon-btn {
   width: 26px;
@@ -145,7 +100,7 @@
   color: var(--accent);
 }
 
-/* 侧栏主体：仓库列表（衬线品牌层，与标题栏/大按键同字体） */
+/* 侧栏主体：仓库列表 */
 .repo-list {
   flex: 1;
   /* flex 子项默认 min-height:auto，仓库一多会被内容撑高导致

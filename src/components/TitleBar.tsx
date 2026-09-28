@@ -1,14 +1,16 @@
 // 自定义标题栏（替代 Tauri 原生标题栏，同兄弟项目 qingbird-md-rust）。
 //
-// 布局：左侧 朱砂「git」印章钮（hover 显侧栏开关图标，点击 toggleSidebar——
-// logo 与侧栏开关二合一，同 qingbird-md 的 seal-btn）+ 衬线品牌名 |
-// 中部空白归入拖拽区 | 右侧窗控按钮组。
+// 布局：左侧 logo 钮（hover 显侧栏开关图标，点击 toggleSidebar——
+// logo 与侧栏开关二合一）+ 品牌名 | 中部空白归入拖拽区 | 右侧窗控按钮组。
+// logo 图源：assets/icon-source.png，`node scripts/gen-icons.mjs` 生成
+// src-tauri/icons/* 全套；此处用 src/assets/icon.png（128px 那张）。
 // 关闭按钮走 appWindow.close() → Rust 端 CloseRequested 拦截隐藏到托盘（行为不变）。
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useApp } from "../store";
 import type { ThemeMode } from "../lib/theme";
-import { IconGear, IconGitMark, IconMinus, IconMaximize, IconMonitor, IconMoon, IconPanelLeft, IconRestore, IconSun, IconX } from "./icons";
+import appIcon from "../assets/icon.png";
+import { IconGear, IconMinus, IconMaximize, IconMonitor, IconMoon, IconPanelLeft, IconRestore, IconSun, IconX } from "./icons";
 
 const appWindow = getCurrentWindow();
 
@@ -42,21 +44,21 @@ export default function TitleBar() {
 
   return (
     <header className="titlebar" data-tauri-drag-region="deep">
-      {/* deep：整个标题栏子树可拖；BUTTON（印章/窗控）自动豁免走自身点击。
+      {/* deep：整个标题栏子树可拖；BUTTON（logo/窗控）自动豁免走自身点击。
           空白处双击 = 最大化/还原（原生标题栏习惯）。 */}
       <div className="titlebar-left" onDoubleClick={toggleMaximize}>
         <button
           type="button"
-          className="seal-btn"
+          className="brand-toggle"
           aria-label={sidebarOpen ? "收起仓库列表" : "展开仓库列表"}
           title={sidebarOpen ? "收起仓库列表" : "展开仓库列表"}
           onClick={toggleSidebar}
         >
-          {/* 双层：默认朱砂「git」印，hover 淡出、原位浮现侧栏开关图标（CSS .seal-btn） */}
-          <span className="seal-face" aria-hidden="true">
-            <IconGitMark size={13} />
+          {/* 双层：默认显 logo，hover 淡出、原位浮现侧栏开关图标（CSS .brand-toggle） */}
+          <span className="brand-logo" aria-hidden="true">
+            <img src={appIcon} alt="" draggable={false} />
           </span>
-          <span className="seal-ico" aria-hidden="true">
+          <span className="brand-toggle-ico" aria-hidden="true">
             <IconPanelLeft size={14} />
           </span>
         </button>

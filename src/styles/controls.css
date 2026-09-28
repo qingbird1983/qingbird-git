@@ -70,7 +70,7 @@
   padding: 20px 22px;
   box-shadow: var(--shadow-strong);
   animation: modal-in 0.18s var(--ease);
-  /* 弹出面板整体走衬线品牌层；代码/路径类局部仍由 --font-mono 覆盖 */
+  /* 弹出面板统一用 UI 字体；代码/路径类局部仍由 --font-mono 覆盖 */
   font-family: var(--font-ui);
 }
 

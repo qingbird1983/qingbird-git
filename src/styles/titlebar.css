@@ -1,5 +1,3 @@
-/* ---------- 自建标题栏 ---------- */
-
 /* ---------- 自建标题栏（替代原生，同 qingbird-md-rust） ---------- */
 .titlebar {
   display: flex;
@@ -16,12 +14,12 @@
 .titlebar-left {
   display: flex;
   align-items: center;
-  align-self: stretch; /* 撑满标题栏高度，印章钮 hover 高亮上下到边 */
+  align-self: stretch; /* 撑满标题栏高度，logo 钮 hover 高亮上下到边 */
   flex-shrink: 0;
   padding-left: 8px;
 }
 
-/* 品牌名：无衬线品牌层（pointer-events:none 让空白可拖窗） */
+/* 品牌名（pointer-events:none 让空白可拖窗） */
 .titlebar-brand {
   padding: 0 10px;
   font-family: var(--font-ui);
@@ -43,11 +41,11 @@
   background: var(--border);
 }
 
-/* 品牌标记钮：logo 与侧栏开关二合一。
-   TODO(logo) 这里现在是中性的强调色方块占位——原来的朱砂印章属于旧
-   纸墨主题，与灰白体系不配，先撤掉。新 logo 定稿后替换 .seal-face 的
-   背景与内部图形即可，交互逻辑（hover 浮现侧栏开关）不受影响。 */
-.seal-btn {
+/* 品牌区：logo 与侧栏开关二合一（hover 淡出 logo、浮现侧栏开关）。
+   logo 图源 assets/icon-source.png，由 `node scripts/gen-icons.mjs` 生成
+   src-tauri/icons/* 全套应用图标；这里用同源的 128px 版本。
+   图标自带深底 + 圆角，外框不再叠底色，只留按钮的 hover 反馈。 */
+.brand-toggle {
   position: relative;
   flex: 0 0 auto;
   width: 21px;
@@ -60,20 +58,25 @@
   cursor: pointer;
 }
 
-.seal-btn .seal-face {
+.brand-toggle .brand-logo {
   position: absolute;
   inset: 0;
   border-radius: 5px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--accent);
-  color: var(--on-accent);
+  overflow: hidden;
   line-height: 1;
   transition: opacity 0.16s var(--ease), transform 0.16s var(--ease);
 }
 
-.seal-btn .seal-ico {
+.brand-toggle .brand-logo img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* 拖窗时不要拖起图片幽灵 */
+  -webkit-user-drag: none;
+}
+
+.brand-toggle .brand-toggle-ico {
   position: absolute;
   inset: -3px;
   border-radius: 6px;
@@ -85,14 +88,14 @@
   transition: opacity 0.16s var(--ease);
 }
 
-.seal-btn:hover .seal-face,
-.seal-btn:focus-visible .seal-face {
+.brand-toggle:hover .brand-logo,
+.brand-toggle:focus-visible .brand-logo {
   opacity: 0;
   transform: scale(0.85);
 }
 
-.seal-btn:hover .seal-ico,
-.seal-btn:focus-visible .seal-ico {
+.brand-toggle:hover .brand-toggle-ico,
+.brand-toggle:focus-visible .brand-toggle-ico {
   opacity: 1;
 }
 

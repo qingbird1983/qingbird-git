@@ -6,42 +6,6 @@
   display: inline-flex;
 }
 
-.btn-badge {
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 4px;
-  background: var(--warning);
-  color: var(--on-accent);
-  border-radius: var(--r-pill);
-  font-size: 9.5px;
-  font-weight: 700;
-  line-height: 14px;
-  text-align: center;
-  pointer-events: none;
-  box-shadow: 0 0 0 2px var(--surface);
-}
-
-/* 浮卡：脱离纸面（surface + 大投影 + r-lg） */
-.commit-popover {
-  position: absolute;
-  top: 34px;
-  right: 0;
-  width: 400px;
-  max-width: 76vw;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow);
-  padding: 12px 14px;
-  z-index: 40;
-  animation: rise 0.18s var(--ease);
-  text-align: left;
-  font-family: var(--font-ui);
-}
-
 .popover-close {
   border: none;
   background: transparent;
@@ -58,11 +22,6 @@
 .popover-close:hover {
   color: var(--fg);
   background: var(--item-hover-bg);
-}
-
-/* ---------- 定时自动同步弹层 ---------- */
-.auto-sync-pop {
-  width: 340px;
 }
 
 .auto-sync-desc {
@@ -125,15 +84,6 @@
   line-height: 1.5;
 }
 
-/* 自动同步已开启：时钟图标染成绿色（不用角标圆点） */
-.icon-btn.auto-on {
-  color: var(--success);
-}
-
-.icon-btn.auto-on:hover {
-  color: var(--success);
-}
-
 /* 仓库列表：定时自动同步角标 */
 .badge-auto {
   background: var(--success-wash);
@@ -150,13 +100,13 @@
   color: var(--accent);
 }
 
-/* 自动同步结果通知的语义色 */
-.auto-toast-warn .proxy-toast-icon {
-  color: var(--warning);
-}
-
+/* 自动同步结果通知的语义色（类名由 App.tsx 的 auto-toast-${kind} 拼出） */
 .auto-toast-error {
   border-color: var(--danger);
+}
+
+.auto-toast-warn .proxy-toast-icon {
+  color: var(--warning);
 }
 
 .auto-toast-error .proxy-toast-icon {
@@ -212,15 +162,6 @@
 .exclude-name.excluded {
   color: var(--fg3);
   text-decoration: line-through;
-}
-
-/* 语言统计：全窗通铺页脚（App 布局最底一行，仓库栏下方 → 右缘），
-   底色与仓库栏相同（bg2），顶部发丝线分隔。 */
-.lang-footer {
-  flex: none;
-  padding: 7px 22px 9px;
-  background: var(--bg2);
-  border-top: 1px solid var(--border);
 }
 
 .lang-bar {

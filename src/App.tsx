@@ -22,7 +22,7 @@ function App() {
   const dismissAuto = useApp((s) => s.dismissAuto);
   // 侧栏常挂载 + 宽度/透明度过渡做平滑收展（--panel-anim）；
   // 内容包在 .panel-clip 里保持固定宽，收缩时只被裁切不被挤压。
-  // 开关入口在自建标题栏的品牌印章钮上（TitleBar.tsx）。
+  // 开关入口在自建标题栏的品牌 logo 钮上（TitleBar.tsx）。
   // 拖宽条可调宽度（SIDEBAR_MIN_W..SIDEBAR_MAX_W）；拖拽中关掉过渡避免跟手延迟。
   const sidebarOpen = useApp((s) => s.sidebarOpen);
   const sidebarWidth = useApp((s) => s.sidebarWidth);

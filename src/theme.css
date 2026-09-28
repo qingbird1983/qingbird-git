@@ -55,9 +55,7 @@
   --fork: #7c3aed; /* 本地与云端已分叉（危险但非错误） */
   --fork-wash: rgba(124, 58, 237, 0.1);
 
-  /* ---- 旧令牌别名：保留给历史样式，避免 undefined ---- */
-  --zhu: var(--danger);
-  --zhu-wash: var(--danger-wash);
+  /* ---- 旧令牌别名：存量样式还在用，改名时要连这些一起改 ---- */
   --success: var(--ok);
   --success-wash: var(--ok-wash);
   --warning: var(--warn);
