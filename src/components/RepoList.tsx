@@ -1,22 +1,13 @@
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { api } from "../api";
 import { useApp } from "../store";
 import RepoItem from "./RepoItem";
 import { IconFilePlus, IconDownload, IconPlus, IconX, IconSync, IconSearch } from "./icons";
 
-export default function RepoList({
-  onOpenClone,
-  onOpenNew,
-  onNeedInit,
-}: {
-  onOpenClone: () => void;
-  onOpenNew: () => void;
-  onNeedInit: (path: string) => void;
-}) {
+export default function RepoList() {
   const {
-    repos, selected, status, select, addRepoByPath, removeRepo, renameRepo,
+    repos, selected, status, select, removeRepo, renameRepo,
     busy, scanAll, openRepoWebsite, pinRepo,
+    addRepoDialog, openClone, openNewRepo,
   } = useApp();
   const dragging = useApp((s) => s.dragging);
   const [editing, setEditing] = useState<string | null>(null);
@@ -31,19 +22,6 @@ export default function RepoList({
           (r.alias ?? "").toLowerCase().includes(q),
       )
     : repos;
-
-  const handleAdd = async () => {
-    const picked = await open({ directory: true, multiple: false, title: "选择 git 仓库文件夹" });
-    if (typeof picked !== "string") return;
-    // 非 git 仓库文件夹 → 引导一键初始化
-    const st = await api.status(picked).catch(() => null);
-    if (st && !st.is_repo) {
-      onNeedInit(picked);
-      return;
-    }
-    const added = await addRepoByPath(picked);
-    if (!added) onNeedInit(picked);
-  };
 
   const handleRemove = (path: string, name: string) => {
     if (window.confirm(`从列表移除仓库「${name}」？\n（只移除记录，不会删除磁盘上的文件）`)) {
@@ -79,12 +57,12 @@ export default function RepoList({
           <button
             className="icon-btn"
             title="新建仓库（本地初始化，可同步创建到 GitHub / Gitee）"
-            onClick={onOpenNew}
+            onClick={openNewRepo}
             disabled={!!busy}
           >
             <IconFilePlus size={15} />
           </button>
-          <button className="icon-btn" title="克隆新仓库（粘贴地址下载）" onClick={onOpenClone} disabled={!!busy}>
+          <button className="icon-btn" title="克隆新仓库（粘贴地址下载）" onClick={openClone} disabled={!!busy}>
             <IconDownload size={15} />
           </button>
           <button
@@ -95,7 +73,7 @@ export default function RepoList({
           >
             <IconSync size={15} />
           </button>
-          <button className="icon-btn" title="添加已有仓库文件夹" onClick={() => void handleAdd()} disabled={!!busy}>
+          <button className="icon-btn" title="添加已有仓库文件夹" onClick={() => void addRepoDialog()} disabled={!!busy}>
             <IconPlus size={15} />
           </button>
         </div>

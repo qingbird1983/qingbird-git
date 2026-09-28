@@ -28,7 +28,8 @@ const EMPTY_ACTIVITY: ActivityDay[] = [];
 export default function RepoPanel() {
   const {
     selected, status, busy, cloning, cmdRunning, progress, changes,
-    checkUpdate, pull, push, commitPush, runRepoCmd, stopRepoCmd,
+    checkUpdate, pullSmart, stashPull, cancelStash, stashConfirm, push, commitPush,
+    runRepoCmd, stopRepoCmd,
     openInFolder, openInTerminal, openReadme, cancelOp, setAutoSync,
     rebaseFork, undoRebase,
   } = useApp();
@@ -37,7 +38,6 @@ export default function RepoPanel() {
   const fork = useApp((s) => (s.selected ? s.forks[s.selected] : undefined));
   const backup = useApp((s) => (s.selected ? s.backups[s.selected] : undefined));
   const lastProxy = useApp((s) => s.lastProxy);
-  const [confirmStash, setConfirmStash] = useState(false);
   const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
   const [commitMsg, setCommitMsg] = useState("");
   const [showCmd, setShowCmd] = useState(false);
@@ -58,7 +58,6 @@ export default function RepoPanel() {
   const pinned = repoEntry?.pinned_cmds ?? EMPTY_PINNED;
 
   useEffect(() => {
-    setConfirmStash(false);
     setCommitMsg("");
     setFileChanges([]);
     setMoreOpen(false);
@@ -94,13 +93,11 @@ export default function RepoPanel() {
   }, [selected, st?.is_repo]);
 
   const handlePull = async () => {
-    const result = await pull(false);
-    if (result === "dirty") setConfirmStash(true);
+    await pullSmart();
   };
 
   const handleStashPull = async () => {
-    setConfirmStash(false);
-    await pull(true);
+    await stashPull();
   };
 
   const handleCommitPush = async () => {
@@ -454,7 +451,7 @@ export default function RepoPanel() {
         )}
       </div>
 
-      {confirmStash && <StashBar onConfirm={() => void handleStashPull()} onCancel={() => setConfirmStash(false)} />}
+      {stashConfirm && <StashBar onConfirm={() => void handleStashPull()} onCancel={cancelStash} />}
 
       {(busy || cloning) && (
         <BusyPop

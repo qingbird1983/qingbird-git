@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test:web": "node --test --test-isolation=none src/repoCmds.test.mjs src/forkCard.test.mjs src/pinnedCmds.test.mjs src/commitDiff.test.mjs src/activity.test.mjs",
+    "test:web": "node --test --test-isolation=none src/repoCmds.test.mjs src/forkCard.test.mjs src/pinnedCmds.test.mjs src/commitDiff.test.mjs src/activity.test.mjs src/commands.test.mjs src/hotkeys.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

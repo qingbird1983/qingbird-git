@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>青鸟 Git · ⌘K 命令面板预览</title>
+<!-- 直接引项目真实样式，看到的就是应用里的效果 -->
+<link rel="stylesheet" href="../../src/theme.css" />
+<link rel="stylesheet" href="../../src/styles/base.css" />
+<link rel="stylesheet" href="../../src/styles/popover.css" />
+<style>
+  /* 仅供预览页定位用：模拟应用背景，让遮罩效果看得出来 */
+  body {
+    padding: 0;
+    background:
+      linear-gradient(var(--line-soft) 1px, transparent 1px) 0 0 / 100% 28px,
+      linear-gradient(90deg, var(--line-soft) 1px, transparent 1px) 0 0 / 28px 100%,
+      var(--bg2);
+  }
+  .pv-note {
+    position: fixed; left: 12px; bottom: 10px; z-index: 300;
+    font-size: 11px; color: var(--fg2); background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--r-sm); padding: 6px 10px;
+  }
+  .switcher { display: flex; gap: 8px; position: fixed; right: 12px; top: 10px; z-index: 300; }
+  .switcher button {
+    font: inherit; font-size: 11px; padding: 4px 10px; cursor: pointer;
+    background: var(--surface); color: var(--fg2);
+    border: 1px solid var(--border); border-radius: var(--r-pill);
+  }
+</style>
+</head>
+<body>
+
+<!-- 三种状态对照：默认列表 / 搜中文 / 无结果 -->
+<div class="switcher">
+  <button onclick="show(0)">默认</button>
+  <button onclick="show(1)">搜「终」</button>
+  <button onclick="show(2)">无结果</button>
+  <button onclick="theme('dark')">暗色</button>
+</div>
+
+<div class="palette-mask" id="mask">
+  <div class="palette" style="position:relative">
+    <div class="palette-head">
+      <span class="palette-head-icon">🔍</span>
+      <input class="palette-input" id="q" value="" placeholder="搜索命令或仓库名…" />
+      <span class="kbd">Esc</span>
+    </div>
+    <div class="palette-list" id="list"></div>
+    <div class="palette-foot">
+      <span>↑↓ 选择</span><span>Enter 执行</span><span>Esc 关闭</span>
+    </div>
+  </div>
+</div>
+
+<div class="pv-note">命令面板预览 · 引的是项目真实 CSS，改 src/styles/popover.css 这里会同步变</div>
+
+<script>
+  const DOTS = { ok: "var(--ok)", behind: "var(--warn)", ahead: "var(--accent)", idle: "var(--fg3)" };
+
+  // 每行：[标题, 右侧提示, 状态点, kbd 角标]
+  const STATES = [
+    ["仓库操作", [
+      ["拉取", "", "", ""],
+      ["推送", "", "", ""],
+      ["检测云端更新", "", "", ""],
+      ["在此打开终端", "", "", "Ctrl T"],
+      ["打开文件夹", "", "", ""],
+      ["查看仓库说明", "", "", ""],
+      ["打开仓库主页", "", "", ""],
+    ]],
+    ["仓库管理", [
+      ["添加本地仓库", "", "", ""],
+      ["从地址克隆仓库", "", "", ""],
+      ["在云端新建仓库", "", "", ""],
+      ["扫描全部仓库", "", "", ""],
+    ]],
+    ["应用", [
+      ["设置", "", "", ""],
+      ["切换主题", "", "", ""],
+    ]],
+    ["切换到仓库", [
+      ["qingbird-git", "已同步", "ok", ""],
+      ["atlas-web", "落后 3", "behind", ""],
+      ["qingbird-md", "待推送 5", "ahead", ""],
+      ["efo-api", "仓库不可用", "idle", ""],
+    ]],
+  ];
+
+  function render(groups) {
+    const list = document.getElementById("list");
+    list.innerHTML = groups.map(([group, rows]) => `
+      <div class="palette-group">${group}</div>` + rows.map((r) => `
+      <button class="palette-item">
+        ${r[2] ? `<span class="palette-dot" style="background:${DOTS[r[2]]}"></span>` : ""}
+        <span class="palette-item-text">${r[0]}</span>
+        ${r[1] ? `<span class="palette-hint">${r[1]}</span>` : ""}
+        ${r[3] ? `<span class="kbd">${r[3]}</span>` : ""}
+      </button>`).join("")).join("");
+    list.querySelector(".palette-item").classList.add("active");
+  }
+
+  function show(mode) {
+    const q = document.getElementById("q");
+    if (mode === 0) { q.value = ""; render(STATES); }
+    if (mode === 1) { q.value = "终"; render([["仓库操作", [["在此打开终端", "", "", "Ctrl T"]]]]); }
+    if (mode === 2) {
+      q.value = "zzzz";
+      document.getElementById("list").innerHTML = `<div class="palette-empty">没有匹配的命令</div>`;
+    }
+  }
+
+  function theme(t) { document.documentElement.dataset.theme = t; }
+
+  show(0);
+</script>
+</body>
+</html>

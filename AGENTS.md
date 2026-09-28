@@ -33,6 +33,8 @@ Windows 桌面工具：本地 Git 仓库一键同步（Tauri 2 + React + TypeScr
 - `src/pinnedCmds.test.mjs` 操作区自定义按钮的列表编辑规则（上限/空行/文案兜底）
 - `src/commitDiff.test.mjs` 提交历史看 diff 的展示规则（行分类/行数标签/超长截断）
 - `src/activity.test.mjs` 提交活跃度柱状图的数据规则（补齐窗口/本地时区日期键/柱高比例）
+- `src/commands.test.mjs` ⌘K 命令面板的模糊匹配（完全/前缀/子序列三档、多词 AND、稳定排序）
+- `src/hotkeys.test.mjs` 全局快捷键判定（输入框让位、无选中仓库不触发、修饰键判定）
 
 代码检查：`pnpm build`（含 tsc 类型检查）
 
@@ -74,22 +76,35 @@ Rust 快速检查：`cd src-tauri && cargo check`
   `forkGuide.ts` 分叉卡片该出哪些按钮与文案、`pinnedCmds.ts` 操作区自定义按钮的列表编辑规则、
   `commitDiff.ts` 提交历史的 patch 行分类与截断展示、
   `activity.ts` 提交活跃度柱状图的数据整形（后端只给有提交的日子，缺的天在这里补 0，
-  日期键必须用本地时区不能用 `toISOString`）；
+  日期键必须用本地时区不能用 `toISOString`）、
+  `commands.ts` ⌘K 命令面板的模糊匹配（`matchCommands` 是泛型的，别把调用方挂在命令上的字段抹平）、
+  `hotkeys.ts` 全局快捷键判定（DOM 相关的焦点判定由调用方查好当参数传进来）；
   `src/repoCmds.ts` 一键运行命令的保存/预填纯逻辑（配 `pnpm test:web` 回归测试）
   - 这类模块里**不要**写返回 `?? []` 的帮手函数：每次渲染新建数组，拿它当 `useEffect` 依赖会让 effect 每轮重跑。
     需要默认值时由调用方声明模块级的空数组常量（见 `RepoPanel` 的 `EMPTY_PINNED`）
+- **入口一多就把开关收进 store**：`cloneOpen` / `newRepoOpen` / `initPath` / `paletteOpen` 都在 store，
+  不再用 App 的局部 state 往下传 props。同理 `pullSmart` / `stashPull` 把"脏工作区→stash 确认条"
+  这层判断收进 store，按钮、⌘K、快捷键三个入口才能行为一致——**别在组件里另写一份拉取逻辑**
 - 前端 UI：`src/components/`（`RepoList` 仓库列表 + `RepoItem` 单条目、`RepoPanel` 主工作区、
   `Inspector` 右侧检视抽屉（变更/历史/定时/空间四页签）、`panel/` 下的浮层与展示组件
   （`SyncRing` 同步环、`ActivityChart` 提交活跃度柱状图、`ForkCard` 分叉恢复卡片、
   `BusyPop`/`StashBar`/`LogArea`）、`CmdPanel`/`SpacePanel`/`HistoryModal`/各对话框）
+- 快捷键（判定在 `src/lib/hotkeys.ts`，监听挂在 `App.tsx`）：
+  `Ctrl K` 命令面板（任何焦点下都生效）/ `Ctrl T` 当前仓库开终端 /
+  `1·2·3` 对应同步卡上**从左到右**的拉取·推送·检测 / `↑↓` 上下切仓库。
+  键位约定：`1/2/3` 按屏幕位置对位而非操作顺序——用户是先看见按钮再按位置的键。
+  改键位先改 `hotkeys.ts` 再改 `App.tsx`，规则测试在 `src/hotkeys.test.mjs`
 - 工作区是横向三列：`work-main`（同步卡 + 命令卡）/ `.stats-col` 176px 统计窄列
   （活跃度柱状图 + 语言构成，卡片在这列里竖排）/ `Inspector` 抽屉 320px。
-  再往中间加东西会挤掉主区，要新图形统计就先考虑塞进 `.stats-col` 或抽屉
+  再往中间加东西会挤掉主区，要新图形统计就先考虑塞进 `.stats-col` 或抽屉。
+  窗口下限 `minWidth: 1000`（860 是阶段 2 引入抽屉后的旧值，那时主区只剩 108px，
+  104px 的同步环会顶出右缘）——**要往中间再加一列（如导航轨）之前先重算这条预算**
 - 动作分三层（重构后的核心约定，改动界面时别破坏这个分层）：
   **执行层**只有 `RepoPanel` 的同步卡（同步环 + 拉取/推送/检测三键）；
   **命令层**是命令卡列表行（测试/构建/开发/安装依赖 + 钉住的自定义命令）；
-  **查看层**全部收进 `Inspector` 抽屉与日志抽屉，不再在主面板平铺图标按钮。
-  新增功能先想清楚它属于哪一层，再决定放哪——别再往头部加图标按钮
+  **查看层**全部收进 `Inspector` 抽屉与日志抽屉，不再在主面板平铺图标按钮；
+  **低频层**是 `⌘K` 命令面板——「打开文件夹 / 终端 / 说明 / 切仓库」这类不常用但得存在的东西
+  统一放这儿，别往主面板加图标按钮。新增功能先想清楚它属于哪一层，再决定放哪
 - 样式：`src/App.css` 只留文件头与 `@import`，实体在 `src/styles/*.css`；
   **`@import` 顺序即级联顺序**，新增样式文件要插在正确位置
   （`inspector.css` 放最后：工作区新结构要能覆盖 `panel.css`）

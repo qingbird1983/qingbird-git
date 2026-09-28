@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { Channel } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api, remoteHost, type ForkInfo, type OpResult, type ProgressEvent, type RepoEntry, type RepoStatus, type UpdateChanges } from "./api";
 import { autoSyncLabel } from "./lib/autoSync";
 import { sortRepos } from "./lib/repos";
@@ -91,11 +92,37 @@ interface AppState {
   settingsOpen: boolean;
   openSettings: () => void;
   closeSettings: () => void;
+  /** ⌘K 命令面板开关（Ctrl K 呼出） */
+  paletteOpen: boolean;
+  openPalette: () => void;
+  closePalette: () => void;
+  togglePalette: () => void;
+  /** 克隆弹窗开关：入口有三处（侧栏按钮 / 拖入非仓库 / ⌘K），统一放 store 免得层层传 props */
+  cloneOpen: boolean;
+  openClone: () => void;
+  closeClone: () => void;
+  /** 云端新建仓库弹窗开关，同上 */
+  newRepoOpen: boolean;
+  openNewRepo: () => void;
+  closeNewRepo: () => void;
+  /** 初始化向导的目标目录（非 git 仓库的文件夹），null 表示不显示 */
+  initPath: string | null;
+  openInit: (path: string) => void;
+  closeInit: () => void;
+  /** 选文件夹并添加仓库；选中的不是 git 仓库就转去初始化向导（侧栏按钮与 ⌘K 共用这一条路径） */
+  addRepoDialog: () => Promise<void>;
   /** 侧栏宽度（拖宽条可调，clamp 到 SIDEBAR_MIN_W..SIDEBAR_MAX_W；localStorage 记忆） */
   sidebarWidth: number;
   setSidebarWidth: (w: number) => void;
   loadRepos: () => Promise<void>;
   select: (path: string | null) => void;
+  /** 拉取遇脏工作区时是否正等着用户确认 stash：按钮 / ⌘K / 快捷键都走这一条路径 */
+  stashConfirm: boolean;
+  /** 拉取：脏工作区就地退回，转成 stash 确认条，不自作主张 */
+  pullSmart: () => Promise<void>;
+  /** 确认暂存本地改动后再拉取 */
+  stashPull: () => Promise<void>;
+  cancelStash: () => void;
   refreshStatus: (path: string) => Promise<void>;
   addRepoByPath: (path: string) => Promise<boolean>;
   removeRepo: (path: string) => Promise<void>;
@@ -134,6 +161,8 @@ interface AppState {
   openRepoWebsite: (path: string) => void;
   scanAll: () => Promise<void>;
   setTheme: (t: ThemeMode) => Promise<void>;
+  /** 明暗主题循环：暗 → 亮 → 跟随系统 → 暗（标题栏与 ⌘K 共用，别处不要自己再转一遍） */
+  cycleTheme: () => void;
   initTheme: () => Promise<void>;
 }
 
@@ -163,6 +192,19 @@ export const useApp = create<AppState>((set, get) => ({
   settingsOpen: false,
   openSettings: () => set({ settingsOpen: true }),
   closeSettings: () => set({ settingsOpen: false }),
+  paletteOpen: false,
+  openPalette: () => set({ paletteOpen: true }),
+  closePalette: () => set({ paletteOpen: false }),
+  togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),
+  cloneOpen: false,
+  openClone: () => set({ cloneOpen: true }),
+  closeClone: () => set({ cloneOpen: false }),
+  newRepoOpen: false,
+  openNewRepo: () => set({ newRepoOpen: true }),
+  closeNewRepo: () => set({ newRepoOpen: false }),
+  initPath: null,
+  openInit: (path) => set({ initPath: path }),
+  closeInit: () => set({ initPath: null }),
   sidebarWidth: loadSidebarWidth(),
   setSidebarWidth: (w) => set({ sidebarWidth: saveSidebarWidth(w) }),
 
@@ -177,11 +219,21 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   select: (path) => {
-    set({ selected: path });
+    set({ selected: path, stashConfirm: false });
     if (path) {
       get().refreshStatus(path);
     }
   },
+
+  stashConfirm: false,
+  pullSmart: async () => {
+    if ((await get().pull(false)) === "dirty") set({ stashConfirm: true });
+  },
+  stashPull: async () => {
+    set({ stashConfirm: false });
+    await get().pull(true);
+  },
+  cancelStash: () => set({ stashConfirm: false }),
 
   refreshStatus: async (path) => {
     try {
@@ -204,6 +256,18 @@ export const useApp = create<AppState>((set, get) => ({
       get().log(String(e), "error");
       return false;
     }
+  },
+
+  addRepoDialog: async () => {
+    const picked = await open({ directory: true, multiple: false, title: "选择 git 仓库文件夹" });
+    if (typeof picked !== "string") return;
+    // 选中的不是 git 仓库 → 转去初始化向导（别直接报错，那不是用户的错）
+    const st = await api.status(picked).catch(() => null);
+    if (st && !st.is_repo) {
+      set({ initPath: picked });
+      return;
+    }
+    if (!(await get().addRepoByPath(picked))) set({ initPath: picked });
   },
 
   removeRepo: async (path) => {
@@ -578,6 +642,11 @@ export const useApp = create<AppState>((set, get) => ({
     } catch (e) {
       get().log(`主题切换失败：${e}`, "error");
     }
+  },
+
+  cycleTheme: () => {
+    const cur = get().theme;
+    void get().setTheme(cur === "dark" ? "light" : cur === "light" ? "system" : "dark");
   },
 
   initTheme: async () => {
