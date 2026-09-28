@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>青鸟 Git · 工作区统计条预览</title>
+<!-- 直接引项目真实样式，看到的就是应用里的效果 -->
+<link rel="stylesheet" href="../../src/theme.css" />
+<link rel="stylesheet" href="../../src/styles/base.css" />
+<link rel="stylesheet" href="../../src/styles/panel.css" />
+<link rel="stylesheet" href="../../src/styles/popover.css" />
+<link rel="stylesheet" href="../../src/styles/inspector.css" />
+<style>
+  /* 仅供预览页定位用：把工作区三列摆出来，模拟 RepoPanel 的 .work-row */
+  body { padding: 0; }
+  .preview-frame { display: flex; height: 460px; }
+  .preview-main {
+    flex: 1; display: flex; flex-direction: column; gap: 12px;
+    padding: 12px; min-width: 0; background: var(--bg);
+  }
+  .preview-main h3 { margin: 0; font-size: 12px; color: var(--fg3); font-weight: 600; }
+  .preview-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 14px 16px; }
+  .preview-insp {
+    flex: none; width: 320px; background: var(--panel-bg);
+    border-left: 1px solid var(--border); padding: 12px; color: var(--fg3); font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<div class="preview-frame">
+  <div class="preview-main">
+    <h3>work-main（同步卡 / 命令卡）</h3>
+    <div class="preview-card">
+      <div style="font-size:13px;color:var(--fg);font-weight:600;">工作区其余部分保持不变</div>
+      <div style="font-size:12px;color:var(--fg3);margin-top:4px;">这一版只往右侧统计窄列里加了一张活跃度卡，中间宽度没有变化</div>
+    </div>
+  </div>
+
+  <div class="stats-col">
+    <div class="activity card">
+      <div class="stats-head">近 14 天提交<span class="activity-total">18</span></div>
+      <div class="activity-bars" id="bars"></div>
+      <div class="activity-axis"><span>14 天前</span><span>今天</span></div>
+    </div>
+
+    <div class="stats-card card">
+      <div class="stats-head">语言构成</div>
+      <div class="lang-bar">
+        <span class="lang-seg" style="width:52%;background:#3178c6"></span>
+        <span class="lang-seg" style="width:31%;background:#dea584"></span>
+        <span class="lang-seg" style="width:9%;background:#e1c542"></span>
+        <span class="lang-seg" style="width:8%;background:#a1a1aa"></span>
+      </div>
+      <div class="lang-legend">
+        <span class="lang-item"><span class="lang-dot" style="background:#3178c6"></span>TypeScript<b>52.0%</b></span>
+        <span class="lang-item"><span class="lang-dot" style="background:#dea584"></span>Rust<b>31.0%</b></span>
+        <span class="lang-item"><span class="lang-dot" style="background:#e1c542"></span>CSS<b>9.0%</b></span>
+        <span class="lang-item"><span class="lang-dot" style="background:#a1a1aa"></span>其他<b>8.0%</b></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="preview-insp">Inspector 抽屉（320px）</div>
+</div>
+
+<script type="module">
+  // 模拟：14 天提交分布（含空档、含今天还没提交的情况）
+  const counts = [0, 2, 0, 1, 5, 0, 0, 3, 1, 0, 2, 4, 0, 0];
+  const max = Math.max(...counts);
+  const host = document.getElementById("bars");
+  counts.forEach((c, i) => {
+    const today = i === counts.length - 1;
+    const bar = document.createElement("div");
+    bar.className = "activity-bar" + (c > 0 ? " has" : "") + (today ? " today" : "");
+    bar.title = today ? "今天 · 无提交" : `示例第 ${i + 1} 天 · ${c} 次提交`;
+    const fill = document.createElement("div");
+    fill.className = "activity-fill";
+    fill.style.height = (max > 0 && c > 0 ? (c / max) * 100 : 0) + "%";
+    bar.appendChild(fill);
+    host.appendChild(bar);
+  });
+</script>
+</body>
+</html>

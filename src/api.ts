@@ -201,6 +201,13 @@ export interface CmdDetect {
   install_cmd: string;
 }
 
+/** 近 14 天提交活动的某一天（Rust 侧只给有提交的日子，缺的天由前端补 0） */
+export interface ActivityDay {
+  /** YYYY-MM-DD，本地时区 */
+  date: string;
+  count: number;
+}
+
 /** 后台定时自动同步的事件（scheduler.rs 推送） */
 export interface AutoSyncEvent {
   path: string;
@@ -234,6 +241,8 @@ export const api = {
   commitPush: (path: string, message: string) => invoke<OpResult>("commit_push", { path, message }),
   listChanges: (path: string) => invoke<FileChange[]>("list_changes", { path }),
   recentCommits: (path: string) => invoke<CommitInfo[]>("recent_commits", { path }),
+  /** 近 14 天的提交活动（只含有提交的日子，缺的天由调用方补 0） */
+  commitActivity: (path: string) => invoke<ActivityDay[]>("commit_activity", { path }),
   /** 某条提交的文件级变更摘要（合并提交按第一个父提交算） */
   commitDetail: (path: string, hash: string) =>
     invoke<CommitDetail>("commit_detail", { path, hash }),

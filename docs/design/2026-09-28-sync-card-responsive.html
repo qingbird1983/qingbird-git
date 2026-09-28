@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>青鸟 Git · 同步卡窄窗口排版</title>
+<link rel="stylesheet" href="../../src/theme.css" />
+<link rel="stylesheet" href="../../src/styles/base.css" />
+<link rel="stylesheet" href="../../src/styles/panel.css" />
+<link rel="stylesheet" href="../../src/styles/inspector.css" />
+<style>
+  body { padding: 20px 24px 40px; background: var(--bg); }
+  h1 { font-size: 15px; margin: 0 0 4px; color: var(--fg); }
+  .lead { font-size: 12px; color: var(--fg3); margin: 0 0 20px; }
+  .case { margin-bottom: 18px; }
+  .case-cap { font-size: 11px; color: var(--fg3); margin-bottom: 6px; font-family: var(--font-mono); }
+  /* 模拟 .work-main 的可用宽度：窗口 - 侧栏 232 - 统计条 176 - 抽屉 320 - 各自 padding。
+     用 zoom 缩到一屏能看完（Chromium / WebView2 原生支持），布局计算仍是真实宽度。 */
+  .stage {
+    padding: 12px; background: var(--bg);
+    border: 1px dashed var(--border); box-sizing: border-box;
+    transform-origin: top left;
+  }
+</style>
+</head>
+<body>
+<h1>同步卡在各种主区宽度下的排版</h1>
+<p class="lead">每格都是一个 .work-main 的宽度。改窄窗口时最容易炸的是中间那段文字——它以前没有宽度下限。</p>
+
+<div id="cases"></div>
+
+<template id="tpl">
+  <div class="case">
+    <div class="case-cap"></div>
+    <div class="stage">
+      <div class="sync-card card">
+        <div class="ring" style="width:104px;height:104px">
+          <svg width="104" height="104" viewBox="0 0 104 104" style="transform:rotate(-90deg)">
+            <circle cx="52" cy="52" r="46" fill="none" stroke="var(--line-soft)" stroke-width="7"></circle>
+            <circle cx="52" cy="52" r="46" fill="none" stroke="var(--ok)" stroke-width="7"
+                    stroke-linecap="round" stroke-dasharray="289" stroke-dashoffset="0"></circle>
+          </svg>
+          <div class="ring-c"><div class="ring-v" style="color:var(--ok)">✓</div><div class="ring-l">已同步</div></div>
+        </div>
+        <div class="sync-text">
+          <div class="sync-title">本地与云端一致</div>
+          <div class="sync-desc">随时可以检测云端是否有更新。 定时同步：每 30 分钟。</div>
+        </div>
+        <div class="sync-btns">
+          <button class="sbtn acc">☁ 拉取</button>
+          <button class="sbtn">↑ 推送</button>
+          <button class="sbtn">检测</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script type="module">
+  // 主区真实可用宽度 = 窗口 - 侧栏 232 - 统计条 176 - 抽屉 320 - work-main 左右 padding 24
+  // zoom 用来把宽的一档缩进一屏，布局计算仍按真实宽度
+  const widths = [
+    [848, "窗口 1600px · 主区 848px", 0.62],
+    [528, "窗口 1280px · 主区 528px", 0.9],
+    [332, "窗口 1084px · 主区 332px（你截图那一档）", 1],
+    [208, "窗口 960px · 主区 208px", 1],
+    [108, "窗口 860px · 主区 108px（最小窗口）", 1],
+  ];
+  const host = document.getElementById("cases");
+  const tpl = document.getElementById("tpl");
+  for (const [w, cap, zoom] of widths) {
+    const node = tpl.content.cloneNode(true);
+    const stage = node.querySelector(".stage");
+    node.querySelector(".case-cap").textContent = cap;
+    stage.style.width = w + "px";
+    stage.style.zoom = zoom;
+    host.appendChild(node);
+  }
+</script>
+</body>
+</html>

@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { api, remoteHost, type FileChange, type LangStat } from "../api";
+import appIcon from "../assets/icon.png";
+import { api, remoteHost, type ActivityDay, type FileChange, type LangStat } from "../api";
 import { useApp, type LogLine } from "../store";
 import { autoSyncLabel } from "../lib/autoSync";
 import type { PinnedCmd } from "../lib/pinnedCmds";
 import Inspector, { type InspTab } from "./Inspector";
 import CmdPanel from "./CmdPanel";
+import ActivityChart from "./panel/ActivityChart";
 import BusyPop from "./panel/BusyPop";
 import ForkCard from "./panel/ForkCard";
 import LogArea from "./panel/LogArea";
@@ -20,6 +22,8 @@ import {
 const EMPTY_LOGS: LogLine[] = [];
 /** 同上：仓库没钉自定义按钮时也必须是稳定引用 */
 const EMPTY_PINNED: PinnedCmd[] = [];
+/** 同上：提交活动为空时（没仓库 / 不是仓库 / 还没加载完）用这个常量占位 */
+const EMPTY_ACTIVITY: ActivityDay[] = [];
 
 export default function RepoPanel() {
   const {
@@ -42,6 +46,7 @@ export default function RepoPanel() {
   const [logOpen, setLogOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [langs, setLangs] = useState<LangStat[]>([]);
+  const [activity, setActivity] = useState<ActivityDay[]>(EMPTY_ACTIVITY);
   const repos = useApp((s) => s.repos);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -80,6 +85,14 @@ export default function RepoPanel() {
     }
   }, [selected, st?.is_repo]);
 
+  // 提交活跃度：近 14 天柱状图。与语言构成同一档数据，都是切仓库时重取
+  useEffect(() => {
+    setActivity(EMPTY_ACTIVITY);
+    if (selected && st?.is_repo) {
+      void api.commitActivity(selected).then(setActivity).catch(() => setActivity(EMPTY_ACTIVITY));
+    }
+  }, [selected, st?.is_repo]);
+
   const handlePull = async () => {
     const result = await pull(false);
     if (result === "dirty") setConfirmStash(true);
@@ -111,9 +124,7 @@ export default function RepoPanel() {
     return (
       <main className="panel panel-empty">
         <div className="empty-big">
-          <div className="empty-logo" aria-hidden>
-            青
-          </div>
+          <img className="empty-logo" src={appIcon} alt="" aria-hidden draggable={false} />
           选择或添加一个仓库开始使用
           <div className="empty-sub">支持本地文件夹、拖拽添加、粘贴地址克隆、一键新建仓库（GitHub / Gitee）</div>
         </div>
@@ -385,34 +396,37 @@ export default function RepoPanel() {
           </div>
         </div>
 
-        {/* ---------- 统计：语言构成（原来的通铺页脚收在这里）---------- */}
-        <div className="stats-card card">
-          <div className="stats-head">语言构成</div>
-          {langs.length === 0 ? (
-            <div className="insp-empty">暂无数据</div>
-          ) : (
-            <>
-              <div className="lang-bar">
-                {langs.map((l) => (
-                  <span
-                    key={l.language}
-                    className="lang-seg"
-                    style={{ width: `${l.percent}%`, background: LANG_COLORS[l.language] ?? "#a1a1aa" }}
-                    title={`${l.language} ${l.percent.toFixed(1)}%`}
-                  />
-                ))}
-              </div>
-              <div className="lang-legend">
-                {langs.slice(0, 6).map((l) => (
-                  <span key={l.language} className="lang-item">
-                    <span className="lang-dot" style={{ background: LANG_COLORS[l.language] ?? "#a1a1aa" }} />
-                    {l.language}
-                    <b>{l.percent.toFixed(1)}%</b>
-                  </span>
-                ))}
-              </div>
-            </>
-          )}
+        {/* ---------- 统计条：提交活跃度 + 语言构成（窄列竖排，不占主区宽度） ---------- */}
+        <div className="stats-col">
+          <ActivityChart days={activity} />
+          <div className="stats-card card">
+            <div className="stats-head">语言构成</div>
+            {langs.length === 0 ? (
+              <div className="insp-empty">暂无数据</div>
+            ) : (
+              <>
+                <div className="lang-bar">
+                  {langs.map((l) => (
+                    <span
+                      key={l.language}
+                      className="lang-seg"
+                      style={{ width: `${l.percent}%`, background: LANG_COLORS[l.language] ?? "#a1a1aa" }}
+                      title={`${l.language} ${l.percent.toFixed(1)}%`}
+                    />
+                  ))}
+                </div>
+                <div className="lang-legend">
+                  {langs.slice(0, 6).map((l) => (
+                    <span key={l.language} className="lang-item">
+                      <span className="lang-dot" style={{ background: LANG_COLORS[l.language] ?? "#a1a1aa" }} />
+                      {l.language}
+                      <b>{l.percent.toFixed(1)}%</b>
+                    </span>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
         {inspOpen && (

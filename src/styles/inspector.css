@@ -20,11 +20,13 @@
 }
 
 /* ---------- 同步卡：执行层的唯一中枢 ---------- */
+/* 窄窗口时整卡换行，而不是把中间那段文字压成一个字一行（见 .sync-text 的 min-width） */
 .sync-card {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 12px 16px;
   padding: 14px 16px;
 }
 
@@ -58,25 +60,39 @@
 }
 
 .sync-text {
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 200px;
+  /* 这是下限而不是 0：0 会让这段文字被压到几十像素宽，中文逐字换行、整张卡看起来炸了。
+     顶到下限就让三键整体换到下一行（父级 flex-wrap: wrap）。 */
+  min-width: 140px;
 }
 .sync-title {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
   margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .sync-desc {
   font-size: 12px;
   color: var(--fg2);
   line-height: 1.55;
+  /* 分叉提示里有 --ff-only 这类长词，默认的 overflow-wrap 才不会把卡片撑破 */
+  overflow-wrap: anywhere;
 }
 
 .sync-btns {
   display: flex;
   gap: 7px;
-  flex: none;
+  /* 0 1 auto 而不是 none：宽屏下它还是内容宽（靠 margin-left:auto 贴右缘），
+     主区窄到装不下时才收缩到卡片内，配合下面的 wrap 把三个键折成两行，
+     而不是整组溢出右缘。 */
+  flex: 0 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-left: auto;
 }
 .sbtn {
   height: 31px;
@@ -224,7 +240,27 @@
   cursor: not-allowed;
 }
 
-/* ---------- 统计卡：语言构成（原来的通铺页脚收在这里）---------- */
+/* ---------- 统计条：活跃度 + 语言构成，窄列竖排 ----------
+   两张卡挤在一条 176px 的窄列里：宽度不变，主区不会被再挤窄。 */
+.stats-col {
+  flex: none;
+  width: 176px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 12px 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 卡在竖排里统一去掉自己的外边距（由 .stats-col 的 gap 负责） */
+.stats-col .stats-card,
+.stats-col .activity {
+  width: 100%;
+  margin: 0;
+}
+
+/* ---------- 统计卡：语言构成 ---------- */
 .stats-card {
   flex: none;
   width: 176px;
@@ -239,40 +275,78 @@
   font-weight: 600;
   letter-spacing: 0.02em;
 }
-.stats-bar {
-  height: 7px;
-  border-radius: 4px;
-  display: flex;
-  overflow: hidden;
-  gap: 1.5px;
-}
-.stats-seg {
-  height: 100%;
-}
-.stats-legend {
+
+/* ---------- 统计卡：提交活跃度（近 14 天柱状图） ----------
+   14 根柱子挤在统计条的窄列里，宽度靠 flex 均分；日期不逐根标注，
+   靠每根的原生 title 说明是几号、几次提交。 */
+.activity {
+  flex: none;
+  width: 176px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 8px;
+  padding: 12px;
+  margin: 12px 0;
 }
-.stats-item {
+
+.activity-bars {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 10.5px;
-  color: var(--fg2);
+  align-items: flex-end;
+  gap: 3px;
+  height: 44px;
 }
-.stats-item b {
+
+.activity-bar {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+
+/* min-height 3px + 描边色：没有提交的那天也留一道刻度，空槽才看得出是「这天没干活」
+   而不是图没画全（用 --bg3 太浅，在 44px 高的图里几乎看不见） */
+.activity-fill {
+  width: 100%;
+  min-height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: height 0.2s var(--ease);
+}
+
+.activity-bar.has .activity-fill {
+  background: var(--accent);
+}
+
+/* 今天还没提交：给个比空槽重一点的刻度，标出「今天在哪儿」 */
+.activity-bar.today .activity-fill {
+  background: var(--fg3);
+}
+
+.activity-bar.has.today .activity-fill {
+  background: var(--accent);
+}
+
+.activity-total {
   margin-left: auto;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
-  color: var(--fg);
+  color: var(--fg2);
 }
-.stats-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
-  flex: none;
+
+/* 标题里的计数要靠 auto 外边距顶到右端，容器得是 flex 才生效 */
+.activity .stats-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.activity-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--fg3);
 }
 
 /* ---------- 检视抽屉：变更 / 历史 / 定时 / 空间 ---------- */

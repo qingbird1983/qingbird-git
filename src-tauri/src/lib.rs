@@ -69,6 +69,7 @@ pub fn run() {
             commands::commit_push,
             commands::list_changes,
             commands::recent_commits,
+            commands::commit_activity,
             commands::commit_detail,
             commands::commit_patch,
             commands::open_commit_diff_in_terminal,

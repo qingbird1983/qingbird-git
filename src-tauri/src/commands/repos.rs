@@ -324,6 +324,71 @@ pub fn recent_commits(path: String) -> Vec<CommitInfo> {
     .collect()
 }
 
+// ---------- 提交活动（工作区柱状图） ----------
+
+/// 柱状图覆盖的天数。固定值：这个图只回答「最近这一阵子的节奏」，
+/// 做成参数反而让前端多一套分支处理。
+const ACTIVITY_DAYS: u32 = 14;
+
+/// 某一天的提交数
+#[derive(Serialize, Clone, Debug)]
+pub struct ActivityDay {
+    /// YYYY-MM-DD，按**本地时区**（与 recent_commits 的日期一致）
+    pub date: String,
+    pub count: u32,
+}
+
+/// 近 ACTIVITY_DAYS 天的提交活动。
+///
+/// **只返回有提交的日子**，没有提交的日子不在这里——补齐 14 根柱子要算日期，
+/// 那在前端更省事（后端不必引入日期库），日期口径两边一致（都取本地时区）。
+/// 全是空的仓库返回空数组。
+#[tauri::command]
+pub fn commit_activity(path: String) -> Vec<ActivityDay> {
+    if !valid_repo(&path) {
+        return Vec::new();
+    }
+    // --all：柱状图看的是「我在这个仓库干了多少活」，提交落在别的分支上也得算数。
+    // --since 走 git 自己的日期计算，不用我们处理时区与夏令时。
+    let out = run_local(
+        &path,
+        &[
+            "log",
+            "--all",
+            &format!("--since={ACTIVITY_DAYS}.days.ago"),
+            "--date=format-local:%Y-%m-%d",
+            "--pretty=format:%ad",
+        ],
+    );
+    if !out.success {
+        return Vec::new();
+    }
+    bucket_days(&out.stdout)
+}
+
+/// 把 `git log` 的逐行日期分桶成「日期 → 计数」，按日期倒序（新的在前）。
+/// git log 默认按时间倒序输出，这里保持同样顺序，省一次排序。
+fn bucket_days(log_out: &str) -> Vec<ActivityDay> {
+    let mut days: Vec<ActivityDay> = Vec::new();
+    for line in log_out.lines() {
+        let date = line.trim();
+        // --date 固定输出 YYYY-MM-DD；形状不对的行（理论上不该有）直接跳过，
+        // 免得脏数据混进图表
+        let b = date.as_bytes();
+        if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+            continue;
+        }
+        match days.iter_mut().find(|d| d.date == date) {
+            Some(d) => d.count += 1,
+            None => days.push(ActivityDay {
+                date: date.to_string(),
+                count: 1,
+            }),
+        }
+    }
+    days
+}
+
 /// 项目语言构成（类似 GitHub 语言条）：按扩展名统计代码文件字节占比。
 /// 用 `git ls-files -co --exclude-standard` 取文件列表，自动跳过 .gitignore 忽略的文件。
 #[derive(Serialize, Clone)]
@@ -432,5 +497,83 @@ pub fn scan_all(app: tauri::AppHandle) -> Vec<ScanItem> {
             status: read_status(&r.path),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn days_are_bucketed_and_kept_in_git_order() {
+        // git log 默认按时间倒序，这里要保持同样顺序
+        let days = bucket_days("2026-09-28\n2026-09-28\n2026-09-27\n2026-09-28\n2026-09-25\n");
+        let got: Vec<(&str, u32)> = days.iter().map(|d| (d.date.as_str(), d.count)).collect();
+        assert_eq!(got, vec![("2026-09-28", 3), ("2026-09-27", 1), ("2026-09-25", 1)]);
+    }
+
+    #[test]
+    fn blank_or_malformed_lines_are_skipped() {
+        // 空仓库时 git log 什么都不输出；夹杂的噪声行不该变成一根 0 高度的柱子
+        assert!(bucket_days("").is_empty());
+        assert!(bucket_days("\n\n").is_empty());
+        let days = bucket_days("2026-09-28\nnot-a-date\n2026-9-8\n2026-09-28\n");
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].count, 2, "只数格式正确的日期行");
+    }
+
+    /// 端到端跑真 git：这条路径验的是命令参数本身（--since / %ad 格式），
+    /// 纯函数测不出来。
+    #[test]
+    fn activity_of_a_real_repo_counts_todays_commits() {
+        // 会派生 git 子进程：持读锁，避免与持写锁的取消测试互相杀掉对方的 git
+        let _guard = crate::git::GIT_TEST_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root: PathBuf = std::env::temp_dir()
+            .join(format!("qbg-activity-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        fn sh(dir: &Path, args: &[&str]) -> String {
+            let out = crate::git::run_git(
+                &dir.to_string_lossy(),
+                args,
+                None,
+                std::time::Duration::from_secs(20),
+            );
+            assert!(out.success, "git {args:?} 失败：{}", out.stderr.trim());
+            out.stdout.trim().to_string()
+        }
+
+        sh(&root, &["init", "-q", "--initial-branch=main"]);
+        sh(&root, &["config", "user.email", "t@example.com"]);
+        sh(&root, &["config", "user.name", "t"]);
+        sh(&root, &["config", "commit.gpgsign", "false"]);
+        sh(&root, &["config", "core.autocrlf", "false"]);
+
+        // 没有提交的仓库：空数组，前端自己补 14 根 0 高度的柱子
+        assert!(commit_activity(root.to_string_lossy().to_string()).is_empty());
+
+        // 连续三次提交必然落在同一天：断言计数等于 3，不去猜是哪一天
+        for i in 0..3 {
+            std::fs::write(root.join("f.txt"), format!("{i}\n")).unwrap();
+            sh(&root, &["add", "-A"]);
+            sh(&root, &["commit", "-q", "-m", &format!("c{i}")]);
+        }
+        let days = commit_activity(root.to_string_lossy().to_string());
+        assert_eq!(days.len(), 1, "同一天的提交合并成一个桶：{days:?}");
+        assert_eq!(days[0].count, 3);
+        assert_eq!(days[0].date.len(), 10, "YYYY-MM-DD，实际 {:?}", days[0].date);
+
+        // 非仓库目录：安静返回空，不报错
+        let not_repo = root.join("nope");
+        std::fs::create_dir_all(&not_repo).unwrap();
+        assert!(commit_activity(not_repo.to_string_lossy().to_string()).is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
