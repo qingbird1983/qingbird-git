@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import TitleBar from "./components/TitleBar";
+import NavRail from "./components/NavRail";
 import RepoList from "./components/RepoList";
 import RepoPanel from "./components/RepoPanel";
+import Overview from "./components/Overview";
 import SettingsModal from "./components/SettingsModal";
 import CloneModal from "./components/CloneModal";
 import NewRepoModal from "./components/NewRepoModal";
@@ -37,6 +39,7 @@ function App() {
   // 拖宽条可调宽度（SIDEBAR_MIN_W..SIDEBAR_MAX_W）；拖拽中关掉过渡避免跟手延迟。
   const sidebarOpen = useApp((s) => s.sidebarOpen);
   const sidebarWidth = useApp((s) => s.sidebarWidth);
+  const view = useApp((s) => s.view);
   const showSettings = useApp((s) => s.settingsOpen);
   const paletteOpen = useApp((s) => s.paletteOpen);
   const cloneOpen = useApp((s) => s.cloneOpen);
@@ -69,7 +72,11 @@ function App() {
         ? e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k"
           ? "palette"
           : null
-        : resolveHotkey(e, { inInput: focusInInput(), hasRepo: !!s.selected });
+        : resolveHotkey(e, {
+            inInput: focusInInput(),
+            hasRepo: !!s.selected,
+            inReposView: s.view === "repos",
+          });
       if (!action) return;
       // 这些键浏览器/WebView 自带行为（Ctrl T 开新标签页、方向键滚动），
       // 不拦住会先触发默认动作再执行我们的
@@ -155,6 +162,7 @@ function App() {
     <div className="app">
       <TitleBar />
       <div className="app-body">
+        <NavRail />
         <aside
           className={`sidebar${resizing ? " resizing" : ""}`}
           style={{
@@ -175,7 +183,7 @@ function App() {
             onDoubleClick={() => useApp.getState().setSidebarWidth(SIDEBAR_DEFAULT_W)}
           />
         )}
-        <RepoPanel />
+        {view === "overview" ? <Overview /> : <RepoPanel />}
       </div>
       {showSettings && <SettingsModal onClose={useApp.getState().closeSettings} />}
       {cloneOpen && <CloneModal onClose={useApp.getState().closeClone} />}

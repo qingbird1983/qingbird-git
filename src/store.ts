@@ -15,6 +15,9 @@ export interface LogLine {
   kind: "info" | "success" | "error" | "proxy";
 }
 
+/** 工作区的两屏：单仓库主面板 / 跨仓库总览。导航轨的每一颗就是切这个 */
+export type AppView = "repos" | "overview";
+
 /** 代理回退弹窗通知（用时弹出，自动消失） */
 export interface ProxyToast {
   text: string;
@@ -111,6 +114,9 @@ interface AppState {
   closeInit: () => void;
   /** 选文件夹并添加仓库；选中的不是 git 仓库就转去初始化向导（侧栏按钮与 ⌘K 共用这一条路径） */
   addRepoDialog: () => Promise<void>;
+  /** 工作区当前看哪一屏：仓库主面板 / 总览。导航轨、⌘K、点行跳转共用这一个开关 */
+  view: AppView;
+  setView: (v: AppView) => void;
   /** 侧栏宽度（拖宽条可调，clamp 到 SIDEBAR_MIN_W..SIDEBAR_MAX_W；localStorage 记忆） */
   sidebarWidth: number;
   setSidebarWidth: (w: number) => void;
@@ -142,12 +148,17 @@ interface AppState {
   setBusy: (op: string | null) => void;
   setProgress: (p: ProgressEvent | null) => void;
   checkUpdate: () => Promise<void>;
+  /** 拉取当前选中仓库（按钮 / ⌘K / 快捷键都走这里），实质委托给 pullFor */
   pull: (stash: boolean) => Promise<"ok" | "dirty" | "fail">;
+  /** 拉取指定仓库：总览里点某一行时用，免得为了拉一下先把仓库切过来 */
+  pullFor: (path: string, stash: boolean) => Promise<"ok" | "dirty" | "fail">;
   /** 备份并变基到云端（会改写本地历史，动手前后端强制先建备份分支） */
   rebaseFork: (stash: boolean) => Promise<void>;
   /** 撤销上次变基：硬回退到备份分支（界面上需二次确认） */
   undoRebase: () => Promise<void>;
   push: () => Promise<void>;
+  /** 推送指定仓库，与 pullFor 同理 */
+  pushFor: (path: string) => Promise<void>;
   commitPush: (message: string) => Promise<boolean>;
   cloneRepo: (url: string, parentDir: string, netMode?: string) => boolean;
   /** 在仓库目录下后台运行本地命令，输出逐行写入该仓库的日志窗口 */
@@ -205,6 +216,8 @@ export const useApp = create<AppState>((set, get) => ({
   initPath: null,
   openInit: (path) => set({ initPath: path }),
   closeInit: () => set({ initPath: null }),
+  view: "repos",
+  setView: (v) => set({ view: v }),
   sidebarWidth: loadSidebarWidth(),
   setSidebarWidth: (w) => set({ sidebarWidth: saveSidebarWidth(w) }),
 
@@ -447,18 +460,23 @@ export const useApp = create<AppState>((set, get) => ({
 
   pull: async (stash) => {
     const path = get().selected;
+    return path ? get().pullFor(path, stash) : "fail";
+  },
+
+  pullFor: async (path, stash) => {
     if (!path || get().busy || get().cloning) return "fail";
     get().setBusy("正在拉取…");
     const channel = new Channel<ProgressEvent>();
     channel.onmessage = (p) => get().setProgress(p);
     try {
       const r = await api.pull(path, stash, channel);
-      if (r.output.trim()) get().log(r.output.trim());
-      get().log(r.message, r.ok ? "success" : "error");
+      // 日志一律记在这个仓库名下：在总览里拉的是别的仓库，记到"当前选中"会串行
+      if (r.output.trim()) get().log(r.output.trim(), "info", path);
+      get().log(r.message, r.ok ? "success" : "error", path);
       if (r.used_proxy) {
         set({ lastProxy: r.used_proxy });
         get().notifyProxy(r.used_proxy);
-        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy");
+        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy", path);
       }
       if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
       set(forkPatch(path, r));
@@ -466,7 +484,7 @@ export const useApp = create<AppState>((set, get) => ({
         set((s) => ({ changes: { ...s.changes, [path]: r.changes! } }));
         const host = remoteHost(r.status?.remote_url ?? "");
         const src = host === "gitee" ? "Gitee" : host === "github" ? "GitHub" : "云端";
-        get().log(`已从 ${src} 同步 ${r.changes.commits.length} 个新提交`, "success");
+        get().log(`已从 ${src} 同步 ${r.changes.commits.length} 个新提交`, "success", path);
       } else if (r.ok) {
         set((s) => {
           const c = { ...s.changes };
@@ -477,7 +495,7 @@ export const useApp = create<AppState>((set, get) => ({
       if (r.need_stash) return "dirty";
       return r.ok ? "ok" : "fail";
     } catch (e) {
-      get().log(String(e), "error");
+      get().log(String(e), "error", path);
       return "fail";
     } finally {
       get().setBusy(null);
@@ -487,23 +505,27 @@ export const useApp = create<AppState>((set, get) => ({
 
   push: async () => {
     const path = get().selected;
+    if (path) await get().pushFor(path);
+  },
+
+  pushFor: async (path) => {
     if (!path || get().busy || get().cloning) return;
     get().setBusy("正在推送…");
     try {
       const r = await api.push(path);
-      if (r.output.trim()) get().log(r.output.trim());
-      get().log(r.message, r.ok ? "success" : "error");
+      if (r.output.trim()) get().log(r.output.trim(), "info", path);
+      get().log(r.message, r.ok ? "success" : "error", path);
       if (r.used_proxy) {
         set({ lastProxy: r.used_proxy });
         get().notifyProxy(r.used_proxy);
-        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy");
+        get().log(`本次操作已自动通过代理 ${r.used_proxy} 完成`, "proxy", path);
       }
       if (r.status) set((s) => ({ status: { ...s.status, [path]: r.status! } }));
       set(forkPatch(path, r));
       // 变基结果一旦推上去就发布了，再回退只会制造新的分叉
       if (r.ok) set(clearBackup(path));
     } catch (e) {
-      get().log(String(e), "error");
+      get().log(String(e), "error", path);
     } finally {
       get().setBusy(null);
     }

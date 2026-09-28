@@ -359,6 +359,10 @@
   background: var(--accent);
 }
 
+.palette-dot.dot-fork {
+  background: var(--fork);
+}
+
 .palette-dot.dot-idle {
   background: var(--fg3);
 }

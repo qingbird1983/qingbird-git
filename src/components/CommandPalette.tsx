@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../store";
 import { matchCommands, moveSelection, type PaletteCommand } from "../lib/commands";
+import { BUCKET_LABEL, bucketOf } from "../lib/overview";
 import { IconSearch } from "./icons";
 
 interface Item extends PaletteCommand {
@@ -19,23 +20,24 @@ interface Item extends PaletteCommand {
   kind?: "repo";
 }
 
-/** 仓库条目的状态点颜色：按 store 里的状态缓存取，跟侧栏列表口径一致 */
-function repoDot(path: string): string {
-  const st = useApp.getState().status[path];
-  if (!st || !st.is_repo) return "idle";
-  if (st.behind > 0) return "behind";
-  if (st.ahead > 0) return "ahead";
-  return "ok";
+/** 仓库条目的状态点 class：跟侧栏、总览同一套分档，别在这里另判一次 */
+function repoDotClass(path: string): string {
+  const b = bucketOf(useApp.getState().status[path]);
+  if (b === "behind") return "dot-behind";
+  if (b === "ahead") return "dot-ahead";
+  if (b === "fork") return "dot-fork";
+  if (b === "synced") return "dot-ok";
+  return "dot-idle";
 }
 
 /** 仓库条目右侧的状态提示 */
 function repoHint(path: string): string | undefined {
   const st = useApp.getState().status[path];
-  if (!st) return undefined;
-  if (!st.is_repo) return "仓库不可用";
-  if (st.behind > 0) return `落后 ${st.behind}`;
-  if (st.ahead > 0) return `待推送 ${st.ahead}`;
-  return "已同步";
+  const b = bucketOf(st);
+  if (b === "unknown") return undefined;
+  if (b === "behind") return `落后 ${st?.behind ?? 0}`;
+  if (b === "ahead") return `待推送 ${st?.ahead ?? 0}`;
+  return BUCKET_LABEL[b];
 }
 
 export default function CommandPalette() {
@@ -105,6 +107,20 @@ export default function CommandPalette() {
     }
 
     list.push(
+      {
+        id: "view-repos",
+        title: "打开仓库视图",
+        group: "视图",
+        keywords: "repo view workspace 仓库 视图",
+        run: () => s.setView("repos"),
+      },
+      {
+        id: "view-overview",
+        title: "打开总览",
+        group: "视图",
+        keywords: "overview dashboard summary 总览 概览 汇总",
+        run: () => s.setView("overview"),
+      },
       {
         id: "add",
         title: "添加本地仓库",
@@ -250,7 +266,7 @@ export default function CommandPalette() {
                   onClick={() => execute(item)}
                 >
                   {item.kind === "repo" && (
-                    <span className={`palette-dot dot-${repoDot(item.id.slice(5))}`} aria-hidden />
+                    <span className={`palette-dot ${repoDotClass(item.id.slice(5))}`} aria-hidden />
                   )}
                   <span className="palette-item-text">{item.title}</span>
                   {item.hint && <span className="palette-hint">{item.hint}</span>}

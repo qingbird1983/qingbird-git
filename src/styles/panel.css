@@ -100,14 +100,15 @@
   background: var(--warning-wash);
 }
 
+/* 同 .badge-*：落后=琥珀、待推送=青，与同步环和总览环对齐 */
 .chip-behind {
-  color: var(--accent);
-  background: var(--accent-weak);
+  color: var(--warn);
+  background: var(--warn-wash);
 }
 
 .chip-ahead {
-  color: var(--success);
-  background: var(--success-wash);
+  color: var(--accent);
+  background: var(--accent-weak);
 }
 
 /* ---------- 三键操作（胶囊） ---------- */

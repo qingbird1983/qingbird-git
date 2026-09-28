@@ -7,7 +7,8 @@
 
 /* 样式按功能域拆分到 styles/；@import 必须排在所有规则之前，
    导入顺序即级联顺序。inspector.css 放在最后：它定义的是
-   工作区的新结构（同步卡/命令卡/检视抽屉/状态栏），要能覆盖 panel.css。 */
+   工作区的新结构（同步卡/命令卡/检视抽屉/状态栏），要能覆盖 panel.css。
+   overview.css 排在它前面：导航轨与总览自成一套，类名不与别处重叠。 */
 @import "./styles/base.css";
 @import "./styles/titlebar.css";
 @import "./styles/sidebar.css";
@@ -16,4 +17,5 @@
 @import "./styles/commit.css";
 @import "./styles/controls.css";
 @import "./styles/features.css";
+@import "./styles/overview.css";
 @import "./styles/inspector.css";

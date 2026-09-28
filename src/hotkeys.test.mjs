@@ -13,9 +13,11 @@ const ev = (key, mods = {}) => ({
   altKey: false,
   ...mods,
 });
-const typing = { inInput: true, hasRepo: true };
-const idle = { inInput: false, hasRepo: true };
-const noRepo = { inInput: false, hasRepo: false };
+const typing = { inInput: true, hasRepo: true, inReposView: true };
+const idle = { inInput: false, hasRepo: true, inReposView: true };
+const noRepo = { inInput: false, hasRepo: false, inReposView: true };
+/** 总览页：那三个键和 Ctrl T 背后都没有对应的按钮 */
+const overview = { inInput: false, hasRepo: true, inReposView: false };
 
 test("Ctrl K 任何时候都开面板，连输入框里也生效", () => {
   assert.equal(resolveHotkey(ev("k", { ctrlKey: true }), typing), "palette");
@@ -63,6 +65,16 @@ test("没绑定的键返回 null，不误伤正常输入", () => {
   for (const k of ["a", "5", "Enter", "Tab", "Escape", "F5", " "]) {
     assert.equal(resolveHotkey(ev(k), idle), null, `${k} 不该有动作`);
   }
+});
+
+test("总览页上 1/2/3 与 Ctrl T 让位，Ctrl K 与 ↑↓ 照常", () => {
+  for (const k of ["1", "2", "3"]) {
+    assert.equal(resolveHotkey(ev(k), overview), null, `总览页没有 ${k} 这个按钮`);
+  }
+  assert.equal(resolveHotkey(ev("t", { ctrlKey: true }), overview), null);
+  assert.equal(resolveHotkey(ev("k", { ctrlKey: true }), overview), "palette", "面板是全局入口");
+  assert.equal(resolveHotkey(ev("ArrowDown"), overview), "nextRepo", "切仓库在两屏都自然");
+  assert.equal(resolveHotkey(ev("ArrowUp"), overview), "prevRepo");
 });
 
 test("stepRepoIndex：到头停在头，尚未选中时从两端起算", () => {

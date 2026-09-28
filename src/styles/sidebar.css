@@ -320,14 +320,16 @@
   color: var(--warning);
 }
 
+/* 落后=琥珀、待推送=青：与同步环 / ⌘K 状态点 / 总览分布环同一套口径。
+   绿色留给「已同步」——待推送用绿色会让人以为没事了。 */
 .badge-behind {
-  background: var(--accent-weak);
-  color: var(--accent);
+  background: var(--warn-wash);
+  color: var(--warn);
 }
 
 .badge-ahead {
-  background: var(--success-wash);
-  color: var(--success);
+  background: var(--accent-weak);
+  color: var(--accent);
 }
 
 .badge-missing {

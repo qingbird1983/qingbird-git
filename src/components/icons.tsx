@@ -284,6 +284,16 @@ export const IconChart = (p: { size?: number; className?: string }) => (
   </Icon>
 );
 
+/** 总览（导航轨第二格：一屏看完所有仓库有什么要做） */
+export const IconGrid = (p: { size?: number; className?: string }) => (
+  <Icon {...p}>
+    <rect x="3.5" y="3.5" width="7" height="7" rx="1.8" />
+    <rect x="13.5" y="3.5" width="7" height="7" rx="1.8" />
+    <rect x="3.5" y="13.5" width="7" height="7" rx="1.8" />
+    <rect x="13.5" y="13.5" width="7" height="7" rx="1.8" />
+  </Icon>
+);
+
 /** 上/下箭头（日志抽屉收展） */
 export const IconChevronDown = (p: { size?: number; className?: string }) => (
   <Icon {...p}>

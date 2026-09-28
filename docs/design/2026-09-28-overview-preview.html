@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>青鸟 Git · 导航轨 + 总览预览</title>
+<!-- 直接引项目真实样式，看到的就是应用里的效果 -->
+<link rel="stylesheet" href="../../src/theme.css" />
+<link rel="stylesheet" href="../../src/styles/base.css" />
+<link rel="stylesheet" href="../../src/styles/titlebar.css" />
+<link rel="stylesheet" href="../../src/styles/sidebar.css" />
+<link rel="stylesheet" href="../../src/styles/panel.css" />
+<link rel="stylesheet" href="../../src/styles/popover.css" />
+<link rel="stylesheet" href="../../src/styles/commit.css" />
+<link rel="stylesheet" href="../../src/styles/controls.css" />
+<link rel="stylesheet" href="../../src/styles/features.css" />
+<link rel="stylesheet" href="../../src/styles/overview.css" />
+<link rel="stylesheet" href="../../src/styles/inspector.css" />
+<style>
+  /* 仅供预览页定位：模拟窗口，画布之外铺一层底 */
+  body { padding: 0; background: var(--bg3); }
+  .pv-win {
+    display: flex; flex-direction: column;
+    width: 1100px; max-width: 100vw; height: 640px; max-height: 100vh;
+    margin: 0 auto; background: var(--bg); overflow: hidden;
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  .pv-note {
+    position: fixed; left: 12px; bottom: 10px; z-index: 300;
+    font-size: 11px; color: var(--fg2); background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--r-sm); padding: 6px 10px;
+  }
+  .switcher { display: flex; gap: 8px; position: fixed; right: 12px; top: 10px; z-index: 300; }
+  .switcher button {
+    font: inherit; font-size: 11px; padding: 4px 10px; cursor: pointer;
+    background: var(--surface); color: var(--fg2);
+    border: 1px solid var(--border); border-radius: var(--r-pill);
+  }
+  .switcher button.on { background: var(--accent-weak); color: var(--accent); border-color: var(--accent); }
+  /* 仓库视图里的同步卡缩略，只为对比"轨占了 40px 之后主区还剩多少" */
+  .pv-fake { flex: 1; display: flex; flex-direction: column; gap: 12px; padding: 12px; min-width: 0; }
+</style>
+</head>
+<body>
+
+<div class="switcher">
+  <button id="b0" class="on">总览 · 有待处理</button>
+  <button id="b1">总览 · 全同步</button>
+  <button id="b2">总览 · 空列表</button>
+  <button id="b3">仓库视图（看宽度预算）</button>
+  <button id="b-theme">暗色</button>
+</div>
+
+<div class="pv-win">
+  <div class="titlebar">
+    <div class="titlebar-left">
+      <span class="titlebar-brand">青鸟 Git</span>
+    </div>
+  </div>
+
+  <div class="app-body">
+    <nav class="rail">
+      <button class="rail-i" id="r-repos" title="仓库">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="M12 11.5 20 7M12 11.5v9.5M12 11.5 4 7"/></svg>
+      </button>
+      <button class="rail-i" id="r-ov" title="总览">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.8"/></svg>
+      </button>
+      <div class="rail-gap"></div>
+      <button class="rail-i" title="添加已有仓库文件夹">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <button class="rail-i" title="扫描全部仓库状态">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.4 11a8.5 8.5 0 1 0-1.2 5.3"/><path d="M20.4 5.5V11h-5.5"/></svg>
+      </button>
+    </nav>
+
+    <aside class="sidebar" style="width:300px;opacity:1">
+      <div class="panel-clip" style="width:300px">
+        <div class="sidebar-header">
+          <div class="sidebar-title-row"><span class="sidebar-title">仓库</span><span class="sidebar-count">8</span></div>
+        </div>
+        <div class="repo-list" id="sidebar"></div>
+      </div>
+    </aside>
+
+    <main class="panel ov-panel" id="view">
+      <div class="panel-header card">
+        <div class="panel-title">
+          <h2>总览</h2>
+          <span class="panel-path" id="ov-sub"></span>
+        </div>
+      </div>
+      <div class="ov-body">
+        <section class="ov-card card ov-dist">
+          <div class="ov-card-hd">
+            <span class="ov-card-t">状态分布</span>
+            <span class="ov-card-x" id="ov-scan">扫描于 20:31</span>
+          </div>
+          <div class="ov-ring-box">
+            <div class="ov-ring" id="ov-ring" style="width:96px;height:96px">
+              <div class="ov-ring-in"><div class="ov-ring-n" id="ov-n">8</div><div class="ov-ring-l">仓库</div></div>
+            </div>
+          </div>
+          <ul class="ov-legend" id="ov-legend"></ul>
+        </section>
+
+        <section class="ov-card card ov-todo">
+          <div class="ov-card-hd">
+            <span class="ov-card-t">待处理</span>
+            <span class="ov-card-x" id="ov-count"></span>
+          </div>
+          <div id="ov-todo"></div>
+        </section>
+      </div>
+      <div class="status-bar">
+        <span class="sb-dot"></span>
+        <span class="sb-text" id="ov-status">全量扫描于 20:31</span>
+        <button class="sb-log" style="margin-left:auto">重新扫描</button>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="pv-note">导航轨 + 总览预览 · 引的是项目真实 CSS，改 src/styles/overview.css 这里会同步变</div>
+
+<script>
+  const C = { synced: "var(--ok)", behind: "var(--warn)", ahead: "var(--accent)", fork: "var(--fork)", missing: "var(--fg3)", unknown: "var(--line-soft)" };
+  const L = { synced: "已同步", behind: "落后云端", ahead: "待推送", fork: "已分叉", missing: "目录失联", unknown: "待扫描" };
+  const ORDER = ["synced", "behind", "ahead", "fork", "missing", "unknown"];
+
+  // 演示数据。分叉排最前、落后其次，与 src/lib/overview.ts 的排序一致
+  const DATA = {
+    0: [
+      { n: "efo-api", b: "fork", note: "已分叉 · 本地 2 / 云端 3", act: "goto", lab: "查看" },
+      { n: "qingbird-git", b: "behind", note: "落后 3 个提交", act: "pull", lab: "拉取" },
+      { n: "atlas-web", b: "behind", note: "落后 9 个提交", act: "pull", lab: "拉取" },
+      { n: "qingbird-md", b: "ahead", note: "待推送 5 个提交", act: "push", lab: "推送" },
+      { n: "notes", b: "missing", note: "目录不存在或已不是 git 仓库", act: "goto", lab: "查看" },
+      { n: "drafts", b: "synced" },
+      { n: "dotfiles", b: "synced" },
+      { n: "scratch", b: "synced" },
+    ],
+    1: [
+      { n: "qingbird-git", b: "synced" },
+      { n: "atlas-web", b: "synced" },
+      { n: "qingbird-md", b: "synced" },
+      { n: "drafts", b: "synced" },
+      { n: "dotfiles", b: "synced" },
+      { n: "scratch", b: "synced" },
+    ],
+    2: [],
+  };
+
+  function countsOf(rows) {
+    const c = { synced: 0, behind: 0, ahead: 0, fork: 0, missing: 0, unknown: 0 };
+    rows.forEach((r) => c[r.b]++);
+    return c;
+  }
+  function gradient(c, total) {
+    if (!total) return "var(--line-soft)";
+    const segs = []; let acc = 0;
+    const p = (n) => Math.round(n * 100) / 100 + "%";
+    for (const b of ORDER) {
+      if (!c[b]) continue;
+      const from = p((acc / total) * 100); acc += c[b];
+      segs.push(`${C[b]} ${from} ${p((acc / total) * 100)}`);
+    }
+    return `conic-gradient(${segs.join(", ")})`;
+  }
+  const dot = (b) => `<span class="ov-dot" style="background:${C[b]}"></span>`;
+  const ICON_DOWN = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0 4-4m-4 4-4-4"/><path d="M5 19h14"/></svg>';
+  const ICON_UP = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V9m0 0 4 4m-4-4-4 4"/><path d="M5 5h14"/></svg>';
+
+  function renderOverview(key) {
+    const rows = DATA[key];
+    const c = countsOf(rows);
+    const total = rows.length;
+    const todo = rows.filter((r) => ["fork", "behind", "ahead", "missing"].includes(r.b));
+    const commits = rows.reduce((a, r) => a + (r.behind || 0) + (r.ahead || 0), 0);
+
+    document.getElementById("ov-n").textContent = total;
+    document.getElementById("ov-ring").style.background = gradient(c, total);
+    document.getElementById("ov-sub").textContent = total === 0 ? "还没有添加仓库"
+      : `${total} 个仓库 · ${todo.length ? todo.length + " 项待处理" : "全部已同步"}` + (commits ? ` · 相差 ${commits} 个提交` : "");
+    document.getElementById("ov-count").textContent = todo.length + " 项";
+    document.getElementById("ov-status").textContent = total ? "全量扫描于 20:31" : "尚未扫描";
+    document.getElementById("ov-scan").style.visibility = total ? "visible" : "hidden";
+
+    document.getElementById("ov-legend").innerHTML = ORDER.filter((b) => c[b]).map((b) =>
+      `<li>${dot(b)}<span class="ov-legend-l">${L[b]}</span><b class="ov-legend-n">${c[b]}</b></li>`
+    ).join("") || '<div class="ov-empty">添加仓库后这里会显示各状态占比</div>';
+
+    document.getElementById("ov-todo").innerHTML = todo.length
+      ? '<div class="ov-rows">' + todo.map((r) =>
+          `<div class="ov-row${r.n === "qingbird-git" ? " on" : ""}">
+            ${dot(r.b)}<span class="ov-name">${r.n}</span><span class="ov-note">${r.note}</span>
+            <button class="ov-act${r.act === "pull" ? " acc" : ""}">${r.act === "pull" ? ICON_DOWN : r.act === "push" ? ICON_UP : ""}${r.lab}</button>
+          </div>`).join("") + "</div>"
+      : `<div class="ov-done">${total ? '<span class="ov-done-tick">✓</span>' : ""}${total === 0 ? "还没有仓库" : "所有仓库都是最新状态"}</div>`;
+
+    renderSidebar(rows);
+  }
+
+  function renderSidebar(rows) {
+    const all = rows.length ? rows : [
+      { n: "qingbird-git", b: "synced" }, { n: "atlas-web", b: "synced" },
+      { n: "qingbird-md", b: "synced" }, { n: "drafts", b: "synced" },
+    ];
+    document.getElementById("sidebar").innerHTML = all.map((r) => {
+      const badge = r.b === "behind" ? '<span class="badge badge-behind">↓3</span>'
+        : r.b === "ahead" ? '<span class="badge badge-ahead">↑5</span>'
+        : r.b === "fork" ? '<span class="badge badge-behind">↓3</span>'
+        : r.b === "missing" ? '<span class="badge badge-missing">失联</span>' : "";
+      return `<div class="repo-item${r.n === "qingbird-git" ? " active" : ""}">
+        <span class="repo-lead"></span>
+        <div class="repo-info"><div class="repo-item-main">
+          <span class="repo-name">${r.n}</span>
+          <span class="repo-badges">${badge}</span>
+        </div></div>
+      </div>`;
+    }).join("");
+  }
+
+  // 仓库视图：只为量一下加了 40px 轨之后主区还剩多宽。
+  // 用整块 outerHTML 换掉总览，切回去时把备份的字符串还回来再重渲染。
+  const REPOS_HTML = `<main class="panel" id="view">
+        <div class="panel-header card"><div class="panel-title"><h2>qingbird-git</h2>
+          <span class="panel-path">F:/AIwork/qingbird-git</span></div></div>
+        <div class="work-row">
+          <div class="work-main">
+            <div class="sync-card card">
+              <div class="ring" style="width:104px;height:104px;flex:none">
+                <div class="ring-c"><div class="ring-v" style="color:var(--warn)">↓3</div><div class="ring-l">待拉取</div></div>
+              </div>
+              <div class="sync-text"><div class="sync-title">云端有 3 个新提交</div>
+                <div class="sync-desc">拉取固定带 --ff-only，遇到分叉只会停下报错。</div></div>
+              <div class="sync-btns"><button class="sbtn acc">拉取</button>
+                <button class="sbtn">推送</button><button class="sbtn ghost">检测</button></div>
+            </div>
+            <div class="cmd-card card"><div class="cmd-head"><span>命令</span></div>
+              <div class="cmd-list"><div class="cmd-row"><span class="cmd-name plain">跑测试</span>
+              <span class="cmd-text">pnpm test:web</span></div></div></div>
+          </div>
+          <div class="stats-col"><div class="stats-card card"><div class="stats-head">语言构成</div>
+            <div class="lang-bar"><span class="lang-seg" style="width:70%;background:#3178c6"></span>
+            <span class="lang-seg" style="width:20%;background:#dea584"></span>
+            <span class="lang-seg" style="width:10%;background:#e34c26"></span></div>
+            <div class="lang-legend"><span class="lang-item"><span class="lang-dot" style="background:#3178c6"></span>TypeScript<b>70.0%</b></span></div>
+          </div></div>
+          <div class="inspector"><div class="insp-hd"><div class="itab on">变更<span class="n">2</span></div>
+            <div class="itab">历史</div><div class="itab">定时</div><div class="itab">空间</div></div>
+            <div class="insp-body"><div class="filerow"><span class="fp">src/store.ts</span></div></div></div>
+        </div>
+        <div class="status-bar"><span class="sb-dot"></span><span class="sb-text">就绪</span></div>
+      </main>`;
+
+  // 初始的总览结构先存一份：切到仓库视图时它会被整个换掉
+  const OV_HTML = document.getElementById("view").outerHTML;
+
+  function show(i) {
+    for (let k = 0; k <= 3; k++) document.getElementById("b" + k).classList.toggle("on", k === i);
+    if (i === 3) {
+      document.getElementById("view").outerHTML = REPOS_HTML;
+      document.getElementById("r-repos").classList.add("on");
+      document.getElementById("r-ov").classList.remove("on");
+    } else {
+      document.getElementById("view").outerHTML = OV_HTML;
+      document.getElementById("r-ov").classList.add("on");
+      document.getElementById("r-repos").classList.remove("on");
+      renderOverview(i);
+    }
+  }
+
+  function theme() {
+    const cur = document.documentElement.dataset.theme;
+    document.documentElement.dataset.theme = cur === "dark" ? "light" : "dark";
+  }
+
+  // 用 addEventListener 接线而不是内联 onclick：预览页要能在各种宿主里跑，
+  // 内联属性在部分嵌入环境会被剥掉。
+  ["b0", "b1", "b2", "b3"].forEach((id, i) =>
+    document.getElementById(id).addEventListener("click", () => show(i)),
+  );
+  document.getElementById("b-theme").addEventListener("click", theme);
+  document.getElementById("r-repos").addEventListener("click", () => show(3));
+  document.getElementById("r-ov").addEventListener("click", () => show(0));
+
+  // URL 直达：?theme=dark&view=0..3，方便在不方便点击的环境里直接看某一态
+  const q = new URLSearchParams(location.search);
+  if (q.get("theme") === "dark") document.documentElement.dataset.theme = "dark";
+  const v = q.get("view");
+  if (v !== null) show(Number(v));
+  else renderOverview(0);
+</script>
+</body>
+</html>

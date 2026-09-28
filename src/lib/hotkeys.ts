@@ -26,6 +26,12 @@ export interface HotkeyCtx {
   inInput: boolean;
   /** 当前有选中仓库：仓库相关的键位才有意义 */
   hasRepo: boolean;
+  /**
+   * 当前是不是仓库主面板。总览页上没有那三个键，
+   * 凭空按 1 就在另一个仓库上拉取会让人以为按错了——所以这里让位。
+   * Ctrl K 与 ↑↓ 不受限制：前者是全局入口，后者切仓库在两屏都自然。
+   */
+  inReposView: boolean;
 }
 
 /** 三键的数字键 → 动作，顺序必须和同步卡上按钮从左到右一致（拉取 / 推送 / 检测） */
@@ -44,7 +50,7 @@ export function resolveHotkey(e: HotkeyEvent, ctx: HotkeyCtx): HotkeyAction | nu
   if (ctx.inInput) return null;
 
   if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "t") {
-    return ctx.hasRepo ? "terminal" : null;
+    return ctx.hasRepo && ctx.inReposView ? "terminal" : null;
   }
 
   // 下面这些都要求"光秃秃"的一个键：Shift+1 是 !，Alt+1 在某些布局下另有含义
@@ -52,7 +58,7 @@ export function resolveHotkey(e: HotkeyEvent, ctx: HotkeyCtx): HotkeyAction | nu
   if (!ctx.hasRepo) return null;
 
   const digit = DIGIT_ACTIONS[e.key];
-  if (digit) return digit;
+  if (digit) return ctx.inReposView ? digit : null;
 
   if (e.key === "ArrowUp") return "prevRepo";
   if (e.key === "ArrowDown") return "nextRepo";
