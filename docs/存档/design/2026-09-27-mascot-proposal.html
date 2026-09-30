@@ -1,0 +1,443 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>青鸟 Git · 吉祥物 logo 推演</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+:root{
+  --paper:#f7f5f0; --card:#fff; --line:#e9e3d6; --line-soft:#f0ece3;
+  --ink:#14171e; --ink2:#3a4256; --muted:#7c7a72;
+  --primary:#2f6f5e; --primary-wash:rgba(47,111,94,.09);
+  --p-canvas:#FAFAFA; --p-surface:#fff; --p-sunken:#F4F4F5;
+  --p-line:#E4E4E7; --p-line-soft:#EFEFF1;
+  --p-ink:#18181B; --p-ink2:#52525B; --p-ink3:#A1A1AA;
+  --p-accent:#0D9488;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font-family:"Outfit","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:15px;line-height:1.62;-webkit-font-smoothing:antialiased}
+.mono{font-family:"JetBrains Mono",Consolas,monospace}
+.wrap{max-width:1080px;margin:0 auto;padding:0 28px 90px}
+.hero{padding:56px 0 32px;position:relative;overflow:hidden}
+.hero::before{content:"";position:absolute;width:460px;height:460px;right:-180px;top:-200px;
+  border-radius:50%;pointer-events:none;
+  background:radial-gradient(circle,rgba(47,111,94,.07),transparent 70%)}
+.eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--primary);font-weight:500;margin-bottom:18px}
+.eyebrow::before{content:"";width:22px;height:1px;background:var(--primary);opacity:.5}
+h1{font-family:"DM Serif Display","Songti SC",serif;font-weight:400;
+  font-size:clamp(28px,4.2vw,40px);line-height:1.26;letter-spacing:-.01em;margin:0 0 16px;max-width:19em;position:relative}
+h1 em{font-style:normal;color:var(--primary)}
+.lede{font-size:16px;color:var(--ink2);max-width:38em;margin:0 0 28px;position:relative}
+.lede b{color:var(--ink);font-weight:600}
+section{padding-top:54px}
+.sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:8px}
+.sec-n{font-family:"DM Serif Display",serif;font-size:13px;color:var(--primary);
+  border:1px solid rgba(47,111,94,.3);border-radius:50%;width:26px;height:26px;
+  display:grid;place-items:center;flex:none;transform:translateY(-3px)}
+h2{font-family:"DM Serif Display","Songti SC",serif;font-weight:400;font-size:25px;
+  letter-spacing:-.01em;margin:0;line-height:1.3}
+h3{font-size:16.5px;margin:0 0 8px;font-weight:600;letter-spacing:-.005em}
+.sec-sub{color:var(--muted);font-size:14.5px;margin:0 0 26px;max-width:47em;padding-left:40px}
+p{margin:0 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media(max-width:860px){.g2,.g3{grid-template-columns:1fr}}
+code{font-family:"JetBrains Mono",monospace;font-size:.92em;background:var(--p-sunken);
+  padding:1px 5px;border-radius:4px;color:var(--ink2)}
+
+/* 机制卡 */
+.mech{display:flex;gap:14px;padding:16px 0;border-top:1px solid var(--line)}
+.mech:first-of-type{border-top:none}
+.mech-n{flex:none;width:28px;height:28px;border-radius:9px;background:var(--ink);color:#fff;
+  font-size:12.5px;font-weight:600;display:grid;place-items:center;margin-top:2px}
+.mech-d{flex:1}
+.mech-d p{margin:0;font-size:13.5px;color:var(--ink2)}
+.demo{width:76px;height:76px;flex:none;display:grid;place-items:center;
+  background:var(--p-sunken);border-radius:11px;color:var(--p-ink)}
+.demo svg{width:52px;height:52px;display:block}
+
+/* 方案卡 */
+.opt{background:var(--card);border:1px solid var(--line);border-radius:16px;overflow:hidden;
+  display:flex;flex-direction:column}
+.opt-hd{padding:17px 19px 13px;border-bottom:1px solid var(--line-soft);display:flex;
+  align-items:flex-start;gap:12px}
+.opt-badge{width:30px;height:30px;border-radius:9px;background:var(--p-sunken);flex:none;
+  display:grid;place-items:center;font-family:"DM Serif Display",serif;font-size:14px;color:var(--p-ink2)}
+.opt-badge.pick{background:var(--primary);color:#fff}
+.opt-t{font-size:16px;font-weight:600;letter-spacing:-.01em;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.opt-sub{font-size:12.5px;color:var(--muted);margin-top:2px}
+.pill{font-size:10.5px;padding:2px 8px;border-radius:99px;background:var(--primary-wash);
+  color:var(--primary);font-weight:600}
+.stage{flex:1;display:grid;place-items:center;padding:26px 18px;
+  background:linear-gradient(0deg,var(--p-sunken),var(--p-surface))}
+.stage svg.big{width:168px;height:168px;display:block;color:var(--p-ink)}
+.opt-bd{padding:15px 19px 19px}
+.steps{display:flex;align-items:flex-end;gap:12px;padding:12px 0 4px;flex-wrap:wrap}
+.size{text-align:center}
+.size-box{background:var(--p-surface);border:1px solid var(--p-line);border-radius:9px;
+  display:grid;place-items:center;margin-bottom:5px}
+.size-box.on-dark{background:var(--p-ink);border-color:var(--p-ink)}
+.size-box.on-accent{background:var(--p-accent);border-color:var(--p-accent)}
+.size-l{font-size:10px;color:var(--muted);font-family:"JetBrains Mono",monospace}
+.why{font-size:13.5px;color:var(--ink2);margin:0}
+.why b{color:var(--ink)}
+
+/* 场景 */
+.tb{background:var(--p-surface);border:1px solid var(--p-line);border-radius:9px;height:40px;
+  display:flex;align-items:center;gap:9px;padding:0 12px;margin-top:12px}
+.tb-logo{width:20px;height:20px;flex:none;color:var(--p-accent)}
+.tb-name{font-size:13px;font-weight:600}
+.tb-w{margin-left:auto;display:flex;gap:3px}
+.tb-w i{width:26px;height:22px;border-radius:5px;background:var(--p-sunken);display:block}
+.tray{display:flex;gap:12px;align-items:flex-end;padding:14px 0 2px;flex-wrap:wrap}
+.tray-i{text-align:center}
+.tray-box{background:var(--p-sunken);border:1px solid var(--p-line);border-radius:8px;
+  display:grid;place-items:center;margin-bottom:5px}
+.tray-l{font-size:10px;color:var(--muted);font-family:"JetBrains Mono",monospace}
+.appicon{display:grid;place-items:center;border-radius:22%;background:var(--p-accent);color:#fff}
+.railprev{display:flex;flex-direction:column;gap:4px;padding:8px 6px;background:var(--p-surface);
+  border:1px solid var(--p-line);border-radius:9px;width:56px}
+.railprev div{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;color:var(--p-ink3)}
+.railprev div.on{background:rgba(13,148,136,.10);color:var(--p-accent)}
+.railprev svg{width:20px;height:20px}
+
+/* 流派对比 */
+.vs{display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--line);
+  border-radius:12px;overflow:hidden}
+.vs>div{padding:18px}
+.vs>div:first-child{border-right:1px solid var(--line)}
+.vs-h{font-size:13px;font-weight:600;letter-spacing:.02em;margin-bottom:9px;
+  display:flex;align-items:center;gap:7px}
+.vs-h i{width:8px;height:8px;border-radius:2px;display:block}
+.vs p{font-size:13px;color:var(--ink2);margin:0 0 7px}
+
+.ask{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin-bottom:14px}
+.ask-n{font-family:"DM Serif Display",serif;font-size:12px;color:#fff;background:var(--ink);
+  width:20px;height:20px;border-radius:50%;display:grid;place-items:center;margin-bottom:12px}
+.ask p{color:var(--ink2);font-size:13.5px;margin:0}
+.rec{display:inline-block;margin-top:11px;font-size:12px;padding:3px 10px;border-radius:99px;
+  background:var(--primary-wash);color:var(--primary);font-weight:500}
+.note{font-size:12.5px;color:var(--muted);margin-top:12px;padding-left:14px;
+  border-left:2px solid var(--line);line-height:1.6}
+.foot{margin-top:60px;padding-top:22px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+
+<!-- ============ 图标定义：青鸟剪影（三个方案共用主体） ============ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <!-- 青鸟（正面·吉祥物）：圆脸 + 三瓣羽冠 + 三根分叉尾羽 -->
+  <g id="bird-body">
+    <path d="M8.6 7 15.4 7 13.6 9.6 10.4 9.6Z"/>
+    <circle cx="7.6" cy="5.6" r="2.1"/>
+    <circle cx="12" cy="4.2" r="2.3"/>
+    <circle cx="16.4" cy="5.6" r="2.1"/>
+    <circle cx="12" cy="10.6" r="4.9"/>
+  </g>
+  <g id="bird-tails" fill="none" stroke="currentColor" stroke-linecap="round">
+    <path d="M12 15.3V20.1" stroke-width="2.5"/>
+    <path d="M9.6 14.9C7.8 17.5 6 19.5 3.8 20.8" stroke-width="2.1"/>
+    <path d="M14.4 14.9C16.2 17.5 18 19.5 20.2 20.8" stroke-width="2.1"/>
+  </g>
+  <g id="bird-tips">
+    <circle cx="12" cy="21.1" r="1.4"/>
+    <circle cx="3.4" cy="21.2" r="1.2"/>
+    <circle cx="20.6" cy="21.2" r="1.2"/>
+  </g>
+  <g id="bird-eyes-neg"><circle cx="9.9" cy="9.6" r="1.35"/><circle cx="14.1" cy="9.6" r="1.35"/></g>
+
+  <!-- 青鸟（侧面 · 斜向右上飞）：头 + 喙 + 楔形身体 + 后掠翅 + 分叉双尾 -->
+  <g id="side-body">
+    <path d="M8.8 9.8C11.2 8 14.6 8.4 17.4 10.6C20 12.6 21 15 19.4 16.4C17.4 18.2 13.4 17 10.6 14.4C8.6 12.4 7.4 11 8.8 9.8Z"/>
+    <circle cx="6.8" cy="9.6" r="3.8"/>
+    <path d="M3.6 8.4 0.2 10.4 4.2 12.4Z"/>
+    <path d="M12 9.2C14.8 6.4 18.4 5 21.8 5C19 8.2 15.6 10 12.2 10.8Z"/>
+    <path d="M18.4 14.2 23.2 11.4 19.8 16.2Z"/>
+    <path d="M19.2 16 23.4 19.2 17.8 17.4Z"/>
+  </g>
+  <g id="side-eye"><circle cx="5.6" cy="8.6" r="1.2"/></g>
+</defs></svg>
+
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">青鸟 Git · 吉祥物方向</div>
+  <h1>从猫头身上，<em>拆三条手法</em></h1>
+  <p class="lede">
+    Octocat 之所以耐看，跟"猫"关系不大——它厉害在三个可复用的构造：
+    <b>单色封闭剪影</b>、<b>用负空间画五官</b>、<b>一个现实中不存在的拼接</b>。
+    这三条跟物种无关，换成鸟照样成立。
+    下面是用这套手法做的「青鸟」推演稿，形态、曲线、内部结构全部是新的，
+    <b>不临摹 Octocat 的轮廓</b>。
+  </p>
+</header>
+
+<!-- ============ 1 手法拆解 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">1</div><h2>借哪三样，不借哪一样</h2></div>
+  <p class="sec-sub">GitHub 那套 logo 真正值钱的是构造方法，不是猫脸。把这三条抽出来，物种可以随便换。</p>
+
+  <div class="g2">
+    <div class="card">
+      <div class="mech">
+        <div class="demo">
+          <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8.4"/><circle cx="12" cy="12" r="4.6" fill="#fff"/></svg>
+        </div>
+        <div class="mech-d">
+          <h3>① 单色封闭剪影</h3>
+          <p>一整块连续实心，零描边、零渐变、零内部线条。所以它能塞进 favicon、托盘、开机图标而不糊。</p>
+        </div>
+      </div>
+      <div class="mech">
+        <div class="demo">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="11" r="7" fill="currentColor"/><circle cx="9.4" cy="10" r="1.5" fill="#F4F4F5"/><circle cx="14.6" cy="10" r="1.5" fill="#F4F4F5"/></svg>
+        </div>
+        <div class="mech-d">
+          <h3>② 用负空间画五官</h3>
+          <p>眼睛不是"画上去的黑点"，是把实心剪影<b>挖掉</b>的两个洞。这让它在任何底色上都成立——底色自动成为眼睛的颜色。</p>
+        </div>
+      </div>
+      <div class="mech">
+        <div class="demo">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 15c0-5 4-8 9-8s9 3 9 8c0 2-1 3-2 3s-2-1-2-3v-2c-1.5 1-3 1.5-5 1.5s-3.5-.5-5-1.5v2c0 2-1 3-2 3s-2-1-2-3Z"/><circle cx="9" cy="10" r="1.3" fill="#F4F4F5"/><circle cx="15" cy="10" r="1.3" fill="#F4F4F5"/></svg>
+        </div>
+        <div class="mech-d">
+          <h3>③ 不存在的东西</h3>
+          <p>猫 + 章鱼是自然界没有的拼接，所以有记忆点。青鸟这边对应的拼接是<b>鸟 + 提交树</b>——尾羽分叉成 git 分支的那一笔。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="background:var(--p-sunken)">
+      <h3>不借的：Octocat 的具体轮廓</h3>
+      <p class="why" style="font-size:13.5px">
+        Invertocat 是 GitHub 的注册商标，Simon Oxley 的原始形象也是受版权保护的商业插画。
+        这份稿子只沿用<b>上面三条构造方法</b>，不复制它的耳朵形状、触须排布、脸型比例，
+        也不使用 GitHub 的近黑色 <code>#181717</code>。青鸟的配色走界面主色 <code>#0D9488</code>。
+      </p>
+      <p class="why" style="font-size:13.5px;margin-top:12px">
+        顺带说一句来源：Octocat 最早的原型是 Simon Oxley 2008 年卖给 GitHub 的 stock art，
+        2013 年品牌刷新时 GitHub 把它简化成了现在这个扁平单色的 Invertocat。
+        这次演化思路跟那次刷新是同一个路数——<b>把插画压成符号</b>。
+      </p>
+      <div class="note" style="margin-top:16px">
+        稿中形态是按构造逻辑推演的几何稿，曲线还需要一轮美术细化才能定稿。
+        这不影响方向判断——先定方向，曲线后面再磨。
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 2 三个方案 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">2</div><h2>三个青鸟方案</h2></div>
+  <p class="sec-sub">同一个青鸟骨架，三种"框法"与"负空间用法"：</p>
+
+  <div class="g3" style="align-items:stretch">
+
+    <!-- D -->
+    <div class="opt">
+      <div class="opt-hd">
+        <div class="opt-badge pick">D</div>
+        <div>
+          <div class="opt-t">负形青鸟 <span class="pill">推荐</span></div>
+          <div class="opt-sub">Invertocat 式 · 圆角方里一只白鸟</div>
+        </div>
+      </div>
+      <div class="stage">
+        <svg class="big" viewBox="0 0 24 24">
+          <rect x="0" y="0" width="24" height="24" rx="5.6" fill="currentColor"/>
+          <g fill="#fff"><use href="#bird-body"/></g>
+          <use href="#bird-tails" style="color:#fff"/>
+          <g fill="#fff"><use href="#bird-tips"/></g>
+          <g fill="#18181B"><use href="#bird-eyes-neg"/></g>
+        </svg>
+      </div>
+      <div class="opt-bd">
+        <div class="steps">
+          <div class="size"><div class="size-box" style="width:84px;height:84px"><svg width="68" height="68" viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#F4F4F5"><use href="#bird-body"/></g><use href="#bird-tails" style="color:#F4F4F5"/><g fill="#F4F4F5"><use href="#bird-tips"/></g><g fill="#18181B"><use href="#bird-eyes-neg"/></g></svg></div><span class="size-l">68</span></div>
+          <div class="size"><div class="size-box" style="width:56px;height:56px"><svg width="44" height="44" viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#F4F4F5"><use href="#bird-body"/></g><use href="#bird-tails" style="color:#F4F4F5"/><g fill="#F4F4F5"><use href="#bird-tips"/></g><g fill="#18181B"><use href="#bird-eyes-neg"/></g></svg></div><span class="size-l">44</span></div>
+          <div class="size"><div class="size-box" style="width:36px;height:36px"><svg width="28" height="28" viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#F4F4F5"><use href="#bird-body"/></g><use href="#bird-tails" style="color:#F4F4F5"/><g fill="#F4F4F5"><use href="#bird-tips"/></g><g fill="#18181B"><use href="#bird-eyes-neg"/></g></svg></div><span class="size-l">28</span></div>
+          <div class="size"><div class="size-box" style="width:26px;height:26px"><svg width="20" height="20" viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#F4F4F5"><use href="#bird-body"/></g><use href="#bird-tails" style="color:#F4F4F5"/><g fill="#F4F4F5"><use href="#bird-tips"/></g><g fill="#18181B"><use href="#bird-eyes-neg"/></g></svg></div><span class="size-l">20 托盘</span></div>
+          <div class="size"><div class="size-box on-dark" style="width:26px;height:26px"><svg width="20" height="20" viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="#fff"/><g fill="#18181B"><use href="#bird-body"/></g><use href="#bird-tails" style="color:#18181B"/><g fill="#18181B"><use href="#bird-tips"/></g><g fill="#fff"><use href="#bird-eyes-neg"/></g></svg></div><span class="size-l">20 反白</span></div>
+        </div>
+        <p class="why" style="margin-top:12px"><b>有个"底"</b>，所以在任何背景、任何尺寸下轮廓都立得住——favicon、任务栏、NSIS 安装图标最需要这个。眼睛用底色反挖，得到一只白鸟黑眼，跟 Invertocat 的黑猫白眼是同一套机制、不同气质。</p>
+      </div>
+    </div>
+
+    <!-- E -->
+    <div class="opt">
+      <div class="opt-hd">
+        <div class="opt-badge">E</div>
+        <div>
+          <div class="opt-t">正形青鸟</div>
+          <div class="opt-sub">Octocat 本体式 · 透明底实心剪影</div>
+        </div>
+      </div>
+      <div class="stage">
+        <svg class="big" viewBox="0 0 24 24">
+          <g fill="currentColor">
+            <use href="#bird-body"/><use href="#bird-tips"/>
+          </g>
+          <use href="#bird-tails"/>
+          <g fill="#F4F4F5"><use href="#bird-eyes-neg"/></g>
+        </svg>
+      </div>
+      <div class="opt-bd">
+        <div class="steps">
+          <div class="size"><div class="size-box" style="width:84px;height:84px"><svg width="68" height="68" viewBox="0 0 24 24" style="color:var(--p-ink)"><g fill="currentColor"><use href="#bird-body"/><use href="#bird-tips"/></g><use href="#bird-tails"/><g fill="#fff"><use href="#bird-eyes-neg"/></g></svg></div><span class="size-l">68</span></div>
+          <div class="size"><div class="size-box" style="width:56px;height:56px"><svg width="44" height="44" viewBox="0 0 24 24" style="color:var(--p-ink)"><g fill="currentColor"><use href="#bird-body"/><use href="#bird-tips"/></g><use href="#bird-tails"/><g fill="#fff"><use href="#bird-eyes-neg"/></g></svg></div><span class="size-l">44</span></div>
+          <div class="size"><div class="size-box" style="width:36px;height:36px"><svg width="28" height="28" viewBox="0 0 24 24" style="color:var(--p-ink)"><g fill="currentColor"><use href="#bird-body"/><use href="#bird-tips"/></g><use href="#bird-tails"/><g fill="#fff"><use href="#bird-eyes-neg"/></g></svg></div><span class="size-l">28</span></div>
+          <div class="size"><div class="size-box" style="width:26px;height:26px"><svg width="20" height="20" viewBox="0 0 24 24" style="color:var(--p-ink)"><g fill="currentColor"><use href="#bird-body"/><use href="#bird-tips"/></g><use href="#bird-tails"/><g fill="#fff"><use href="#bird-eyes-neg"/></g></svg></div><span class="size-l">20</span></div>
+          <div class="size"><div class="size-box on-dark" style="width:26px;height:26px"><svg width="20" height="20" viewBox="0 0 24 24" style="color:#fff"><g fill="currentColor"><use href="#bird-body"/><use href="#bird-tips"/></g><use href="#bird-tails"/><g fill="#18181B"><use href="#bird-eyes-neg"/></g></svg></div><span class="size-l">20 反白</span></div>
+        </div>
+        <p class="why" style="margin-top:12px">没有外框，<b>更像一个角色而不是一个图标</b>——适合放空态、关于页、启动动画。缺点是纯剪影没有边界，小尺寸下会散，而且必须靠底色反挖眼睛，没法直接印在花底上。</p>
+      </div>
+    </div>
+
+    <!-- G -->
+    <div class="opt">
+      <div class="opt-hd">
+        <div class="opt-badge">G</div>
+        <div>
+          <div class="opt-t">侧飞青鸟</div>
+          <div class="opt-sub">斜向上 · 喙与双尾是小尺寸下的识别锚点</div>
+        </div>
+      </div>
+      <div class="stage">
+        <svg class="big" viewBox="0 0 24 24">
+          <rect x="0" y="0" width="24" height="24" rx="5.6" fill="currentColor"/>
+          <g fill="#fff"><use href="#side-body"/></g>
+          <circle cx="5.6" cy="8.6" r="1.2" fill="#18181B"/>
+        </svg>
+      </div>
+      <div class="opt-bd">
+        <div class="steps">
+          <div class="size"><div class="size-box" style="width:84px;height:84px"><svg width="68" height="68" viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#F4F4F5"><use href="#side-body"/></g><circle cx="5.6" cy="8.6" r="1.2" fill="#18181B"/></svg></div><span class="size-l">68</span></div>
+          <div class="size"><div class="size-box" style="width:56px;height:56px"><svg width="44" height="44" viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#F4F4F5"><use href="#side-body"/></g><circle cx="5.6" cy="8.6" r="1.2" fill="#18181B"/></svg></div><span class="size-l">44</span></div>
+          <div class="size"><div class="size-box" style="width:36px;height:36px"><svg width="28" height="28" viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#F4F4F5"><use href="#side-body"/></g><circle cx="5.6" cy="8.6" r="1.2" fill="#18181B"/></svg></div><span class="size-l">28</span></div>
+          <div class="size"><div class="size-box" style="width:26px;height:26px"><svg width="20" height="20" viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#F4F4F5"><use href="#side-body"/></g><circle cx="5.6" cy="8.6" r="1.2" fill="#18181B"/></svg></div><span class="size-l">20 托盘</span></div>
+          <div class="size"><div class="size-box on-dark" style="width:26px;height:26px"><svg width="20" height="20" viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="#fff"/><g fill="#18181B"><use href="#side-body"/></g><circle cx="5.6" cy="8.6" r="1.2" fill="#fff"/></svg></div><span class="size-l">20 反白</span></div>
+        </div>
+        <p class="why" style="margin-top:12px"><b>喙和分叉双尾是最硬的识别锚点</b>——正面版的冠羽和喙挤在一起会糊，侧面版把这两个特征甩到轮廓外缘，缩到 20px 依然读得出"这是一只朝右上飞的鸟"。双尾同时是 git 分支，和尾巴的物理形态重合。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 3 落地 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">3</div><h2>放进界面</h2></div>
+  <p class="sec-sub">吉祥物路线的隐藏收益：它不只当 logo，还能长出一整套资产。</p>
+
+  <div class="g2">
+    <div class="card">
+      <h3>主界面里的克制用法</h3>
+      <div class="tb">
+        <span class="tb-logo">
+          <svg viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#fff"><use href="#bird-body"/></g><use href="#bird-tails" style="color:#fff"/><g fill="#fff"><use href="#bird-tips"/></g></svg>
+        </span>
+        <span class="tb-name">青鸟 Git</span>
+        <div class="tb-w"><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div style="display:flex;gap:16px;margin-top:14px;align-items:flex-start">
+        <div class="railprev">
+          <div class="on">
+            <svg viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#fff"><use href="#bird-body"/></g><use href="#bird-tails" style="color:#fff"/><g fill="#fff"><use href="#bird-tips"/></g></svg>
+          </div>
+          <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg></div>
+          <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 12h-4l-3 8-6-16-3 8H2"/></svg></div>
+        </div>
+        <p class="why" style="font-size:13px;align-self:center">
+          标题栏 20px、导航轨 34px 都用 <b>D 的负形版</b>。
+          真正的吉祥物形象（E 或 F）只出现在<b>空态</b>和<b>关于页</b>——
+          比如「还没有仓库」那一屏，让一只青鸟站在空列表上。
+          界面里到处贴吉祥物会立刻变廉价，克制地用反而是彩蛋。
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>托盘与安装图标</h3>
+      <div class="tray">
+        <div class="tray-i"><div class="tray-box" style="width:38px;height:38px"><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--p-ink)"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#F4F4F5"><use href="#bird-body"/></g><use href="#bird-tails" style="color:#F4F4F5"/><g fill="#F4F4F5"><use href="#bird-tips"/></g></svg></div><span class="tray-l">托盘 16</span></div>
+        <div class="tray-i"><div class="tray-box" style="width:46px;height:46px"><svg width="24" height="24" viewBox="0 0 24 24" style="color:var(--p-ink)"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#F4F4F5"><use href="#bird-body"/></g><use href="#bird-tails" style="color:#F4F4F5"/><g fill="#F4F4F5"><use href="#bird-tips"/></g></svg></div><span class="tray-l">24</span></div>
+        <div class="tray-i"><div class="tray-box" style="width:62px;height:62px"><svg width="36" height="36" viewBox="0 0 24 24" style="color:var(--p-ink)"><rect width="24" height="24" rx="5.6" fill="currentColor"/><g fill="#F4F4F5"><use href="#bird-body"/></g><use href="#bird-tails" style="color:#F4F4F5"/><g fill="#F4F4F5"><use href="#bird-tips"/></g></svg></div><span class="tray-l">36</span></div>
+        <div class="tray-i"><div class="appicon" style="width:72px;height:72px"><svg viewBox="0 0 24 24"><rect width="24" height="24" rx="5.6" fill="#fff"/><g fill="#0D9488"><use href="#bird-body"/><use href="#bird-tips"/></g><use href="#bird-tails" style="color:#0D9488"/><g fill="#fff"><use href="#bird-eyes-neg"/></g></svg></div><span class="tray-l">应用图标</span></div>
+      </div>
+      <p class="why" style="font-size:13px;margin-top:12px">
+        负形版天生适配图标：<b>有底</b>，所以放进托盘、开始菜单、任务栏都有稳定轮廓；
+        眼睛由底色自动反挖，浅底深底都不用改图。
+        仍然是 <code>scripts/gen-icons.mjs</code> 一份路径批量出 PNG/ICO。
+      </p>
+      <div class="note">
+        另一个真实收益：吉祥物可以长出<b>一整套资产</b>——空态插画、托盘气泡头像、关于页、以及 GitHub 那套"社区自己画变体"的做法。
+        这是纯几何 logo 永远给不了的东西。
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 4 两种流派 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">4</div><h2>和几何方案的关系</h2></div>
+  <p class="sec-sub">这其实不是"两个 logo 备选"，是两种气质。值得想清楚要哪一种。</p>
+  <div class="vs">
+    <div>
+      <div class="vs-h"><i style="background:var(--p-accent)"></i>几何流（方案 A 环中枝）</div>
+      <p><b>像什么</b>：像一台仪器。冷静、精确、克制，所有元素都是功能的一部分。</p>
+      <p><b>气质</b>：效率工具。用户来这里是为了干活，不是为了玩。</p>
+      <p><b>能长出的资产</b>：基本只有 logo 本身，最多加个 loading 动画。</p>
+    </div>
+    <div>
+      <div class="vs-h"><i style="background:var(--primary)"></i>吉祥物流（方案 D/E/F 青鸟）</div>
+      <p><b>像什么</b>：像一个角色。亲切、有记忆点，用户会记住它。</p>
+      <p><b>气质</b>：有人味的工具。降低"我又要把代码推上去"的心理门槛。</p>
+      <p><b>能长出的资产</b>：空态插画、启动动画、社区头像、关于页、周边。</p>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <p class="why" style="font-size:14px">
+      <b>其实可以都要。</b>界面上用几何流保持效率感（这也是新布局的主轴），
+      logo 这一处破例用吉祥物——就像 VS Code 用代码括号做图标、GitHub 用猫，
+      都是"在一个纯工具的界面里给品牌留一个角色"。<b>破例一次才有彩蛋感，破例多处就变幼稚。</b>
+    </p>
+  </div>
+</section>
+
+<!-- ============ 5 决策 ============ -->
+<section>
+  <div class="sec-head"><div class="sec-n">5</div><h2>拍板</h2></div>
+  <div class="ask">
+    <div class="ask-n">1</div>
+    <h3>要不要从几何流切到吉祥物流？</h3>
+    <p>如果切，我建议 <b>D 负形青鸟</b>做主 logo（20px 稳、有底、任意背景成立），E 或 F 只在空态和关于页出现。如果你更想要纯工具感，A 环中枝仍然是更好的选择——它的优势是和新界面里同步环完全同构。</p>
+    <span class="rec">建议：切，用 D；几何流退到界面内部语言</span>
+  </div>
+  <div class="ask">
+    <div class="ask-n">2</div>
+    <h3>要不要走 F 的"双尺寸版本"？</h3>
+    <p>衔枝那一笔是大尺寸下的彩蛋，小尺寸必须砍。等于是每个尺寸要维护一份路径，<code>gen-icons.mjs</code> 会多一个尺寸分支。收益是"叼着提交线"这个梗有人会注意到。</p>
+    <span class="rec">建议：先不做 F，主 logo 用 D；空态可以用 F 的大图版本</span>
+  </div>
+  <div class="ask">
+    <div class="ask-n">3</div>
+    <h3>下一步做不做美术细化？</h3>
+    <p>稿里是按构造逻辑推演的几何形，曲线还是工程味的。真正好看要有人手调一轮——冠羽的弧度、尾羽的粗细递进、喙的转折。<code>gen-icons.mjs</code> 是程序化生成，能接受手写的 Bézier 控制点。</p>
+    <span class="rec">建议：定方向后我把曲线细化成可用的 path</span>
+  </div>
+</section>
+
+<div class="foot">
+  青鸟 Git · 吉祥物方向推演 · 2026-09-27　｜　构造成法参考 GitHub Invertocat（Simon Oxley 原型，2013 年品牌刷新），形态与内部结构为全新设计，不临摹其轮廓。
+</div>
+</div>
+</body>
+</html>

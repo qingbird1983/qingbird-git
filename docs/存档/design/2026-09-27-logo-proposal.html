@@ -1,0 +1,380 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>青鸟 Git · Logo 重设计</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+:root{
+  --paper:#f7f5f0; --card:#fff; --line:#e9e3d6; --line-soft:#f0ece3;
+  --ink:#14171e; --ink2:#3a4256; --muted:#7c7a72;
+  --primary:#2f6f5e; --primary-wash:rgba(47,111,94,.09);
+
+  --p-canvas:#FAFAFA; --p-surface:#fff; --p-sunken:#F4F4F5;
+  --p-line:#E4E4E7; --p-line-soft:#EFEFF1;
+  --p-ink:#18181B; --p-ink2:#52525B; --p-ink3:#A1A1AA;
+  --p-accent:#0D9488; --p-ok:#059669; --p-warn:#D97706; --p-danger:#DC2626; --p-fork:#7C3AED;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font-family:"Outfit","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:15px;line-height:1.62;-webkit-font-smoothing:antialiased}
+.mono{font-family:"JetBrains Mono",Consolas,monospace}
+.serif{font-family:"DM Serif Display","Songti SC",serif;font-weight:400}
+.wrap{max-width:1080px;margin:0 auto;padding:0 28px 90px}
+
+.hero{padding:58px 0 34px;position:relative;overflow:hidden}
+.hero::before{content:"";position:absolute;width:480px;height:480px;right:-190px;top:-210px;
+  border-radius:50%;pointer-events:none;
+  background:radial-gradient(circle,rgba(47,111,94,.07),transparent 70%)}
+.eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--primary);font-weight:500;margin-bottom:18px}
+.eyebrow::before{content:"";width:22px;height:1px;background:var(--primary);opacity:.5}
+h1{font-family:"DM Serif Display","Songti SC",serif;font-weight:400;
+  font-size:clamp(28px,4.2vw,40px);line-height:1.26;letter-spacing:-.01em;margin:0 0 16px;max-width:19em;position:relative}
+h1 em{font-style:normal;color:var(--primary)}
+.lede{font-size:16px;color:var(--ink2);max-width:37em;margin:0 0 30px;position:relative}
+.lede b{color:var(--ink);font-weight:600}
+
+section{padding-top:54px}
+.sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:8px}
+.sec-n{font-family:"DM Serif Display",serif;font-size:13px;color:var(--primary);
+  border:1px solid rgba(47,111,94,.3);border-radius:50%;width:26px;height:26px;
+  display:grid;place-items:center;flex:none;transform:translateY(-3px)}
+h2{font-family:"DM Serif Display","Songti SC",serif;font-weight:400;font-size:25px;
+  letter-spacing:-.01em;margin:0;line-height:1.3}
+h3{font-size:16.5px;margin:0 0 8px;font-weight:600;letter-spacing:-.005em}
+.sec-sub{color:var(--muted);font-size:14.5px;margin:0 0 26px;max-width:46em;padding-left:40px}
+p{margin:0 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media(max-width:820px){.g2,.g3{grid-template-columns:1fr}}
+
+/* ===== 方案卡 ===== */
+.opt{background:var(--card);border:1px solid var(--line);border-radius:16px;overflow:hidden;
+  display:flex;flex-direction:column}
+.opt-hd{padding:18px 20px 14px;border-bottom:1px solid var(--line-soft);display:flex;
+  align-items:flex-start;gap:12px}
+.opt-badge{width:30px;height:30px;border-radius:9px;background:var(--p-sunken);flex:none;
+  display:grid;place-items:center;font-family:"DM Serif Display",serif;font-size:14px;color:var(--p-ink2)}
+.opt-badge.pick{background:var(--primary);color:#fff}
+.opt-t{font-size:16px;font-weight:600;letter-spacing:-.01em;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.opt-sub{font-size:12.5px;color:var(--muted);margin-top:2px}
+.pill{font-size:10.5px;padding:2px 8px;border-radius:99px;background:var(--primary-wash);
+  color:var(--primary);font-weight:600;letter-spacing:.02em}
+.pill.gray{background:var(--p-sunken);color:var(--p-ink3)}
+
+.opt-stage{flex:1;display:grid;place-items:center;padding:30px 20px;
+  background:linear-gradient(0deg,var(--p-sunken),var(--p-surface))}
+.big{width:150px;height:150px;color:var(--p-accent)}
+.big svg{width:100%;height:100%;display:block}
+
+.opt-bd{padding:16px 20px 20px}
+.steps{display:flex;align-items:flex-end;gap:14px;padding:14px 0 6px;flex-wrap:wrap}
+.size{display:flex;flex-direction:column;align-items:center;gap:6px}
+.size-box{width:96px;height:96px;background:var(--p-surface);border:1px solid var(--p-line);
+  border-radius:10px;display:grid;place-items:center}
+.size-box.dark{background:var(--p-ink);border-color:var(--p-ink)}
+.size-box.gray{background:var(--p-canvas)}
+.size-box svg{color:var(--p-accent);display:block}
+.size-box.dark svg{color:#fff}
+.size-box.gray svg{color:var(--p-ink)}
+.size-l{font-size:10px;color:var(--muted);font-family:"JetBrains Mono",monospace}
+
+.tray{display:flex;gap:14px;align-items:flex-end;padding:16px 0 4px;flex-wrap:wrap}
+.tray-i{display:flex;flex-direction:column;align-items:center;gap:6px}
+.tray-box{background:var(--p-sunken);border:1px solid var(--p-line);border-radius:8px;
+  display:grid;place-items:center;position:relative;overflow:hidden}
+.tray-box::after{content:"";position:absolute;inset:auto 0 0 0;height:42%;
+  background:linear-gradient(0deg,rgba(0,0,0,.035),transparent)}
+.tray-box svg{position:relative;z-index:1}
+.tray-l{font-size:10px;color:var(--muted);font-family:"JetBrains Mono",monospace}
+
+.code{background:#1c1c1f;border-radius:9px;padding:12px 14px;overflow-x:auto;
+  font-family:"JetBrains Mono",monospace;font-size:11px;line-height:1.7;color:#c9c5ba;margin-top:6px}
+.code .v{fill:#8fb8ad}.code .s{stroke:#8fb8ad}.code .f{fill:#8fb8ad}
+
+.why{font-size:13.5px;color:var(--ink2);margin:0}
+.why b{color:var(--ink)}
+
+/* 应用图标 */
+.appicon{display:grid;place-items:center;border-radius:22%;background:var(--p-accent);
+  color:#fff;box-shadow:0 2px 8px rgba(13,148,136,.28)}
+.appicon svg{width:62%;height:62%}
+
+/* titlebar preview */
+.tb{background:var(--p-surface);border:1px solid var(--p-line);border-radius:9px;
+  height:40px;display:flex;align-items:center;gap:10px;padding:0 12px}
+.tb-logo{width:20px;height:20px;color:var(--p-accent);flex:none}
+.tb-name{font-size:13px;font-weight:600;letter-spacing:-.005em}
+.tb-w{margin-left:auto;display:flex;gap:3px}
+.tb-w i{width:26px;height:22px;border-radius:5px;background:var(--p-sunken);display:block}
+
+/* rail preview */
+.railprev{display:flex;flex-direction:column;gap:4px;padding:8px 6px;background:var(--p-surface);
+  border:1px solid var(--p-line);border-radius:9px;width:56px}
+.railprev div{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;color:var(--p-ink3)}
+.railprev div.on{background:rgba(13,148,136,.10);color:var(--p-accent)}
+.railprev svg{width:18px;height:18px}
+
+/* 旧 logo 对照 */
+.oldbar{display:flex;align-items:center;gap:12px;padding:14px 16px;background:var(--p-sunken);
+  border:1px solid var(--p-line);border-radius:10px}
+.oldseal{width:30px;height:30px;border-radius:6px;background:#B4483A;color:#fff;
+  display:grid;place-items:center;font-family:"DM Serif Display",serif;font-size:15px;flex:none}
+.old-name{font-size:14px;font-weight:600;font-family:"Songti SC",serif}
+
+.ask{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin-bottom:14px}
+.ask-n{font-family:"DM Serif Display",serif;font-size:12px;color:#fff;background:var(--ink);
+  width:20px;height:20px;border-radius:50%;display:grid;place-items:center;margin-bottom:12px}
+.ask p{color:var(--ink2);font-size:13.5px;margin:0}
+.rec{display:inline-block;margin-top:11px;font-size:12px;padding:3px 10px;border-radius:99px;
+  background:var(--primary-wash);color:var(--primary);font-weight:500}
+.note{font-size:12.5px;color:var(--muted);margin-top:12px;padding-left:14px;
+  border-left:2px solid var(--line);line-height:1.6}
+.foot{margin-top:60px;padding-top:22px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">青鸟 Git · Logo 重设计</div>
+  <h1>朱砂印章换掉，<em>换成几何</em></h1>
+  <p class="lede">
+    印章的圆角、衬线、印泥红都属于「纸墨」那一套，放在 10 级中性灰里就像一件旧家具没搬走。
+    新的 logo 全部用<b>单一颜色 + 纯几何 + 圆头笔画</b>，并且优先用界面主色
+    <span class="mono" style="font-size:14px;color:#0D9488">#0D9488</span>，
+    这样它和同步环、状态点、按钮属于同一套语言。
+  </p>
+  <div class="oldbar">
+    <span class="oldseal">青</span>
+    <span class="old-name" style="font-family:Outfit,'PingFang SC',sans-serif;color:var(--ink2);font-size:13px">
+      现状：朱砂印 + 思源宋体标题栏文字
+    </span>
+    <span style="margin-left:auto;font-size:12px;color:var(--muted)">两处都要换</span>
+  </div>
+</header>
+
+<!-- ===== 三个方案 ===== -->
+<section>
+  <div class="sec-head"><div class="sec-n">1</div><h2>三个方向</h2></div>
+  <p class="sec-sub">都是 24×24 网格、2px 描边、圆头圆角，可直接写进 <code>scripts/gen-icons.mjs</code> 程序化生成 PNG / ICO。</p>
+
+  <div class="g3" style="align-items:stretch">
+
+    <!-- 方案 A -->
+    <div class="opt">
+      <div class="opt-hd">
+        <div class="opt-badge pick">A</div>
+        <div>
+          <div class="opt-t">环中枝 <span class="pill">推荐</span></div>
+          <div class="opt-sub">Sync Ring · 与界面核心控件同构</div>
+        </div>
+      </div>
+      <div class="opt-stage">
+        <div class="big">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/>
+            <path d="M12 8.6v6.8"/>
+            <circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/>
+            <circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/>
+          </svg>
+        </div>
+      </div>
+      <div class="opt-bd">
+        <div class="steps">
+          <div class="size"><div class="size-box"><svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/><path d="M12 8.6v6.8"/><circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/><circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/></svg></div><span class="size-l">72</span></div>
+          <div class="size"><div class="size-box"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/><path d="M12 8.6v6.8"/><circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/><circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/></svg></div><span class="size-l">32</span></div>
+          <div class="size"><div class="size-box gray"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/><path d="M12 8.6v6.8"/><circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/><circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/></svg></div><span class="size-l">20 单色</span></div>
+          <div class="size"><div class="size-box dark"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/><path d="M12 8.6v6.8"/><circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/><circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/></svg></div><span class="size-l">16 反白</span></div>
+        </div>
+        <p class="why" style="margin-top:12px"><b>外环</b>是新界面里最常出现的控件——同步环；<b>环内竖线 + 两点</b>是 git branch 的最简骨架。用户在主界面看到同步环，在标题栏看到 logo，形状一致，认知可以互相迁移。缺口在右上方，也正好读作「正在同步 / 可同步」。</p>
+        <p class="why" style="margin-top:10px;font-size:13px;color:var(--ink2)"><b>实测提醒</b>：缩到 16～20px 时，环内的竖线和两个点会并成一小团，整体读作「⟳ 同步」。这对这个应用<b>不是缺陷而是加分</b>——托盘图标表达的就是「随时能同步」。</p>
+        <div class="code">
+&lt;circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/&gt;<br>
+&lt;path d="M12 8.6v6.8"/&gt;<br>
+&lt;circle cx="12" cy="6.9" r="1.95" fill/&gt;<br>
+&lt;circle cx="12" cy="17.1" r="1.95" fill/&gt;
+        </div>
+      </div>
+    </div>
+
+    <!-- 方案 B -->
+    <div class="opt">
+      <div class="opt-hd">
+        <div class="opt-badge">B</div>
+        <div>
+          <div class="opt-t">提交飞行</div>
+          <div class="opt-sub">Commit Flight · 品牌隐喻最强</div>
+        </div>
+      </div>
+      <div class="opt-stage">
+        <div class="big">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M4.4 19.4 L10.6 13.2 L16.6 7.1"/>
+            <circle cx="4.4" cy="19.4" r="2.1" fill="currentColor" stroke="none"/>
+            <circle cx="10.6" cy="13.2" r="2.1" fill="currentColor" stroke="none"/>
+            <circle cx="16.6" cy="7.1" r="2.1" fill="currentColor" stroke="none"/>
+            <path d="M16.8 4.4 L20.9 2.6"/>
+            <path d="M16.8 4.6 L21.6 7.2"/>
+          </svg>
+        </div>
+      </div>
+      <div class="opt-bd">
+        <div class="steps">
+          <div class="size"><div class="size-box"><svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4.4 19.4 L10.6 13.2 L16.6 7.1"/><circle cx="4.4" cy="19.4" r="2.1" fill="currentColor" stroke="none"/><circle cx="10.6" cy="13.2" r="2.1" fill="currentColor" stroke="none"/><circle cx="16.6" cy="7.1" r="2.1" fill="currentColor" stroke="none"/><path d="M16.8 4.4 L20.9 2.6"/><path d="M16.8 4.6 L21.6 7.2"/></svg></div><span class="size-l">72</span></div>
+          <div class="size"><div class="size-box"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4.4 19.4 L10.6 13.2 L16.6 7.1"/><circle cx="4.4" cy="19.4" r="2.1" fill="currentColor" stroke="none"/><circle cx="10.6" cy="13.2" r="2.1" fill="currentColor" stroke="none"/><circle cx="16.6" cy="7.1" r="2.1" fill="currentColor" stroke="none"/><path d="M16.8 4.4 L20.9 2.6"/><path d="M16.8 4.6 L21.6 7.2"/></svg></div><span class="size-l">32</span></div>
+          <div class="size"><div class="size-box gray"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4.4 19.4 L10.6 13.2 L16.6 7.1"/><circle cx="4.4" cy="19.4" r="2.1" fill="currentColor" stroke="none"/><circle cx="10.6" cy="13.2" r="2.1" fill="currentColor" stroke="none"/><circle cx="16.6" cy="7.1" r="2.1" fill="currentColor" stroke="none"/><path d="M16.8 4.4 L20.9 2.6"/><path d="M16.8 4.6 L21.6 7.2"/></svg></div><span class="size-l">20 单色</span></div>
+          <div class="size"><div class="size-box dark"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4.4 19.4 L10.6 13.2 L16.6 7.1"/><circle cx="4.4" cy="19.4" r="2.1" fill="currentColor" stroke="none"/><circle cx="10.6" cy="13.2" r="2.1" fill="currentColor" stroke="none"/><circle cx="16.6" cy="7.1" r="2.1" fill="currentColor" stroke="none"/><path d="M16.8 4.4 L20.9 2.6"/><path d="M16.8 4.6 L21.6 7.2"/></svg></div><span class="size-l">16 反白</span></div>
+        </div>
+        <p class="why" style="margin-top:12px">三个点是<b>提交队列</b>沿对角线向上推进，末端两点分叉成<b>翅膀</b>——「青鸟」这个名字被真正画出来了。大尺寸下最有品牌个性，但实测 20px 以下斜线细到几乎消失，<b>托盘 16px 不可用</b>，除非另做一套小尺寸简化版。</p>
+        <div class="code">
+&lt;path d="M4.4 19.4 L10.6 13.2 L16.6 7.1"/&gt;<br>
+&lt;circle cx="4.4" cy="19.4" r="2.1" fill/&gt;<br>
+&lt;circle cx="10.6" cy="13.2" r="2.1" fill/&gt;<br>
+&lt;circle cx="16.6" cy="7.1" r="2.1" fill/&gt;<br>
+&lt;path d="M16.8 4.4 L20.9 2.6"/&gt;<br>
+&lt;path d="M16.8 4.6 L21.6 7.2"/&gt;
+        </div>
+      </div>
+    </div>
+
+    <!-- 方案 C -->
+    <div class="opt">
+      <div class="opt-hd">
+        <div class="opt-badge">C</div>
+        <div>
+          <div class="opt-t">枝形标</div>
+          <div class="opt-sub">Branch Mark · 最克制</div>
+        </div>
+      </div>
+      <div class="opt-stage">
+        <div class="big">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <path d="M6.4 3.4v9.9a5.4 5.4 0 0 0 5.4 5.4h2.5"/>
+            <circle cx="6.4" cy="20.4" r="2.3" fill="currentColor" stroke="none"/>
+            <circle cx="18" cy="6.4" r="2.3" fill="currentColor" stroke="none"/>
+          </svg>
+        </div>
+      </div>
+      <div class="opt-bd">
+        <div class="steps">
+          <div class="size"><div class="size-box"><svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6.4 3.4v9.9a5.4 5.4 0 0 0 5.4 5.4h2.5"/><circle cx="6.4" cy="20.4" r="2.3" fill="currentColor" stroke="none"/><circle cx="18" cy="6.4" r="2.3" fill="currentColor" stroke="none"/></svg></div><span class="size-l">72</span></div>
+          <div class="size"><div class="size-box"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6.4 3.4v9.9a5.4 5.4 0 0 0 5.4 5.4h2.5"/><circle cx="6.4" cy="20.4" r="2.3" fill="currentColor" stroke="none"/><circle cx="18" cy="6.4" r="2.3" fill="currentColor" stroke="none"/></svg></div><span class="size-l">32</span></div>
+          <div class="size"><div class="size-box gray"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6.4 3.4v9.9a5.4 5.4 0 0 0 5.4 5.4h2.5"/><circle cx="6.4" cy="20.4" r="2.3" fill="currentColor" stroke="none"/><circle cx="18" cy="6.4" r="2.3" fill="currentColor" stroke="none"/></svg></div><span class="size-l">20 单色</span></div>
+          <div class="size"><div class="size-box dark"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6.4 3.4v9.9a5.4 5.4 0 0 0 5.4 5.4h2.5"/><circle cx="6.4" cy="20.4" r="2.3" fill="currentColor" stroke="none"/><circle cx="18" cy="6.4" r="2.3" fill="currentColor" stroke="none"/></svg></div><span class="size-l">16 反白</span></div>
+        </div>
+        <p class="why" style="margin-top:12px">把 lucide 的 <code>git-branch</code> 重新做几何：圆点加大、曲线拉直、笔画统一为 2.2。识别度最高，16px 托盘下也最清楚，代价是<b>没有品牌个性</b>——看起来像任何一个 git 工具。</p>
+        <div class="code">
+&lt;path d="M6.4 3.4v9.9a5.4 5.4 0 0 0 5.4 5.4h2.5"/&gt;<br>
+&lt;circle cx="6.4" cy="20.4" r="2.3" fill/&gt;<br>
+&lt;circle cx="18" cy="6.4" r="2.3" fill/&gt;
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 落地场景 ===== -->
+<section>
+  <div class="sec-head"><div class="sec-n">2</div><h2>放进真实位置</h2></div>
+  <p class="sec-sub">同一个形状要在 16px 托盘图标、20px 标题栏、34px 导航轨、256px 安装图标里都成立。</p>
+
+  <div class="card" style="margin-bottom:16px">
+    <h3>标题栏（20px）</h3>
+    <div class="tb">
+      <span class="tb-logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/>
+          <path d="M12 8.6v6.8"/>
+          <circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/>
+          <circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/>
+        </svg>
+      </span>
+      <span class="tb-name">青鸟 Git</span>
+      <div class="tb-w"><i></i><i></i><i></i><i></i></div>
+    </div>
+    <p class="note">标题栏文字同时从思源宋体换成无衬线（Outfit / 系统中栈）——衬线字属于纸墨体系，和新 logo 一样要一起换掉。品牌感靠 logo + 字重建立，不靠字体。</p>
+  </div>
+
+  <div class="g2">
+    <div class="card">
+      <h3>导航轨顶部（34px 圆角方块）</h3>
+      <div style="display:flex;gap:16px;align-items:flex-start">
+        <div class="railprev">
+          <div class="on">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/>
+              <path d="M12 8.6v6.8"/>
+              <circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/>
+              <circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/>
+            </svg>
+          </div>
+          <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg></div>
+          <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 12h-4l-3 8-6-16-3 8H2"/></svg></div>
+        </div>
+        <p class="why" style="font-size:13px;align-self:center">
+          logo 在轨道最上方，<b>不再兼任侧栏开关</b>。开关改用标准 panel 图标——原来「印章 hover 变面板」的双层技巧是纸墨风格的小聪明，新体系里靠位置和图标本身说话就够了。
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>托盘与应用图标</h3>
+      <div class="tray">
+        <div class="tray-i">
+          <div class="tray-box" style="width:40px;height:40px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/><path d="M12 8.6v6.8"/><circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/><circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/></svg></div>
+          <span class="tray-l">托盘 16</span>
+        </div>
+        <div class="tray-i">
+          <div class="tray-box" style="width:48px;height:48px"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/><path d="M12 8.6v6.8"/><circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/><circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/></svg></div>
+          <span class="tray-l">24</span>
+        </div>
+        <div class="tray-i">
+          <div class="tray-box" style="width:64px;height:64px"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/><path d="M12 8.6v6.8"/><circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/><circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/></svg></div>
+          <span class="tray-l">36</span>
+        </div>
+        <div class="tray-i">
+          <div class="appicon" style="width:76px;height:76px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="8.4" stroke-dasharray="39.6 13.2"/><path d="M12 8.6v6.8"/><circle cx="12" cy="6.9" r="1.95" fill="currentColor" stroke="none"/><circle cx="12" cy="17.1" r="1.95" fill="currentColor" stroke="none"/></svg></div>
+          <span class="tray-l">应用图标</span>
+        </div>
+      </div>
+      <p class="note">托盘是<b>单色</b>（跟随系统主题反色），应用图标用 accent 青底 + 白色图形。图形本身不填色，两种底色下都能用——所以只需要维护一份路径，PNG/ICO 由 <code>scripts/gen-icons.mjs</code> 按底色批量生成。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 决策 ===== -->
+<section>
+  <div class="sec-head"><div class="sec-n">3</div><h2>拍板</h2></div>
+  <div class="ask">
+    <div class="ask-n">1</div>
+    <h3>选哪个方案？</h3>
+    <p>我推荐 <b>A 环中枝</b>：它和同步环是同一个形状，用户看 logo 就能预告界面的核心交互；且形状足够简单，托盘 16px 也不糊。B 更有品牌个性但小尺寸吃亏，C 最清楚但没辨识度。</p>
+    <span class="rec">建议 A，若更看重"青鸟"的品牌感则选 B</span>
+  </div>
+  <div class="ask">
+    <div class="ask-n">2</div>
+    <h3>标题栏品牌文字保留「青鸟 Git」四个字吗？</h3>
+    <p>我的建议是保留但换字体——思源宋体 → 无衬线，字重 600，字号 13px。品牌名是既有资产，logo 负责图形识别，文字负责说清是什么，两者不冲突。</p>
+    <span class="rec">建议：保留文字，只换字体与字重</span>
+  </div>
+  <div class="ask">
+    <div class="ask-n">3</div>
+    <h3>配色沿用界面主色 #0D9488，还是单独给 logo 一个色？</h3>
+    <p>沿用主色能让 logo 和界面属于同一套系统；单独给色（比如更亮的青）会让 logo 更跳，但多一个色就要多一套维护规则。</p>
+    <span class="rec">建议：沿用 #0D9488，不新增品牌色</span>
+  </div>
+</section>
+
+<div class="foot">
+  青鸟 Git · Logo 重设计 · 2026-09-27　｜　三个方案的路径都写成了可直接落到 <code>scripts/gen-icons.mjs</code> 的形式，定稿后再改代码。
+</div>
+</div>
+</body>
+</html>
