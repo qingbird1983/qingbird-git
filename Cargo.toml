@@ -1,0 +1,5 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "gui"]
+
+# src-tauri/ 保持独立工作区（迁移完成前仍可单独构建），不属于本 workspace

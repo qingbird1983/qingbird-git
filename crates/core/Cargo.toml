@@ -1,0 +1,13 @@
+[package]
+name = "qingbird-core"
+version = "0.1.0"
+edition = "2021"
+description = "qingbird-git 纯逻辑后端：git 子进程封装 / 代理探测 / 配置存储 / IPC 数据结构"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+winreg = "0.55"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
