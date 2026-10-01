@@ -56,6 +56,16 @@ Rust 快速检查：`cd src-tauri && cargo check`
   （2026-10-01 起 spike-guise 已删除，编译缓存挪到根 `target/`，走默认 target-dir；
   `.cargo/config.toml` 已删除）
 - **GUI 只能由用户双击 exe 验收**：从 agent shell 直接拉起的 GUI 进程会随命令结束被回收
+- **视觉规范（新增元素必须选档，不许再写裸数字）**：`gui/src/shell.rs` 顶部有
+  字号（FS_META/SEC/BODY/TITLE/HEAD/NUM = 11/12/13/16/18/20）、
+  圆角（R_SM/MD/LG/XL = 4/6/8/12）、间距（GAP_TIGHT/GAP/GAP_LG = 4/8/12）、
+  按钮高度（BTN_SM/BTN/BTN_LG = 26/30/34）、图标（icon_sm 14 / icon_md 16）五组常量。
+  早先就地硬编码长出过 9 种圆角、6 种按钮高度，视觉一眼就不齐
+- **图标只认一套**：`use gpui_kit::assets::IconName as AssetIcon`（完整 lucide 1830 个 + 品牌 Bird）。
+  不要再用 `component::IconName`——那是另一套，线宽与视觉重量不同，且没有 GitBranch
+- **hover 与动效**：gpui 没有 CSS 那样的 `:hover` 样式，悬停靠 `on_hover` 记状态
+  （`Shell.hovered`，带 on_hover 的行返回类型变 `Stateful<Div>`）；
+  加载占位用官方 `Skeleton`（自带呼吸动画），进度动画用 `with_animation`
 
 ## 新 GUI 的地基与坑（gpui-kit）
 
