@@ -15,7 +15,9 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, Theme};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, Size, Theme, WindowExt as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, AnyElement, AppContext as _, Context, Div, Entity, FontWeight, Hsla,
@@ -181,6 +183,21 @@ pub struct Shell {
     ov_checked: std::collections::HashSet<String>,
     /// 总览页批量同步的进度与结论；None = 本会话还没跑过批量
     batch: Option<BatchRun>,
+    /// 添加 / 编辑仓库弹窗；None = 弹窗未打开
+    dlg: Option<RepoDialog>,
+}
+
+/// 添加 / 编辑仓库弹窗的状态。
+/// 输入框的 Entity 在打开弹窗时重建（初值靠 placeholder 表达，不预填——
+/// 预填要走 `InputState::set_value`，那需要 window，弹窗入口处没有）。
+struct RepoDialog {
+    /// None = 添加模式；Some(path) = 编辑该仓库
+    editing: Option<String>,
+    path_input: Entity<InputState>,
+    name_input: Entity<InputState>,
+    /// 归属：第三方仓库（false = 我的）
+    third: bool,
+    error: Option<String>,
 }
 
 /// 总览页的一键批量。与旧版约定一致：前端串行循环 core 的 pull/push，
@@ -236,6 +253,7 @@ impl Shell {
             profile_task: None,
             ov_checked: std::collections::HashSet::new(),
             batch: None,
+            dlg: None,
         };
         this.refresh_status(cx);
         this.scan_space(cx);
@@ -355,19 +373,179 @@ impl Shell {
         cx.notify();
     }
 
-    /// 双击仓库行：切换「我的 / 第三方」归属（临时入口，
-    /// 等添加 / 编辑仓库弹窗落地后由那里接管）
-    fn toggle_third_party(&mut self, path: String, cx: &mut Context<Self>) {
-        let cur = self
+    // ---------- 添加 / 编辑仓库弹窗 ----------
+
+    /// 打开「添加仓库」。没有原生目录选择对话框可用（gpui-kit 不带，
+    /// 也不为它引新依赖），走「粘贴路径 + 校验」：资源管理器里复制文件地址即可。
+    fn open_add_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dlg = Some(RepoDialog {
+            editing: None,
+            path_input: cx
+                .new(|cx| InputState::new(window, cx).placeholder("粘贴仓库文件夹路径，如 F:/AIwork/xxx")),
+            name_input: cx.new(|cx| InputState::new(window, cx).placeholder("留空用目录名")),
+            third: false,
+            error: None,
+        });
+        self.build_dlg(window, cx);
+    }
+
+    /// 打开「仓库设置」：改显示名与归属，或从列表移除（不动磁盘文件）。
+    fn open_edit_dlg(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let third = self
             .entry(&path)
             .map(|e| e.is_third_party)
             .unwrap_or(false);
-        if qingbird_core::store::set_third_party(&path, !cur).is_err() {
-            return; // 落盘失败就当没点，下次打开再试
+        let alias = self.entry(&path).map(|e| e.alias.clone()).unwrap_or_default();
+        // 当前别名进 placeholder：留空 = 不改（编辑模式不预填，避免误清空）
+        let name_hint = if alias.trim().is_empty() {
+            "留空用目录名".to_string()
+        } else {
+            format!("当前：{alias} · 留空即不改")
+        };
+        self.dlg = Some(RepoDialog {
+            editing: Some(path.clone()),
+            path_input: cx.new(|cx| InputState::new(window, cx).placeholder(path.clone())),
+            name_input: cx.new(|cx| InputState::new(window, cx).placeholder(name_hint)),
+            third,
+            error: None,
+        });
+        self.build_dlg(window, cx);
+    }
+
+    /// 弹窗本体：官方 Dialog（覆盖层、聚焦、关闭都由框架管）。
+    /// Shell 只负责把自己的状态与输入框挂进去。
+    fn build_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        let Some(dlg) = self.dlg.as_ref() else {
+            return;
+        };
+        let editing = dlg.editing.clone();
+        let path_input = dlg.path_input.clone();
+        let name_input = dlg.name_input.clone();
+
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let t = cx.theme().clone();
+            let state = this.read(cx).dlg.as_ref();
+            let third = state.map(|d| d.third).unwrap_or(false);
+            let error: Option<String> = state.and_then(|d| d.error.clone());
+
+            dialog
+                .title(if editing.is_some() { "仓库设置" } else { "添加仓库" })
+                // content / footer 的 builder 会被反复调用，每次重画一份
+                .content({
+                    let t = t.clone();
+                    let editing = editing.clone();
+                    let path_input = path_input.clone();
+                    let name_input = name_input.clone();
+                    let error = error.clone();
+                    let this = this.clone();
+                    move |c, _, _| {
+                        c.child(dlg_body(
+                            &t,
+                            &editing,
+                            third,
+                            &error,
+                            &path_input,
+                            &name_input,
+                            &this,
+                        ))
+                    }
+                })
+                .footer(dlg_footer(&this, &editing, &path_input, &name_input))
+        });
+    }
+
+    /// 保存弹窗：添加时校验路径与 .git，编辑时改名与改归属。
+    /// 返回 true = 成功（调用方据此关弹窗），false = 留在原地看错误。
+    fn commit_dlg(
+        &mut self,
+        editing: Option<String>,
+        raw_path: String,
+        raw_name: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let third = self.dlg.as_ref().map(|d| d.third).unwrap_or(false);
+        let name = raw_name.trim().to_string();
+
+        match editing {
+            None => {
+                let path = repos::normalize_path_input(&raw_path);
+                if path.is_empty() {
+                    self.set_dlg_error("请先填写仓库路径", cx);
+                    return false;
+                }
+                if self.repos.iter().any(|r| r.path == path) {
+                    self.set_dlg_error("这个仓库已经在列表里了", cx);
+                    return false;
+                }
+                let list = match repos::add_repo(&path) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.set_dlg_error(&e, cx);
+                        return false;
+                    }
+                };
+                // 名字与归属都只在添加成功之后落盘，别留半成品
+                if !name.is_empty() {
+                    let _ = repos::rename_repo(&path, &name);
+                }
+                let _ = qingbird_core::store::set_third_party(&path, third);
+                self.repos = repos::list_repos();
+                let _ = list;
+                // 新仓库的命令要重新识别（启动时只识别了列表里已有的）
+                self.views
+                    .entry(path.clone())
+                    .or_insert_with(RepoView::blank)
+                    .detected = run_cmd::detect_cmds(&path);
+                self.selected = Some(path.clone());
+                self.out = OutState::default();
+                self.dlg = None;
+                self.refresh_status(cx);
+                self.scan_space(cx);
+                self.scan_profile(cx);
+                cx.notify();
+                true
+            }
+            Some(path) => {
+                // 留空 = 不改（placeholder 就是这么写的，别把别名清掉）
+                if !name.is_empty() && repos::rename_repo(&path, &name).is_err() {
+                    self.set_dlg_error("显示名保存失败（配置写不进去）", cx);
+                    return false;
+                }
+                if qingbird_core::store::set_third_party(&path, third).is_err() {
+                    self.set_dlg_error("归属保存失败（配置写不进去）", cx);
+                    return false;
+                }
+                self.repos = repos::list_repos();
+                self.dlg = None;
+                // 归属变了主区换页：划成第三方要立刻补扫档案数据
+                self.scan_profile(cx);
+                cx.notify();
+                true
+            }
         }
+    }
+
+    /// 写错误提示并通知重画：弹窗是浮层，不 notify 的话错误文案不会刷出来
+    fn set_dlg_error(&mut self, msg: &str, cx: &mut Context<Self>) {
+        if let Some(d) = self.dlg.as_mut() {
+            d.error = Some(msg.to_string());
+        }
+        cx.notify();
+    }
+
+    /// 从列表移除仓库（只删记录，不动磁盘文件）
+    fn remove_repo_at(&mut self, path: String, cx: &mut Context<Self>) {
+        let _ = repos::remove_repo(&path);
         self.repos = repos::list_repos();
-        // 归属变了主区换页：划成第三方要立刻补扫档案数据，划回来清掉
-        self.scan_profile(cx);
+        self.views.remove(&path);
+        if self.selected.as_deref() == Some(path.as_str()) {
+            self.selected = self.repos.first().map(|r| r.path.clone());
+            self.out = OutState::default();
+            self.scan_space(cx);
+            self.scan_profile(cx);
+        }
+        self.dlg = None;
         cx.notify();
     }
 
@@ -1104,7 +1282,6 @@ impl Shell {
         }
 
         side.child(list).child(
-            // 底部「添加仓库」入口（弹窗待接，先占位）
             h_flex()
                 .id("add-repo")
                 .w_full()
@@ -1115,11 +1292,12 @@ impl Shell {
                 .gap(px(8.0))
                 .text_color(tier4(t))
                 .child(Icon::new(IconName::Plus).small())
-                .child(div().text_size(px(13.0)).child("添加仓库")),
+                .child(div().text_size(px(13.0)).child("添加仓库"))
+                .on_click(cx.listener(|this, _, window, cx| this.open_add_dlg(window, cx))),
         )
     }
 
-    /// 侧栏仓库行：状态点 + 名称 + 状态徽章；单击选中，双击切换归属
+    /// 侧栏仓库行：状态点 + 名称 + 状态徽章；单击选中，双击开设置
     fn repo_row(&self, r: &RepoEntry, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let path = r.path.clone();
         let toggle_path = path.clone();
@@ -1194,8 +1372,9 @@ impl Shell {
             );
         }
         row.on_click(cx.listener(move |this, _, _, cx| this.select(path.clone(), cx)))
-            .on_double_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_third_party(toggle_path.clone(), cx)
+            // 双击开「仓库设置」：改名 / 改归属 / 移除
+            .on_double_click(cx.listener(move |this, _, window, cx| {
+                this.open_edit_dlg(toggle_path.clone(), window, cx)
             }))
     }
 }
@@ -1657,6 +1836,183 @@ static EMPTY_VIEW: RepoView = RepoView {
         install_cmd: String::new(),
     },
 };
+
+/// 仓库弹窗的正文：路径 / 显示名 / 归属 + 错误提示。
+/// 每帧重画（Dialog 的 content builder 会被反复调用），所以只接引用。
+fn dlg_body(
+    t: &Theme,
+    editing: &Option<String>,
+    third: bool,
+    error: &Option<String>,
+    path_input: &Entity<InputState>,
+    name_input: &Entity<InputState>,
+    this: &Entity<Shell>,
+) -> Div {
+    let field = |label: &str, input: &Entity<InputState>| -> Div {
+        v_flex()
+            .w_full()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(tier4(t))
+                    .child(label.to_string()),
+            )
+            .child(Input::new(input).w_full())
+    };
+    let path_field = match editing {
+        // 编辑时路径只读：换路径等于换仓库，不该在这个框里发生
+        Some(p) => v_flex()
+            .w_full()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(tier4(t))
+                    .child("路径"),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .text_size(px(12.0))
+                    .font_family(t.mono_font_family.clone())
+                    .text_color(tier3(t))
+                    .child(p.clone()),
+            ),
+        None => field("路径", path_input),
+    };
+
+    v_flex()
+        .w_full()
+        .gap(px(14.0))
+        .child(path_field)
+        .child(field("显示名", name_input))
+        .child(
+            v_flex()
+                .w_full()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(tier4(t))
+                        .child("归属"),
+                )
+                .child(
+                    h_flex()
+                        .gap(px(8.0))
+                        .child(
+                            Button::new("dlg-mine")
+                                .label("我的仓库")
+                                .toggled(!third)
+                                .on_click({
+                                    let this = this.clone();
+                                    move |_, _, cx| {
+                                        this.update(cx, |this, cx| {
+                                            if let Some(d) = this.dlg.as_mut() {
+                                                d.third = false;
+                                            }
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("dlg-third")
+                                .label("第三方仓库")
+                                .toggled(third)
+                                .on_click({
+                                    let this = this.clone();
+                                    move |_, _, cx| {
+                                        this.update(cx, |this, cx| {
+                                            if let Some(d) = this.dlg.as_mut() {
+                                                d.third = true;
+                                            }
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        ),
+                ),
+        )
+        .when_some(error.clone(), |b, e| {
+            b.child(
+                div()
+                    .w_full()
+                    .text_size(px(12.0))
+                    .text_color(t.colors.danger)
+                    .child(e),
+            )
+        })
+}
+
+/// 弹窗底栏：编辑模式左侧「移除仓库」，右侧取消 / 保存。
+fn dlg_footer(
+    this: &Entity<Shell>,
+    editing: &Option<String>,
+    path_input: &Entity<InputState>,
+    name_input: &Entity<InputState>,
+) -> Div {
+    let mut footer = h_flex().w_full().justify_between().items_center();
+    match editing {
+        Some(p) => {
+            footer = footer.child(
+                Button::new("dlg-remove")
+                    .label("移除仓库")
+                    .outline()
+                    .on_click({
+                        let this = this.clone();
+                        let p = p.clone();
+                        move |_, window, cx| {
+                            this.update(cx, |this, cx| this.remove_repo_at(p.clone(), cx));
+                            window.close_dialog(cx);
+                        }
+                    }),
+            );
+        }
+        None => footer = footer.child(div()),
+    }
+    footer.child(
+        h_flex()
+            .gap(px(8.0))
+            .child(
+                Button::new("dlg-cancel")
+                    .label("取消")
+                    .ghost()
+                    .on_click({
+                        let this = this.clone();
+                        move |_, window, cx| {
+                            this.update(cx, |this, cx| {
+                                this.dlg = None;
+                                cx.notify();
+                            });
+                            window.close_dialog(cx);
+                        }
+                    }),
+            )
+            .child(
+                Button::new("dlg-save")
+                    .label(if editing.is_some() { "保存" } else { "添加" })
+                    .primary()
+                    .on_click({
+                        let this = this.clone();
+                        let editing = editing.clone();
+                        let path_input = path_input.clone();
+                        let name_input = name_input.clone();
+                        move |_, window, cx| {
+                            // 值要在 App 上读成 String 再交给 Shell 落盘
+                            let raw_path = path_input.read(cx).value().to_string();
+                            let raw_name = name_input.read(cx).value().to_string();
+                            let ok = this.update(cx, |this, cx| {
+                                this.commit_dlg(editing.clone(), raw_path, raw_name, cx)
+                            });
+                            if ok {
+                                window.close_dialog(cx);
+                            }
+                        }
+                    }),
+            ),
+    )
+}
 
 /// 统计卡：大数字 + 标签，数字按语义着色
 fn stat_card(n: usize, label: &str, color: Hsla, t: &Theme) -> Div {

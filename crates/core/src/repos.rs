@@ -97,6 +97,25 @@ pub fn list_repos() -> Vec<RepoEntry> {
     store::load().repos
 }
 
+/// 整理用户粘进来的路径：资源管理器「复制文件地址」给的是 `C:\repo`，
+/// 复制文件链接给的可能是 `file:///C:/repo`，拖拽进来时常带引号与尾部斜杠。
+/// 统一归一成能直接喂给 git 的形态（Windows 上正斜杠也没问题）。
+pub fn normalize_path_input(s: &str) -> String {
+    let s = s.trim().trim_matches('"').trim_matches('\'');
+    let s = match s.strip_prefix("file:///") {
+        Some(rest) => rest, // file:///C:/repo → C:/repo
+        None => s,
+    };
+    let s = s.trim().to_string();
+    // 尾部斜杠去掉（根目录 C:/ 除外）：git 命令看到 C:/repo/ 也能跑，
+    // 但列表里同一个仓库会存成两条路径，之后去重、比对全都对不上
+    if s.len() > 3 {
+        s.trim_end_matches(['/', '\\']).to_string()
+    } else {
+        s
+    }
+}
+
 /// 添加仓库；已在列表里则原样返回，不重复添加
 pub fn add_repo(path: &str) -> Result<Vec<RepoEntry>, String> {
     let path = path.trim().to_string();
@@ -466,6 +485,38 @@ mod tests {
         let e = full_entry();
         assert!(e.cmd_runs.is_empty());
         assert!(e.pinned_cmds.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn pasted_paths_are_normalized() {
+        // 资源管理器复制出来的裸路径
+        assert_eq!(normalize_path_input("F:/AIwork/qingbird-git"), "F:/AIwork/qingbird-git");
+        // 反斜杠版本保持可用（git 接受），只去尾部
+        assert_eq!(normalize_path_input(r"F:\AIwork\qingbird-git\"), r"F:\AIwork\qingbird-git");
+        // 带引号
+        assert_eq!(normalize_path_input(r#""F:/repo""#), "F:/repo");
+        // 文件链接
+        assert_eq!(normalize_path_input("file:///F:/repo"), "F:/repo");
+        // 前后空格
+        assert_eq!(normalize_path_input("  F:/repo\n"), "F:/repo");
+    }
+
+    #[test]
+    fn roots_keep_their_separator() {
+        // C:/ 被削成「C:」就变成相对路径了
+        assert_eq!(normalize_path_input("C:/"), "C:/");
+        assert_eq!(normalize_path_input(r"C:\"), r"C:\");
+    }
+
+    #[test]
+    fn empty_input_stays_empty() {
+        assert_eq!(normalize_path_input(""), "");
+        assert_eq!(normalize_path_input("   "), "");
     }
 }
 
