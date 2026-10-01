@@ -10,10 +10,13 @@
 // 骨架期：部分 API 先于调用方迁移（sync/history/space 等后续平移），暂未使用
 #![allow(dead_code)]
 
+pub mod fork;
 pub mod git;
+pub mod net;
 pub mod proxy;
 pub mod repos;
 pub mod run_cmd;
 pub mod space;
 pub mod store;
+pub mod sync;
 pub mod types;

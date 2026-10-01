@@ -24,6 +24,7 @@ use qingbird_core::repos;
 use qingbird_core::run_cmd::{self, Slot, MAX_PINNED_CMDS};
 use qingbird_core::space;
 use qingbird_core::store::RepoEntry;
+use qingbird_core::sync;
 use qingbird_core::types::RepoStatus;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -98,12 +99,21 @@ impl RepoView {
     }
 }
 
+/// 输出块里正在跑的操作类别
+#[derive(Clone, Copy, PartialEq)]
+enum Op {
+    Cmd(Slot),
+    Pull,
+    Push,
+    Check,
+}
+
 /// 深色输出块的状态
 #[derive(Default)]
 struct OutState {
     running: bool,
-    /// 正在跑哪个槽位（None = 没在跑）
-    slot: Option<Slot>,
+    /// 正在跑哪个操作（None = 没在跑）
+    op: Option<Op>,
     lines: Vec<String>,
     /// 命令起不来 / 非零退出时的一句话
     error: Option<String>,
@@ -332,7 +342,7 @@ impl Shell {
 
         self.out = OutState {
             running: true,
-            slot: Some(slot),
+            op: Some(Op::Cmd(slot)),
             lines: Vec::new(),
             error: None,
         };
@@ -392,6 +402,96 @@ impl Shell {
                 }
                 this.out.running = false;
                 // 命令跑完仓库状态可能变了（生成了构建产物、改了文件），顺手重扫
+                this.repos = repos::list_repos();
+                this.refresh_status(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 跑一个同步操作（检测更新 / 拉取 / 推送）。
+    /// 与 run_slot 同一套后台管道：后台线程跑 + 共享缓冲，UI 线程 120ms 轮询回显。
+    fn run_sync(&mut self, op: Op, cx: &mut Context<Self>) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        // core 的操作锁同一时刻只放一个网络操作，UI 先挡掉连点
+        if self.out.running {
+            return;
+        }
+        self.out = OutState {
+            running: true,
+            op: Some(op),
+            lines: Vec::new(),
+            error: None,
+        };
+        cx.notify();
+
+        let buf: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let done = Arc::new(AtomicBool::new(false));
+
+        let sink_buf = Arc::clone(&buf);
+        let sink_done = Arc::clone(&done);
+        let run_path = path.clone();
+        let runner = cx.background_executor().spawn(async move {
+            let on_progress: Arc<dyn Fn(&qingbird_core::types::ProgressEvent) + Send + Sync> =
+                Arc::new(move |ev: &qingbird_core::types::ProgressEvent| {
+                    if let Ok(mut g) = sink_buf.lock() {
+                        let mut line = format!("· {}", ev.stage);
+                        if !ev.detail.is_empty() {
+                            line.push_str(&format!("  {}", ev.detail));
+                        }
+                        g.push(line);
+                    }
+                });
+            let r = match op {
+                Op::Pull => sync::pull_repo(&run_path, true, Some(&*on_progress)),
+                Op::Push => sync::push_repo(&run_path),
+                Op::Check => sync::check_update(&run_path, Some(&*on_progress)),
+                Op::Cmd(_) => unreachable!("run_sync 只接同步操作"),
+            };
+            sink_done.store(true, Ordering::SeqCst);
+            r
+        });
+
+        let ui_buf = Arc::clone(&buf);
+        let ui_done = Arc::clone(&done);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+                let batch = {
+                    let mut g = ui_buf.lock().unwrap_or_else(|e| e.into_inner());
+                    std::mem::take(&mut *g)
+                };
+                let finished = ui_done.load(Ordering::SeqCst);
+                this.update(cx, |this, cx| {
+                    this.out.lines.extend(batch);
+                    if finished {
+                        this.out.running = false;
+                    }
+                    cx.notify();
+                })
+                .ok();
+                if finished {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            let result = runner.await;
+            this.update(cx, |this, cx| {
+                this.out.lines.push(if result.ok {
+                    format!("✓ {}", result.message)
+                } else {
+                    format!("✗ {}", result.message)
+                });
+                this.out.running = false;
+                // 拉取/推送会改 ahead/behind，重扫一遍刷新侧栏与徽章
                 this.repos = repos::list_repos();
                 this.refresh_status(cx);
             })
@@ -1020,7 +1120,7 @@ impl Shell {
                             .child(format!("我的仓库 · 本地路径 {path}")),
                     ),
             )
-            .child(self.head_actions(t));
+            .child(self.head_actions(t, cx));
 
         // 常用命令卡
         let slots: Vec<Slot> = {
@@ -1114,8 +1214,10 @@ impl Shell {
             .child(self.status_bar(t, path))
     }
 
-    /// 头部右侧：拉取 / 推送（弱）+ 分组线 + 四个图标动作（sync 未迁入，先占位）
-    fn head_actions(&self, t: &Theme) -> Div {
+    /// 头部右侧：拉取 / 推送（弱）+ 分组线 + 四个图标动作
+    fn head_actions(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
+        let pulling = self.out.running && self.out.op == Some(Op::Pull);
+        let pushing = self.out.running && self.out.op == Some(Op::Push);
         h_flex()
             .flex_shrink_0()
             .items_center()
@@ -1125,14 +1227,18 @@ impl Shell {
                     .label("拉取")
                     .icon(IconName::ArrowDown)
                     .outline()
-                    .with_size(Size::Size(px(30.0))),
+                    .loading(pulling)
+                    .with_size(Size::Size(px(30.0)))
+                    .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
             )
             .child(
                 Button::new("wb-push")
                     .label("推送")
                     .icon(IconName::ArrowUp)
                     .outline()
-                    .with_size(Size::Size(px(30.0))),
+                    .loading(pushing)
+                    .with_size(Size::Size(px(30.0)))
+                    .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Push, cx))),
             )
             .child(div().w(px(1.0)).h(px(20.0)).bg(t.colors.border))
             .child(
@@ -1194,7 +1300,7 @@ impl Shell {
             .entry(path)
             .and_then(|e| e.cmd_runs.get(&slot.key()))
             .cloned();
-        let running = self.out.running && self.out.slot == Some(slot);
+        let running = self.out.running && self.out.op == Some(Op::Cmd(slot));
 
         let mut row = h_flex()
             .id(SharedString::from(format!("cmd-row-{}", slot.key())))
@@ -1706,7 +1812,7 @@ fn auto_sync_text(e: &RepoEntry) -> String {
 
 impl Shell {
     /// 侧栏 + 主区：头 / 信息页签 / 内容卡（README + 同步面板）/ 状态条
-    fn profile_page(&self, path: &str, t: &Theme, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn profile_page(&self, path: &str, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let view = self.view(path);
         let status = view.map(|v| v.status.clone()).unwrap_or_default();
         let changed = view.map(|v| v.changed).unwrap_or(0);
@@ -1794,13 +1900,17 @@ impl Shell {
                         Button::new("pf-check-update")
                             .label("检测更新")
                             .outline()
-                            .with_size(Size::Size(px(34.0))),
+                            .loading(self.out.running && self.out.op == Some(Op::Check))
+                            .with_size(Size::Size(px(34.0)))
+                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Check, cx))),
                     )
                     .child(
                         Button::new("pf-pull-update")
                             .label("拉取更新")
                             .primary()
-                            .with_size(Size::Size(px(34.0))),
+                            .loading(self.out.running && self.out.op == Some(Op::Pull))
+                            .with_size(Size::Size(px(34.0)))
+                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
                     ),
             );
 
@@ -1912,7 +2022,7 @@ impl Shell {
                     .child(self.lang_bar(t)),
             )
             .child(div().w(px(1.0)).h_full().flex_shrink_0().bg(t.colors.border))
-            .child(self.sync_panel(t));
+            .child(self.sync_panel(t, cx));
 
         v_flex()
             .flex_1()
@@ -1958,8 +2068,55 @@ impl Shell {
             .child(div().h_full().rounded(px(4.0)).bg(edge(t)).flex_grow(5.0))
     }
 
-    /// 拉取同步面板（380 宽）：sync 模块迁入 core 前先立骨架
-    fn sync_panel(&self, t: &Theme) -> Div {
+    /// 拉取同步面板（380 宽）：实时进度、日志与最终状态（透明拉取的核心展示区）
+    fn sync_panel(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
+        let busy = self.out.running;
+        let running_op = self.out.op;
+        // 日志区：无内容给占位提示；有内容逐行回显，末行结果按成败着色
+        let mut log_area = v_flex()
+            .id("pull-log")
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p(px(10.0))
+            .gap(px(4.0))
+            .rounded(px(8.0))
+            .bg(t.colors.popover)
+            .border_1()
+            .border_color(t.colors.border);
+        if self.out.lines.is_empty() {
+            log_area = log_area.child(
+                div()
+                    .text_size(px(12.0))
+                    .font_family(t.mono_font_family.clone())
+                    .text_color(tier4(t))
+                    .child("透明拉取：进度、日志与最终状态会显示在这里"),
+            );
+        } else {
+            let last = self.out.lines.len().saturating_sub(1);
+            for (i, line) in self.out.lines.iter().enumerate() {
+                let color = if i == last {
+                    if line.starts_with('✓') {
+                        t.colors.success
+                    } else if line.starts_with('✗') {
+                        t.colors.danger
+                    } else {
+                        tier3(t)
+                    }
+                } else {
+                    tier3(t)
+                };
+                log_area = log_area.child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_family(t.mono_font_family.clone())
+                        .text_color(color)
+                        .child(line.clone()),
+                );
+            }
+        }
+
         v_flex()
             .w(px(380.0))
             .h_full()
@@ -1982,15 +2139,27 @@ impl Shell {
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(tier4(t))
-                            .child("未接入"),
+                            .text_color(if busy { orange_text(t) } else { tier4(t) })
+                            .child(if busy {
+                                "同步中…".to_string()
+                            } else if self.out.lines.is_empty() {
+                                "未执行".to_string()
+                            } else {
+                                "已完成".to_string()
+                            }),
                     ),
             )
             .child(
                 div()
                     .text_size(px(12.0))
                     .text_color(tier3(t))
-                    .child("尚未执行同步"),
+                    .child(match (busy, running_op) {
+                        (true, Some(Op::Pull)) => "正在拉取云端更新…".to_string(),
+                        (true, Some(Op::Push)) => "正在推送本地提交…".to_string(),
+                        (true, Some(Op::Check)) => "正在检查云端更新…".to_string(),
+                        (true, _) => "正在同步…".to_string(),
+                        (false, _) => "点击下方按钮开始同步".to_string(),
+                    }),
             )
             .child(
                 div()
@@ -1998,29 +2167,15 @@ impl Shell {
                     .h(px(6.0))
                     .rounded(px(3.0))
                     .bg(track(t))
-                    .child(div().w(px(0.0)).h_full().rounded(px(3.0)).bg(t.colors.accent)),
-            )
-            .child(
-                v_flex()
-                    .id("pull-log")
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p(px(10.0))
-                    .gap(px(4.0))
-                    .rounded(px(8.0))
-                    .bg(t.colors.popover)
-                    .border_1()
-                    .border_color(t.colors.border)
                     .child(
                         div()
-                            .text_size(px(12.0))
-                            .font_family(t.mono_font_family.clone())
-                            .text_color(tier4(t))
-                            .child("透明拉取：进度、日志与最终状态会显示在这里"),
+                            .w(if busy { px(60.0) } else { px(0.0) })
+                            .h_full()
+                            .rounded(px(3.0))
+                            .bg(t.colors.accent),
                     ),
             )
+            .child(log_area)
             .child(
                 h_flex()
                     .items_center()
@@ -2029,13 +2184,25 @@ impl Shell {
                         Button::new("sync-pull")
                             .label("拉取")
                             .secondary()
-                            .with_size(Size::Size(px(30.0))),
+                            .loading(busy && running_op == Some(Op::Pull))
+                            .with_size(Size::Size(px(30.0)))
+                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
                     )
                     .child(
                         Button::new("sync-push")
                             .label("推送")
                             .secondary()
-                            .with_size(Size::Size(px(30.0))),
+                            .loading(busy && running_op == Some(Op::Push))
+                            .with_size(Size::Size(px(30.0)))
+                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Push, cx))),
+                    )
+                    .child(
+                        Button::new("sync-check")
+                            .label("检测更新")
+                            .ghost()
+                            .loading(busy && running_op == Some(Op::Check))
+                            .with_size(Size::Size(px(30.0)))
+                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Check, cx))),
                     ),
             )
     }
