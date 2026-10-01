@@ -12,6 +12,8 @@ use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::InteractiveElementExt as _;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::Disableable as _;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -175,6 +177,26 @@ pub struct Shell {
     profile: ProfileState,
     profile_seq: u64,
     profile_task: Option<Task<()>>,
+    /// 总览页勾选的仓库路径（Screen 2 表格行首复选框）
+    ov_checked: std::collections::HashSet<String>,
+    /// 总览页批量同步的进度与结论；None = 本会话还没跑过批量
+    batch: Option<BatchRun>,
+}
+
+/// 总览页的一键批量。与旧版约定一致：前端串行循环 core 的 pull/push，
+/// 不新增后端批量命令——代理回退、脏工作区判定都已在那两条路径里。
+struct BatchRun {
+    pull: bool,
+    /// 队列里的仓库路径，顺序即执行顺序
+    paths: Vec<String>,
+    done: usize,
+    ok: usize,
+    /// 拉取时脏工作区跳过的个数（推送没有这条路，恒 0）
+    skipped: usize,
+    failed: usize,
+    running: bool,
+    /// 跑完（或失败）的一句话结论，总览页状态条展示
+    note: Option<String>,
 }
 
 impl Shell {
@@ -212,6 +234,8 @@ impl Shell {
             profile: ProfileState::default(),
             profile_seq: 0,
             profile_task: None,
+            ov_checked: std::collections::HashSet::new(),
+            batch: None,
         };
         this.refresh_status(cx);
         this.scan_space(cx);
@@ -678,6 +702,95 @@ impl Shell {
             .ok();
         }));
     }
+
+    // ---------- 总览批量同步（Screen 2） ----------
+
+    /// 串行跑一批同步操作。拉取遇脏工作区跳过（不自动 stash——那是替用户
+    /// 做决定），与旧版总览批量的约定一致；推送没有跳过这条路。
+    /// 全程一个后台任务，每完成一项就刷一次进度。
+    fn run_batch(&mut self, pull: bool, paths: Vec<String>, cx: &mut Context<Self>) {
+        if self.batch.as_ref().is_some_and(|b| b.running) {
+            return; // 上一批还在跑
+        }
+        if paths.is_empty() {
+            return;
+        }
+        self.batch = Some(BatchRun {
+            pull,
+            paths: paths.clone(),
+            done: 0,
+            ok: 0,
+            skipped: 0,
+            failed: 0,
+            running: true,
+            note: None,
+        });
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            for path in paths {
+                // 跑之前先看脏不脏：拉取对脏工作区让路
+                let skip = this
+                    .update(cx, |this, _| {
+                        pull
+                            && this
+                                .views
+                                .get(&path)
+                                .map(|v| v.status.dirty)
+                                .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                // None = 跳过，Some(true) 成功，Some(false) 失败
+                let outcome: Option<bool> = if skip {
+                    None
+                } else {
+                    Some(
+                        cx.background_executor()
+                            .spawn(async move {
+                                if pull {
+                                    sync::pull_repo(&path, true, None).ok
+                                } else {
+                                    sync::push_repo(&path).ok
+                                }
+                            })
+                            .await,
+                    )
+                };
+                this.update(cx, |this, cx| {
+                    let Some(b) = this.batch.as_mut() else {
+                        return;
+                    };
+                    b.done += 1;
+                    match outcome {
+                        None => b.skipped += 1,
+                        Some(true) => b.ok += 1,
+                        Some(false) => b.failed += 1,
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+            this.update(cx, |this, cx| {
+                if let Some(b) = this.batch.as_mut() {
+                    b.running = false;
+                    let name = if b.pull { "批量拉取" } else { "批量推送" };
+                    let mut parts = vec![format!("{} 个成功", b.ok)];
+                    if b.skipped > 0 {
+                        parts.push(format!("{} 个跳过（工作区有改动，需切到该仓库确认后再拉）", b.skipped));
+                    }
+                    if b.failed > 0 {
+                        parts.push(format!("{} 个失败，原因见各自仓库的日志", b.failed));
+                    }
+                    b.note = Some(format!("{name}完成：{}", parts.join(" · ")));
+                    // 拉取/推送改了 ahead/behind，重扫刷新侧栏与表格
+                    this.refresh_status(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
 }
 
 /// 档案页迷你柱图的天数窗口。设计稿标「近 30 天活跃度」；
@@ -746,7 +859,7 @@ impl Render for Shell {
 
         // 主区：按页面与仓库归属路由
         let main: AnyElement = match self.page {
-            Page::Overview => overview_page(&t).into_any_element(),
+            Page::Overview => self.overview_page(&t, cx).into_any_element(),
             Page::Repos => match self.selected.clone() {
                 Some(path) => {
                     let third = self
@@ -1116,28 +1229,473 @@ fn empty_main(t: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn overview_page(t: &Theme) -> Div {
+// ================= Screen 2：总览批量同步 =================
+
+impl Shell {
+    /// 总览页：标题统计 + 四张状态卡 + 分组表格 + 底部批量条。
+    /// 数据全部来自已有 views 状态缓存（侧栏扫描的那份），不另扫一遍。
+    fn overview_page(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        // 行数据：归属分组 + 桶判定（口径与侧栏、ForkInfo 一致）
+        let rows: Vec<(&RepoEntry, &RepoView)> = self
+            .repos
+            .iter()
+            .map(|r| (r, self.views.get(&r.path).unwrap_or(&EMPTY_VIEW)))
+            .collect();
+        let mine: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, (e, _))| !e.is_third_party)
+            .map(|(i, _)| i)
+            .collect();
+        let third: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, (e, _))| e.is_third_party)
+            .map(|(i, _)| i)
+            .collect();
+
+        // 四张统计卡：最新 / 落后云端 / 已分叉 / 未提交（未提交是独立维度，
+        // 与其余三档可重叠——设计稿如此，别强行互斥）
+        let count = |f: &dyn Fn(&RepoView) -> bool| rows.iter().filter(|(_, v)| f(v)).count();
+        let synced_n = count(&|v| bucket_of(&v.status) == Bucket::Synced);
+        let behind_n = count(&|v| bucket_of(&v.status) == Bucket::Behind);
+        let fork_n = count(&|v| bucket_of(&v.status) == Bucket::Forked);
+        let dirty_n = count(&|v| v.status.dirty);
+
+        // 批量队列：只收同类动作的行（分叉是「查看」，不收——
+        // 备份变基会改写历史，只能进那个仓库的向导里点）
+        let todo_paths = |pull: bool| -> Vec<String> {
+            rows.iter()
+                .filter(|(_, v)| {
+                    let b = bucket_of(&v.status);
+                    if pull {
+                        b == Bucket::Behind
+                    } else {
+                        b == Bucket::Ahead
+                    }
+                })
+                .map(|(e, _)| e.path.clone())
+                .collect()
+        };
+        let pull_paths = todo_paths(true);
+        let push_paths = todo_paths(false);
+        let batch_running = self.batch.as_ref().map(|b| b.running).unwrap_or(false);
+
+        let head = h_flex()
+            .w_full()
+            .justify_between()
+            .items_start()
+            .child(
+                v_flex()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(18.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(t.colors.foreground)
+                            .child("总览"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(tier3(t))
+                            .child(format!(
+                                "{} 个仓库 · 我的 {} · 第三方 {}",
+                                rows.len(),
+                                mine.len(),
+                                third.len()
+                            )),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap(px(8.0))
+                    .child(
+                        Button::new("ov-pull-all")
+                            .label(if pull_paths.is_empty() {
+                                "全部拉取".to_string()
+                            } else {
+                                format!("全部拉取 {}", pull_paths.len())
+                            })
+                            .outline()
+                            .disabled(pull_paths.is_empty() || batch_running)
+                            .with_size(Size::Size(px(32.0)))
+                            .on_click(cx.listener({
+                                let paths = pull_paths.clone();
+                                move |this, _, _, cx| this.run_batch(true, paths.clone(), cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("ov-push-all")
+                            .label(if push_paths.is_empty() {
+                                "全部推送".to_string()
+                            } else {
+                                format!("全部推送 {}", push_paths.len())
+                            })
+                            .primary()
+                            .disabled(push_paths.is_empty() || batch_running)
+                            .with_size(Size::Size(px(32.0)))
+                            .on_click(cx.listener({
+                                let paths = push_paths.clone();
+                                move |this, _, _, cx| this.run_batch(false, paths.clone(), cx)
+                            })),
+                    ),
+            );
+
+        let cards = h_flex()
+            .w_full()
+            .gap(px(10.0))
+            .child(stat_card(synced_n, "最新", t.colors.success, t))
+            .child(stat_card(behind_n, "落后云端", orange(t), t))
+            .child(stat_card(fork_n, "已分叉", orange(t), t))
+            .child(stat_card(dirty_n, "未提交", t.colors.accent, t));
+
+        // 表格头
+        let col_branch = px(90.0);
+        let col_status = px(96.0);
+        let col_counts = px(90.0);
+        let col_synced = px(90.0);
+        let col_action = px(120.0);
+        let head_row = |name: &str| -> Div {
+            h_flex()
+                .w_full()
+                .items_center()
+                .px(px(12.0))
+                .h(px(32.0))
+                .gap(px(8.0))
+                .child(div().w(px(24.0))) // 复选框占位
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(11.0))
+                        .text_color(tier4(t))
+                        .child(name.to_string()),
+                )
+                .child(div().w(col_branch).text_size(px(11.0)).text_color(tier4(t)).child("分支"))
+                .child(div().w(col_status).text_size(px(11.0)).text_color(tier4(t)).child("状态"))
+                .child(div().w(col_counts).text_size(px(11.0)).text_color(tier4(t)).child("领先 · 落后"))
+                .child(div().w(col_synced).text_size(px(11.0)).text_color(tier4(t)).child("上次同步"))
+                .child(div().w(col_action).text_size(px(11.0)).text_color(tier4(t)).child("操作"))
+        };
+
+        let row = |(i, (e, v)): (usize, (&RepoEntry, &RepoView)), cx: &mut Context<Self>| -> Div {
+            let path = e.path.clone();
+            let b = bucket_of(&v.status);
+            let name = if e.alias.trim().is_empty() {
+                e.name.clone()
+            } else {
+                e.alias.trim().to_string()
+            };
+            let checked = self.ov_checked.contains(&path);
+            let pill_view = row_pill(v, e.is_third_party, t);
+
+            // 行尾动作：拉取 / 推送 / 查看按桶给；跑批量中禁用
+            let action: Option<Button> = match b {
+                Bucket::Behind => Some(
+                    Button::new(SharedString::from(format!("ov-act-pull-{i}")))
+                        .label("拉取")
+                        .outline()
+                        .disabled(batch_running)
+                        .with_size(Size::Size(px(26.0)))
+                        .on_click(cx.listener({
+                            let path = path.clone();
+                            move |this, _, _, cx| {
+                                // 切到该仓库再跑：日志落进它的输出块（与旧版 pullFor 同语义）
+                                this.select(path.clone(), cx);
+                                this.run_sync(Op::Pull, cx);
+                            }
+                        })),
+                ),
+                Bucket::Ahead => Some(
+                    Button::new(SharedString::from(format!("ov-act-push-{i}")))
+                        .label("推送")
+                        .outline()
+                        .disabled(batch_running)
+                        .with_size(Size::Size(px(26.0)))
+                        .on_click(cx.listener({
+                            let path = path.clone();
+                            move |this, _, _, cx| {
+                                this.select(path.clone(), cx);
+                                this.run_sync(Op::Push, cx);
+                            }
+                        })),
+                ),
+                Bucket::Forked | Bucket::Unknown => Some(
+                    Button::new(SharedString::from(format!("ov-act-view-{i}")))
+                        .label("查看")
+                        .ghost()
+                        .with_size(Size::Size(px(26.0)))
+                        .on_click(cx.listener({
+                            let path = path.clone();
+                            move |this, _, _, cx| {
+                                this.select(path.clone(), cx);
+                                this.page = Page::Repos;
+                                cx.notify();
+                            }
+                        })),
+                ),
+                _ => None,
+            };
+
+            h_flex()
+                .w_full()
+                .items_center()
+                .px(px(12.0))
+                .h(px(36.0))
+                .gap(px(8.0))
+                .child(
+                    div().w(px(24.0)).flex_shrink_0().child(
+                        Checkbox::new(SharedString::from(format!("ov-cb-{i}")))
+                            .checked(checked)
+                            .on_click({
+                                let path = path.clone();
+                                let this = cx.entity();
+                                move |checked, _, app| {
+                                    this.update(app, |this, cx| {
+                                        if *checked {
+                                            this.ov_checked.insert(path.clone());
+                                        } else {
+                                            this.ov_checked.remove(&path);
+                                        }
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(t.colors.foreground)
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .w(col_branch)
+                        .text_size(px(12.0))
+                        .font_family(t.mono_font_family.clone())
+                        .text_color(tier3(t))
+                        .child(if v.status.branch.is_empty() {
+                            "—".to_string()
+                        } else {
+                            v.status.branch.clone()
+                        }),
+                )
+                .child(div().w(col_status).child(pill_view))
+                .child(
+                    div()
+                        .w(col_counts)
+                        .text_size(px(12.0))
+                        .font_family(t.mono_font_family.clone())
+                        .text_color(if v.status.ahead > 0 || v.status.behind > 0 {
+                            body(t)
+                        } else {
+                            tier4(t)
+                        })
+                        .child(format!("{} · {}", v.status.ahead, v.status.behind)),
+                )
+                .child(
+                    div()
+                        .w(col_synced)
+                        .text_size(px(12.0))
+                        .text_color(tier3(t))
+                        .child({
+                            let ts = e.last_auto_check;
+                            if ts == 0 { "—".to_string() } else { rel_time(ts) }
+                        }),
+                )
+                .child(
+                    div().w(col_action).child(match action {
+                        Some(btn) => btn.into_any_element(),
+                        None => div().into_any_element(),
+                    }),
+                )
+        };
+
+        // 分组表格：组头 + 行；空组不画
+        let mut table = v_flex()
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .id("ov-table")
+            .overflow_y_scroll()
+            .rounded(px(10.0))
+            .bg(t.colors.popover)
+            .border_1()
+            .border_color(t.colors.border)
+            .child(head_row("仓库名"));
+        if !mine.is_empty() {
+            table = table.child(group_header("我的仓库 · 重点关注", t));
+            for (i, idx) in mine.iter().enumerate() {
+                table = table.child(row((*idx, rows[*idx]), cx).when(i % 2 == 1, |r| r.bg(t.colors.list_even)));
+            }
+        }
+        if !third.is_empty() {
+            table = table.child(group_header("第三方仓库 · 跟踪更新", t));
+            for (i, idx) in third.iter().enumerate() {
+                table = table.child(row((*idx, rows[*idx]), cx).when(i % 2 == 1, |r| r.bg(t.colors.list_even)));
+            }
+        }
+        if rows.is_empty() {
+            table = table.child(
+                div()
+                    .p(px(32.0))
+                    .text_size(px(13.0))
+                    .text_color(tier3(t))
+                    .child("还没有仓库。回到工作台添加一个吧。"),
+            );
+        }
+
+        // 底部批量条：勾选行按各自动作收束成一批；混选时逐个按行内动作跑
+        let checked_paths: Vec<String> = rows
+            .iter()
+            .filter(|(e, _)| self.ov_checked.contains(&e.path))
+            .map(|(e, _)| e.path.clone())
+            .collect();
+        let checked_pull: Vec<String> = checked_paths
+            .iter()
+            .filter(|p| {
+                rows.iter().any(|(e, v)| {
+                    &e.path == *p && bucket_of(&v.status) == Bucket::Behind
+                })
+            })
+            .cloned()
+            .collect();
+        let checked_push: Vec<String> = checked_paths
+            .iter()
+            .filter(|p| {
+                rows.iter().any(|(e, v)| {
+                    &e.path == *p && bucket_of(&v.status) == Bucket::Ahead
+                })
+            })
+            .cloned()
+            .collect();
+        let mut bottom_bar = h_flex()
+            .w_full()
+            .justify_between()
+            .items_center()
+            .child(
+                div().text_size(px(12.0)).text_color(tier3(t)).child(
+                    match &self.batch {
+                        Some(b) if b.running => format!(
+                            "批量{}中 {}/{}…",
+                            if b.pull { "拉取" } else { "推送" },
+                            b.done,
+                            b.paths.len()
+                        ),
+                        Some(b) if b.note.is_some() => b.note.clone().unwrap(),
+                        _ => format!("勾选仓库后可批量同步；当前 {} 个待拉取、{} 个待推送", pull_paths.len(), push_paths.len()),
+                    },
+                ),
+            );
+        if !checked_paths.is_empty() {
+            bottom_bar = bottom_bar.child(
+                h_flex()
+                    .gap(px(8.0))
+                    .when(!checked_pull.is_empty(), |bar| {
+                        bar.child(
+                            Button::new("ov-batch-checked-pull")
+                                .label(format!("拉取所选 ({})", checked_pull.len()))
+                                .primary()
+                                .disabled(batch_running)
+                                .with_size(Size::Size(px(28.0)))
+                                .on_click(cx.listener({
+                                    let paths = checked_pull.clone();
+                                    move |this, _, _, cx| this.run_batch(true, paths.clone(), cx)
+                                })),
+                        )
+                    })
+                    .when(!checked_push.is_empty(), |bar| {
+                        bar.child(
+                            Button::new("ov-batch-checked-push")
+                                .label(format!("推送所选 ({})", checked_push.len()))
+                                .primary()
+                                .disabled(batch_running)
+                                .with_size(Size::Size(px(28.0)))
+                                .on_click(cx.listener({
+                                    let paths = checked_push.clone();
+                                    move |this, _, _, cx| this.run_batch(false, paths.clone(), cx)
+                                })),
+                        )
+                    }),
+            );
+        }
+
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .h_full()
+            .bg(t.colors.background)
+            .p(px(24.0))
+            .gap(px(14.0))
+            .child(head)
+            .child(cards)
+            .child(table)
+            .child(bottom_bar)
+    }
+}
+
+/// 空视图：仓库还没有被扫到时（首帧、扫描中）给总览行兜底
+static EMPTY_VIEW: RepoView = RepoView {
+    status: RepoStatus {
+        is_repo: false,
+        branch: String::new(),
+        ahead: 0,
+        behind: 0,
+        dirty: false,
+        has_upstream: false,
+        remote_url: String::new(),
+    },
+    changed: 0,
+    detected: run_cmd::CmdDetect {
+        test_cmd: String::new(),
+        build_cmd: String::new(),
+        dev_cmd: String::new(),
+        install_cmd: String::new(),
+    },
+};
+
+/// 统计卡：大数字 + 标签，数字按语义着色
+fn stat_card(n: usize, label: &str, color: Hsla, t: &Theme) -> Div {
     v_flex()
         .flex_1()
-        .min_h_0()
-        .h_full()
-        .items_center()
-        .justify_center()
-        .gap(px(4.0))
-        .bg(t.colors.background)
+        .gap(px(2.0))
+        .p(px(14.0))
+        .rounded(px(10.0))
+        .bg(t.colors.popover)
+        .border_1()
+        .border_color(t.colors.border)
         .child(
             div()
-                .text_size(px(16.0))
+                .text_size(px(20.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(t.colors.foreground)
-                .child("总览 · 批量同步"),
+                .text_color(if n > 0 { color } else { tier4(t) }),
         )
-        .child(
-            div()
-                .text_size(px(13.0))
-                .text_color(tier3(t))
-                .child("按 Screen 2 设计稿实现：仓库表格分组 + 批量拉取 / 推送 + 透明日志"),
-        )
+        .child(div().text_size(px(12.0)).text_color(tier3(t)).child(label.to_string()))
+}
+
+/// 总览行状态 pill：分叉 > 落后/可更新 > 未提交 > 待推送 > 最新。
+/// 「落后 / 可更新」按归属分文案（我的：落后；第三方：可更新），语义同侧栏徽标。
+fn row_pill(v: &RepoView, third: bool, t: &Theme) -> Div {
+    let s = &v.status;
+    let b = bucket_of(s);
+    let (text, fg, bg) = if b == Bucket::Forked {
+        ("已分叉", orange(t), orange_bg(t))
+    } else if b == Bucket::Behind {
+        (if third { "可更新" } else { "落后" }, orange(t), orange_bg(t))
+    } else if s.dirty {
+        ("未提交", t.colors.accent, blue_bg(t))
+    } else if b == Bucket::Ahead {
+        ("待推送", t.colors.accent, blue_bg(t))
+    } else if b == Bucket::Unknown {
+        ("待扫描", tier3(t), track(t))
+    } else {
+        ("最新", t.colors.success, track(t))
+    };
+    pill(text, fg, bg, t)
 }
 
 // ================= Screen 3：我的仓库工作台 =================
