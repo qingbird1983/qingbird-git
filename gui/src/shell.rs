@@ -27,12 +27,14 @@ use gpui_kit::{
     IntoElement, ParentElement, Render, SharedString, Stateful, StatefulInteractiveElement as _,
     Styled, Task, Window, px, rgb,
 };
+use qingbird_core::fork;
+use qingbird_core::net;
 use qingbird_core::repos::{self, ActivityDay, LangStat, ReadmePreview};
 use qingbird_core::run_cmd::{self, Slot, MAX_PINNED_CMDS};
 use qingbird_core::space;
 use qingbird_core::store::RepoEntry;
 use qingbird_core::sync;
-use qingbird_core::types::RepoStatus;
+use qingbird_core::types::{ForkInfo, RepoStatus};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -174,6 +176,10 @@ enum Op {
     Pull,
     Push,
     Check,
+    /// 备份并变基到云端；bool = 工作区脏时用户同意先暂存
+    Rebase(bool),
+    /// 硬回退到变基备份分支（界面已二次确认）
+    UndoRebase,
 }
 
 /// 深色输出块的状态
@@ -254,6 +260,14 @@ pub struct Shell {
     /// 鼠标悬停在哪一行（侧栏仓库 / 总览表格行）。
     /// gpui 没有 CSS 那样的 `:hover` 样式，悬停反馈只能靠事件记状态再重画。
     hovered: Option<String>,
+    /// 当前选中仓库的分叉信息（ahead>0 且 behind>0 时由状态扫描顺手算出）
+    fork: Option<ForkInfo>,
+    /// 刚做完变基的备份分支名：有这个值界面才提供「撤销变基」，切仓库即失效
+    fork_backup: Option<String>,
+    /// 分叉卡「只看差异」是否展开
+    fork_diff: bool,
+    /// 「撤销变基」处于二次确认状态（会丢弃变基后的新提交，必须确认）
+    fork_confirm: bool,
 }
 
 /// 添加 / 编辑仓库弹窗的状态。
@@ -357,6 +371,10 @@ impl Shell {
             batch: None,
             dlg: None,
             hovered: None,
+            fork: None,
+            fork_backup: None,
+            fork_diff: false,
+            fork_confirm: false,
         };
         this.refresh_status(cx);
         this.scan_space(cx);
@@ -424,11 +442,12 @@ impl Shell {
             self.scanning = false;
             return;
         }
+        let sel = self.selected.clone();
         self.scan = Some(cx.spawn(async move |this, cx| {
             let scan = cx
                 .background_executor()
                 .spawn(async move {
-                    std::thread::scope(|s| {
+                    let results: Vec<_> = std::thread::scope(|s| {
                         let handles: Vec<_> = paths
                             .iter()
                             .map(|p| {
@@ -445,9 +464,22 @@ impl Shell {
                                 })
                             })
                             .collect::<Vec<_>>()
-                    })
+                    });
+                    // 分叉信息只对选中仓库算（几条本地 git 命令），和状态扫描同轮完成；
+                    // 没分叉就是 None，分叉卡不出现
+                    let fork = sel.as_ref().and_then(|sel_path| {
+                        results
+                            .iter()
+                            .find(|(p, _, _)| p == sel_path)
+                            .filter(|(_, st, _)| st.ahead > 0 && st.behind > 0)
+                            .and_then(|(p, st, _)| {
+                                fork::fork_info(p, st, &|args: &[&str]| net::run_local(p, args))
+                            })
+                    });
+                    (results, fork)
                 })
                 .await;
+            let (scan, fork) = scan;
             this.update(cx, |this, cx| {
                 if this.seq != seq {
                     return; // 已经有更新的一轮在跑了，这批过期
@@ -458,6 +490,7 @@ impl Shell {
                     v.status = status;
                     v.changed = changed;
                 }
+                this.fork = fork;
                 cx.notify();
             })
             .ok();
@@ -470,6 +503,11 @@ impl Shell {
         }
         self.selected = Some(path.clone());
         self.out = OutState::default();
+        // 分叉状态跟仓库走：换仓库全部作废（备份分支只在"刚变基完"那一刻有意义）
+        self.fork = None;
+        self.fork_backup = None;
+        self.fork_diff = false;
+        self.fork_confirm = false;
         repos::touch_repo(&path);
         self.scan_space(cx);
         self.scan_profile(cx);
@@ -886,6 +924,8 @@ impl Shell {
                 Op::Pull => sync::pull_repo(&run_path, true, Some(&*on_progress)),
                 Op::Push => sync::push_repo(&run_path),
                 Op::Check => sync::check_update(&run_path, Some(&*on_progress)),
+                Op::Rebase(stash) => fork::rebase_fork(&run_path, stash, Some(&*on_progress)),
+                Op::UndoRebase => fork::undo_rebase(&run_path),
                 Op::Cmd(_) => unreachable!("run_sync 只接同步操作"),
             };
             sink_done.store(true, Ordering::SeqCst);
@@ -928,7 +968,22 @@ impl Shell {
                     format!("✗ {}", result.message)
                 });
                 this.out.running = false;
-                // 拉取/推送会改 ahead/behind，重扫一遍刷新侧栏与徽章
+                // 变基改写了历史：接住后端算好的分叉信息与备份分支。
+                // 备份分支只在变基成功那一刻提供"撤销"；撤销完成后不再提供
+                match op {
+                    Op::Rebase(_) => {
+                        this.fork = result.fork;
+                        this.fork_backup = result.backup_branch.filter(|_| result.ok);
+                        this.fork_confirm = false;
+                    }
+                    Op::UndoRebase => {
+                        this.fork = result.fork;
+                        this.fork_backup = None;
+                        this.fork_confirm = false;
+                    }
+                    _ => {}
+                }
+                // 拉取/推送/变基都会改 ahead/behind，重扫一遍刷新侧栏与徽章
                 this.repos = repos::list_repos();
                 this.refresh_status(cx);
             })
@@ -2432,6 +2487,33 @@ fn dlg_footer(
 }
 
 /// 统计卡：大数字 + 标签，数字按语义着色
+/// 分叉卡差异区的提交清单块。空列表要点明"没有"而不是留白（与旧版 forkGuide 一致）。
+fn fork_commit_block(is_local: bool, commits: &[String], t: &Theme) -> Div {
+    let n = commits.len();
+    let title = match (is_local, n) {
+        (true, 0) => "本地没有未推送的提交".to_string(),
+        (true, _) => format!("本地未推送的提交（{n}）"),
+        (false, 0) => "云端没有新提交".to_string(),
+        (false, _) => format!("云端新增的提交（{n}）"),
+    };
+    v_flex()
+        .w_full()
+        .gap(px(GAP_TIGHT))
+        .child(
+            div()
+                .text_size(px(FS_SEC))
+                .text_color(tier3(t))
+                .child(title),
+        )
+        .children(commits.iter().map(|c| {
+            div()
+                .font_family(t.mono_font_family.clone())
+                .text_size(px(FS_META))
+                .text_color(body(t))
+                .child(c.clone())
+        }))
+}
+
 fn stat_card(n: usize, label: &str, color: Hsla, t: &Theme) -> Div {
     v_flex()
         .flex_1()
@@ -2615,7 +2697,7 @@ impl Shell {
             .min_h_0()
             .gap(px(GAP_LG))
             .child(self.space_card(t, cx))
-            .child(self.git_card(path, &status, changed, t));
+            .child(self.git_card(path, &status, changed, t, cx));
 
         v_flex()
             .flex_1()
@@ -2625,9 +2707,188 @@ impl Shell {
             .p(px(24.0))
             .gap(px(GAP_LG))
             .child(head)
+            .children(self.fork_card(t, cx))
             .child(cmd_card)
             .child(bottom)
             .child(self.status_bar(t, path))
+    }
+
+    /// 分叉恢复向导卡：本地与云端历史分叉（或刚变基完备份还在）时出现在头部下方，
+    /// 把「ff 拉取失败」这种死胡同变成一组有出口的动作。
+    /// 按钮逻辑与旧版 forkGuide 一致：仓库卡在用户自己的变基/合并里时只解释、
+    /// 一个动作都不给；「撤销变基」会丢弃变基后的新提交，必须二次确认。
+    fn fork_card(&self, t: &Theme, cx: &mut Context<Self>) -> Option<Div> {
+        let busy = self.out.running;
+        let (title, summary, blocked) = if let Some(fk) = &self.fork {
+            let mut parts = vec![
+                format!("本地有 {} 个提交未推送", fk.ahead),
+                format!("云端有 {} 个新提交", fk.behind),
+            ];
+            if fk.dirty {
+                parts.push("工作区还有未提交变更".into());
+            }
+            (
+                "本地与云端已分叉".to_string(),
+                format!("{}。", parts.join("，")),
+                fk.blocked_reason.clone(),
+            )
+        } else if let Some(b) = &self.fork_backup {
+            (
+                "上次变基的备份还在".to_string(),
+                format!("本地提交已经重放到云端提交之上。觉得不对可以回到变基前（备份分支 {b}）。"),
+                None,
+            )
+        } else {
+            return None;
+        };
+
+        // 动作行：变基（脏工作区 = 带暂存版）+ 撤销（二次确认）+ 差异开关
+        let mut actions = h_flex().flex_wrap().items_center().gap(px(GAP));
+        if blocked.is_none() {
+            if let Some(fk) = &self.fork {
+                let (label, hint, stash) = if fk.dirty {
+                    (
+                        "暂存并变基到云端",
+                        "先把改动暂存起来再变基，完成后自动恢复；本地提交会被重放到云端提交之上，动手前会建好备份分支",
+                        true,
+                    )
+                } else {
+                    (
+                        "备份并变基到云端",
+                        "把本地提交重放到云端提交之上；动手前会建好备份分支，冲突会自动中止并复原",
+                        false,
+                    )
+                };
+                actions = actions.child(
+                    Button::new("fk-rebase")
+                        .label(label)
+                        .tooltip(SharedString::from(hint))
+                        .primary()
+                        .with_size(Size::Size(px(BTN_SM)))
+                        .disabled(busy)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.run_sync(Op::Rebase(stash), cx)
+                        })),
+                );
+            }
+            if let Some(_b) = &self.fork_backup {
+                if self.fork_confirm {
+                    actions = actions
+                        .child(
+                            Button::new("fk-undo-yes")
+                                .label("确认撤销？")
+                                .danger()
+                                .with_size(Size::Size(px(BTN_SM)))
+                                .disabled(busy)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.run_sync(Op::UndoRebase, cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("fk-undo-no")
+                                .label("取消")
+                                .ghost()
+                                .with_size(Size::Size(px(BTN_SM)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.fork_confirm = false;
+                                    cx.notify();
+                                })),
+                        );
+                } else {
+                    actions = actions.child(
+                        Button::new("fk-undo")
+                            .label("撤销变基")
+                            .tooltip(format!(
+                                "回到变基前的状态（备份分支 {}），会丢弃变基之后新产生的提交",
+                                self.fork_backup.clone().unwrap_or_default()
+                            ))
+                            .danger()
+                            .with_size(Size::Size(px(BTN_SM)))
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.fork_confirm = true;
+                                cx.notify();
+                            })),
+                    );
+                }
+            }
+            if self.fork.is_some() {
+                actions = actions.child(
+                    Button::new("fk-diff")
+                        .label(if self.fork_diff { "收起差异" } else { "只看差异" })
+                        .ghost()
+                        .with_size(Size::Size(px(BTN_SM)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.fork_diff = !this.fork_diff;
+                            cx.notify();
+                        })),
+                );
+            }
+        }
+
+        // 差异区：两列提交清单 + 一句说明（旧版 fork-diff 原样平移）
+        let diff = self.fork.as_ref().filter(|_| self.fork_diff).map(|fk| {
+            v_flex()
+                .w_full()
+                .gap(px(GAP))
+                .child(fork_commit_block(
+                    true,
+                    &fk.local_commits,
+                    t,
+                ))
+                .child(fork_commit_block(
+                    false,
+                    &fk.remote_commits,
+                    t,
+                ))
+                .child(
+                    div()
+                        .text_size(px(FS_META))
+                        .text_color(tier4(t))
+                        .child(format!(
+                            "变基会把本地提交重放到 {} 之上，提交内容不变但历史会改写；动手前后端会先把\"变基前\"的位置固定在备份分支上",
+                            if fk.upstream.is_empty() { "云端".into() } else { fk.upstream.clone() }
+                        )),
+                )
+        });
+
+        Some(
+            v_flex()
+                .w_full()
+                .gap(px(GAP))
+                .p(px(16.0))
+                .rounded(px(R_XL))
+                .bg(orange_bg(t))
+                .border_1()
+                .border_color(t.colors.border)
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(GAP))
+                        .child(div().text_color(orange(t)).child(icon_md(AssetIcon::GitMerge)))
+                        .child(
+                            div()
+                                .text_size(px(FS_BODY))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(t.colors.foreground)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(FS_SEC))
+                                .text_color(orange_text(t))
+                                .child(summary),
+                        ),
+                )
+                .children(blocked.as_deref().map(|reason| {
+                    div()
+                        .text_size(px(FS_SEC))
+                        .text_color(body(t))
+                        .child(reason.to_string())
+                }))
+                .when(blocked.is_none(), |card| card.child(actions))
+                .children(diff),
+        )
     }
 
     /// 头部右侧：拉取 / 推送（弱）+ 分组线 + 四个图标动作
@@ -3046,7 +3307,7 @@ impl Shell {
     }
 
     /// Git 附带卡（设计稿固定 300 宽）：同步概况 / 未提交 / 弱按钮 / 查看详情
-    fn git_card(&self, path: &str, s: &RepoStatus, changed: u32, t: &Theme) -> Div {
+    fn git_card(&self, path: &str, s: &RepoStatus, changed: u32, t: &Theme, cx: &mut Context<Self>) -> Div {
         let b = bucket_of(s);
         let desc = match b {
             Bucket::Synced => "与云端基本一致",
@@ -3120,13 +3381,17 @@ impl Shell {
                         Button::new("git-pull")
                             .label("拉取")
                             .secondary()
-                            .with_size(Size::Size(px(BTN))),
+                            .with_size(Size::Size(px(BTN)))
+                            .disabled(self.out.running)
+                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
                     )
                     .child(
                         Button::new("git-push")
                             .label("推送")
                             .secondary()
-                            .with_size(Size::Size(px(BTN))),
+                            .with_size(Size::Size(px(BTN)))
+                            .disabled(self.out.running)
+                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Push, cx))),
                     ),
             )
             .child(div().w_full().h(px(1.0)).bg(track(t)))
