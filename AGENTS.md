@@ -59,8 +59,15 @@ Rust 快速检查：`cd src-tauri && cargo check`
 - **视觉规范（新增元素必须选档，不许再写裸数字）**：`gui/src/shell.rs` 顶部有
   字号（FS_META/SEC/BODY/TITLE/HEAD/NUM = 11/12/13/16/18/20）、
   圆角（R_SM/MD/LG/XL = 4/6/8/12）、间距（GAP_TIGHT/GAP/GAP_LG = 4/8/12）、
-  按钮高度（BTN_SM/BTN/BTN_LG = 26/30/34）、图标（icon_sm 14 / icon_md 16）五组常量。
+  图标（icon_sm 14 / icon_md 16）几组常量。
   早先就地硬编码长出过 9 种圆角、6 种按钮高度，视觉一眼就不齐
+- **按钮一律用官方命名档，禁写 `Size::Size(px(...))`**：官方 Button 的自定义 px 档
+  会联动把文字放大到 16px、图标放大到 size×0.75（30px 按钮出 22.5px 图标）——
+  整屏图标过大、字顶边的根因。用 `Size::Medium`（32 高/14 字/16 图标）、
+  `Size::Small`（24 高/14 字/14 图标）；幽灵图标按钮的图标要显式
+  `.text_color(tier3(t))`（Slate #5D5B54），默认继承的是墨色，观感"太深"
+- **Input 同理用 `.small()`**：`.xsmall()` 只有 20px 高、4px 水平内边距，字贴边；
+  small = 24px 高 / 8px 内边距
 - **图标只认一套**：`use gpui_kit::assets::IconName as AssetIcon`（完整 lucide 1830 个 + 品牌 Bird）。
   不要再用 `component::IconName`——那是另一套，线宽与视觉重量不同，且没有 GitBranch
 - **hover 与动效**：gpui 没有 CSS 那样的 `:hover` 样式，悬停靠 `on_hover` 记状态

@@ -123,12 +123,10 @@ const GAP: f32 = 8.0;
 /// 分组（卡片内区块）
 const GAP_LG: f32 = 12.0;
 
-/// 行内小按钮
-const BTN_SM: f32 = 26.0;
-/// 常规按钮
-const BTN: f32 = 30.0;
-/// 主操作按钮（拉取 / 保存）
-const BTN_LG: f32 = 34.0;
+// 按钮高度不再自定数值：官方命名档才是配套的（Medium = 32px 高 / 14px 字 /
+// 16px 图标，Small = 24px 高 / 14px 字 / 14px 图标）。
+// 之前用 Size::Size(px(30)) 这类自定义档，官方 Button 会把文字放大到
+// 16px、图标放大到 size×0.75（22.5px）——整屏图标过大、字顶边的根因。
 
 /// 图标档位：行内小图标
 const ICON_SM: f32 = 14.0;
@@ -1383,12 +1381,13 @@ impl Shell {
                     .child("青鸟 Git"),
             )
             .child(div().flex_1())
-            // 全局搜索：官方 Input（检索逻辑待接 Ctrl K）
+            // 全局搜索：官方 Input（检索逻辑待接 Ctrl K）。
+            // small = 24px 高 + 8px 水平内边距：xsmall 只有 20px 高、4px 内边距，字贴边
             .child(
                 Input::new(&self.global_search)
-                    .prefix(icon_sm(AssetIcon::Search))
-                    .xsmall()
-                    .w(px(260.0)),
+                    .prefix(icon_sm(AssetIcon::Search).text_color(tier4(t)))
+                    .small()
+                    .w(px(360.0)),
             )
             .child(div().flex_1())
     }
@@ -1411,22 +1410,22 @@ impl Shell {
             .child(div().flex_1())
             .child(
                 Button::new("nav-plus")
-                    .icon(AssetIcon::Plus)
+                    .icon(icon_md(AssetIcon::Plus).text_color(tier3(t)))
                     .ghost()
-                    .with_size(Size::Size(px(BTN_LG))),
+                    .with_size(Size::Medium),
             )
             .child(
                 Button::new("nav-scan")
-                    .icon(AssetIcon::RefreshCw)
+                    .icon(icon_md(AssetIcon::RefreshCw).text_color(tier3(t)))
                     .ghost()
-                    .with_size(Size::Size(px(BTN_LG)))
+                    .with_size(Size::Medium)
                     .loading(self.scanning),
             )
             .child(
                 Button::new("nav-settings")
-                    .icon(AssetIcon::Settings)
+                    .icon(icon_md(AssetIcon::Settings).text_color(tier3(t)))
                     .ghost()
-                    .with_size(Size::Size(px(BTN_LG))),
+                    .with_size(Size::Medium),
             )
     }
 
@@ -1478,7 +1477,8 @@ impl Shell {
             .child(
                 h_flex()
                     .w_full()
-                    .px(px(2.0))
+                    // 与下面过滤输入框的文字（p12 + input px8 = 20px）对齐
+                    .px(px(8.0))
                     .justify_between()
                     .child(
                         div()
@@ -1495,10 +1495,10 @@ impl Shell {
                     ),
             )
             .child(
-                // 侧栏过滤：官方 Input
+                // 侧栏过滤：官方 Input（small 档：24px 高，与设计稿一致）
                 Input::new(&self.side_filter)
-                    .prefix(icon_sm(AssetIcon::Search))
-                    .xsmall()
+                    .prefix(icon_sm(AssetIcon::Search).text_color(tier4(t)))
+                    .small()
                     .w_full(),
             );
 
@@ -1680,7 +1680,8 @@ impl Shell {
 }
 
 fn group_header(text: &str, t: &Theme) -> Div {
-    h_flex().w_full().px(px(2.0)).pt(px(4.0)).child(
+    // 左内边距与仓库行的 10px 对齐：之前 px(2)，标题比行内容凸出去一截
+    h_flex().w_full().px(px(10.0)).pt(px(4.0)).child(
         div()
             .text_size(px(FS_META))
             .font_weight(FontWeight::MEDIUM)
@@ -1796,9 +1797,10 @@ impl Shell {
                             } else {
                                 format!("全部拉取 {}", pull_paths.len())
                             })
-                            .outline()
+                            .icon(icon_md(AssetIcon::ArrowDown).text_color(t.colors.popover))
+                            .primary()
                             .disabled(pull_paths.is_empty() || batch_running)
-                            .with_size(Size::Size(px(BTN_LG)))
+                            .with_size(Size::Medium)
                             .on_click(cx.listener({
                                 let paths = pull_paths.clone();
                                 move |this, _, _, cx| this.run_batch(true, paths.clone(), cx)
@@ -1811,9 +1813,10 @@ impl Shell {
                             } else {
                                 format!("全部推送 {}", push_paths.len())
                             })
-                            .primary()
+                            .icon(icon_md(AssetIcon::ArrowUp).text_color(tier3(t)))
+                            .outline()
                             .disabled(push_paths.is_empty() || batch_running)
-                            .with_size(Size::Size(px(BTN_LG)))
+                            .with_size(Size::Medium)
                             .on_click(cx.listener({
                                 let paths = push_paths.clone();
                                 move |this, _, _, cx| this.run_batch(false, paths.clone(), cx)
@@ -1878,7 +1881,7 @@ impl Shell {
                         .label("拉取")
                         .outline()
                         .disabled(batch_running)
-                        .with_size(Size::Size(px(BTN_SM)))
+                        .with_size(Size::Small)
                         .on_click(cx.listener({
                             let path = path.clone();
                             move |this, _, _, cx| {
@@ -1893,7 +1896,7 @@ impl Shell {
                         .label("推送")
                         .outline()
                         .disabled(batch_running)
-                        .with_size(Size::Size(px(BTN_SM)))
+                        .with_size(Size::Small)
                         .on_click(cx.listener({
                             let path = path.clone();
                             move |this, _, _, cx| {
@@ -1906,7 +1909,7 @@ impl Shell {
                     Button::new(SharedString::from(format!("ov-act-view-{i}")))
                         .label("查看")
                         .ghost()
-                        .with_size(Size::Size(px(BTN_SM)))
+                        .with_size(Size::Small)
                         .on_click(cx.listener({
                             let path = path.clone();
                             move |this, _, _, cx| {
@@ -2102,7 +2105,7 @@ impl Shell {
                                 .label(format!("拉取所选 ({})", checked_pull.len()))
                                 .primary()
                                 .disabled(batch_running)
-                                .with_size(Size::Size(px(BTN)))
+                                .with_size(Size::Medium)
                                 .on_click(cx.listener({
                                     let paths = checked_pull.clone();
                                     move |this, _, _, cx| this.run_batch(true, paths.clone(), cx)
@@ -2115,7 +2118,7 @@ impl Shell {
                                 .label(format!("推送所选 ({})", checked_push.len()))
                                 .primary()
                                 .disabled(batch_running)
-                                .with_size(Size::Size(px(BTN)))
+                                .with_size(Size::Medium)
                                 .on_click(cx.listener({
                                     let paths = checked_push.clone();
                                     move |this, _, _, cx| this.run_batch(false, paths.clone(), cx)
@@ -2518,7 +2521,7 @@ fn stat_card(n: usize, label: &str, color: Hsla, t: &Theme) -> Div {
     v_flex()
         .flex_1()
         .gap(px(2.0))
-        .p(px(14.0))
+        .p(px(16.0))
         .rounded(px(R_LG))
         .bg(t.colors.popover)
         .border_1()
@@ -2685,7 +2688,7 @@ impl Shell {
                         Button::new("cmd-edit")
                             .label("编辑")
                             .ghost()
-                            .with_size(Size::Size(px(BTN_SM))),
+                            .with_size(Size::Small),
                     ),
             )
             .children(rows)
@@ -2764,7 +2767,7 @@ impl Shell {
                         .label(label)
                         .tooltip(SharedString::from(hint))
                         .primary()
-                        .with_size(Size::Size(px(BTN_SM)))
+                        .with_size(Size::Small)
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.run_sync(Op::Rebase(stash), cx)
@@ -2778,7 +2781,7 @@ impl Shell {
                             Button::new("fk-undo-yes")
                                 .label("确认撤销？")
                                 .danger()
-                                .with_size(Size::Size(px(BTN_SM)))
+                                .with_size(Size::Small)
                                 .disabled(busy)
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.run_sync(Op::UndoRebase, cx)),
@@ -2788,7 +2791,7 @@ impl Shell {
                             Button::new("fk-undo-no")
                                 .label("取消")
                                 .ghost()
-                                .with_size(Size::Size(px(BTN_SM)))
+                                .with_size(Size::Small)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.fork_confirm = false;
                                     cx.notify();
@@ -2803,7 +2806,7 @@ impl Shell {
                                 self.fork_backup.clone().unwrap_or_default()
                             ))
                             .danger()
-                            .with_size(Size::Size(px(BTN_SM)))
+                            .with_size(Size::Small)
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.fork_confirm = true;
@@ -2817,7 +2820,7 @@ impl Shell {
                     Button::new("fk-diff")
                         .label(if self.fork_diff { "收起差异" } else { "只看差异" })
                         .ghost()
-                        .with_size(Size::Size(px(BTN_SM)))
+                        .with_size(Size::Small)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.fork_diff = !this.fork_diff;
                             cx.notify();
@@ -2902,45 +2905,45 @@ impl Shell {
             .child(
                 Button::new("wb-pull")
                     .label("拉取")
-                    .icon(AssetIcon::ArrowDown)
+                    .icon(icon_md(AssetIcon::ArrowDown).text_color(tier3(t)))
                     .outline()
                     .loading(pulling)
-                    .with_size(Size::Size(px(BTN)))
+                    .with_size(Size::Medium)
                     .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
             )
             .child(
                 Button::new("wb-push")
                     .label("推送")
-                    .icon(AssetIcon::ArrowUp)
+                    .icon(icon_md(AssetIcon::ArrowUp).text_color(tier3(t)))
                     .outline()
                     .loading(pushing)
-                    .with_size(Size::Size(px(BTN)))
+                    .with_size(Size::Medium)
                     .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Push, cx))),
             )
             .child(div().w(px(1.0)).h(px(20.0)).bg(t.colors.border))
             .child(
                 Button::new("act-folder")
-                    .icon(AssetIcon::FolderOpen)
+                    .icon(icon_md(AssetIcon::FolderOpen).text_color(tier3(t)))
                     .ghost()
-                    .with_size(Size::Size(px(BTN))),
+                    .with_size(Size::Medium),
             )
             .child(
                 Button::new("act-cloud")
-                    .icon(AssetIcon::Globe)
+                    .icon(icon_md(AssetIcon::Globe).text_color(tier3(t)))
                     .ghost()
-                    .with_size(Size::Size(px(BTN))),
+                    .with_size(Size::Medium),
             )
             .child(
                 Button::new("act-doc")
-                    .icon(AssetIcon::BookOpen)
+                    .icon(icon_md(AssetIcon::BookOpen).text_color(tier3(t)))
                     .ghost()
-                    .with_size(Size::Size(px(BTN))),
+                    .with_size(Size::Medium),
             )
             .child(
                 Button::new("act-timer")
-                    .icon(AssetIcon::Clock)
+                    .icon(icon_md(AssetIcon::Clock).text_color(tier3(t)))
                     .ghost()
-                    .with_size(Size::Size(px(BTN))),
+                    .with_size(Size::Medium),
             )
     }
 
@@ -2983,7 +2986,7 @@ impl Shell {
             .id(SharedString::from(format!("cmd-row-{}", slot.key())))
             .w_full()
             .h(px(40.0))
-            .px(px(10.0))
+            .px(px(12.0))
             .rounded(px(R_MD))
             .items_center()
             .gap(px(GAP_LG))
@@ -3063,7 +3066,7 @@ impl Shell {
             .flex_1()
             .min_h(px(96.0))
             .overflow_y_scroll()
-            .p(px(10.0))
+            .p(px(12.0))
             .gap(px(GAP_TIGHT))
             .rounded(px(R_LG))
             .bg(ink)
@@ -3195,7 +3198,7 @@ impl Shell {
                         Button::new("space-rescan")
                             .label(if self.space.scanning { "扫描中…" } else { "重新扫描" })
                             .ghost()
-                            .with_size(Size::Size(px(BTN_SM)))
+                            .with_size(Size::Small)
                             .loading(self.space.scanning)
                             .on_click(cx.listener(|this, _, _, cx| this.scan_space(cx))),
                     ),
@@ -3282,7 +3285,7 @@ impl Shell {
                         Button::new("clean-all")
                             .label(if self.space.cleaning { "清理中…" } else { "一键清理" })
                             .primary()
-                            .with_size(Size::Size(px(BTN)))
+                            .with_size(Size::Medium)
                             .loading(self.space.cleaning)
                             .on_click(cx.listener(|this, _, _, cx| this.clean_all(cx))),
                     ),
@@ -3381,7 +3384,7 @@ impl Shell {
                         Button::new("git-pull")
                             .label("拉取")
                             .secondary()
-                            .with_size(Size::Size(px(BTN)))
+                            .with_size(Size::Medium)
                             .disabled(self.out.running)
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
                     )
@@ -3389,7 +3392,7 @@ impl Shell {
                         Button::new("git-push")
                             .label("推送")
                             .secondary()
-                            .with_size(Size::Size(px(BTN)))
+                            .with_size(Size::Medium)
                             .disabled(self.out.running)
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Push, cx))),
                     ),
@@ -3558,27 +3561,27 @@ impl Shell {
                     .gap(px(GAP))
                     .child(
                         Button::new("pf-folder")
-                            .icon(AssetIcon::FolderOpen)
+                            .icon(icon_md(AssetIcon::FolderOpen).text_color(tier3(t)))
                             .ghost()
-                            .with_size(Size::Size(px(BTN))),
+                            .with_size(Size::Medium),
                     )
                     .child(
                         Button::new("pf-cloud")
-                            .icon(AssetIcon::Globe)
+                            .icon(icon_md(AssetIcon::Globe).text_color(tier3(t)))
                             .ghost()
-                            .with_size(Size::Size(px(BTN))),
+                            .with_size(Size::Medium),
                     )
                     .child(
                         Button::new("pf-doc")
-                            .icon(AssetIcon::BookOpen)
+                            .icon(icon_md(AssetIcon::BookOpen).text_color(tier3(t)))
                             .ghost()
-                            .with_size(Size::Size(px(BTN))),
+                            .with_size(Size::Medium),
                     )
                     .child(
                         Button::new("pf-timer")
-                            .icon(AssetIcon::Clock)
+                            .icon(icon_md(AssetIcon::Clock).text_color(tier3(t)))
                             .ghost()
-                            .with_size(Size::Size(px(BTN))),
+                            .with_size(Size::Medium),
                     )
                     .child(div().w(px(1.0)).h(px(20.0)).bg(t.colors.border))
                     .child(
@@ -3586,7 +3589,7 @@ impl Shell {
                             .label("检测更新")
                             .outline()
                             .loading(self.out.running && self.out.op == Some(Op::Check))
-                            .with_size(Size::Size(px(BTN_LG)))
+                            .with_size(Size::Medium)
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Check, cx))),
                     )
                     .child(
@@ -3594,7 +3597,7 @@ impl Shell {
                             .label("拉取更新")
                             .primary()
                             .loading(self.out.running && self.out.op == Some(Op::Pull))
-                            .with_size(Size::Size(px(BTN_LG)))
+                            .with_size(Size::Medium)
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
                     ),
             );
@@ -3973,7 +3976,7 @@ impl Shell {
                             .label("拉取")
                             .secondary()
                             .loading(busy && running_op == Some(Op::Pull))
-                            .with_size(Size::Size(px(BTN)))
+                            .with_size(Size::Medium)
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
                     )
                     .child(
@@ -3981,7 +3984,7 @@ impl Shell {
                             .label("推送")
                             .secondary()
                             .loading(busy && running_op == Some(Op::Push))
-                            .with_size(Size::Size(px(BTN)))
+                            .with_size(Size::Medium)
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Push, cx))),
                     )
                     .child(
@@ -3989,7 +3992,7 @@ impl Shell {
                             .label("检测更新")
                             .ghost()
                             .loading(busy && running_op == Some(Op::Check))
-                            .with_size(Size::Size(px(BTN)))
+                            .with_size(Size::Medium)
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Check, cx))),
                     ),
             )
