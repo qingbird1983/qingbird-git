@@ -216,13 +216,20 @@ pub fn remote_url(repo_path: &str) -> String {
         .to_string()
 }
 
-/// 提交时使用的 Git 身份（-c 项；设置里未填则交给全局配置）
+/// 提交时使用的 Git 身份：**交错好的 `-c` 项**，可直接接在子命令前面
+/// （`git -c user.name=.. -c user.email=.. commit`）。设置里未填则返回空，
+/// 交给全局 / 仓库配置。
+///
+/// 交错是在这里做好的：调用方直接 `argv.extend(...)` 就行，
+/// 不必各自记得补 `-c`——漏了就变成 `git user.name=x commit` 这种非法命令。
 pub fn identity_config(cfg: &AppConfig) -> Vec<String> {
     let mut c = Vec::new();
     if !cfg.settings.git_name.trim().is_empty() {
+        c.push("-c".to_string());
         c.push(format!("user.name={}", cfg.settings.git_name.trim()));
     }
     if !cfg.settings.git_email.trim().is_empty() {
+        c.push("-c".to_string());
         c.push(format!("user.email={}", cfg.settings.git_email.trim()));
     }
     c
@@ -548,6 +555,20 @@ mod tests {
         assert_eq!(host_of("https://example.com/u/r.git"), None);
         assert!(is_ssh_url("git@github.com:u/r.git"));
         assert!(!is_ssh_url("https://github.com/u/r.git"));
+    }
+
+    #[test]
+    fn identity_args_carry_their_own_dash_c() {
+        // 调用方直接把返回值拼进 argv：漏掉 -c 就变成「git user.name=x commit」这种非法命令
+        let mut cfg = store::AppConfig::default();
+        assert!(identity_config(&cfg).is_empty(), "没配身份就不干预 git");
+
+        cfg.settings.git_name = " 木言 ".into();
+        cfg.settings.git_email = "a@b.c".into();
+        assert_eq!(
+            identity_config(&cfg),
+            vec!["-c", "user.name=木言", "-c", "user.email=a@b.c"]
+        );
     }
 
     #[test]

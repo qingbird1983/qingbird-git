@@ -97,6 +97,110 @@ pub fn list_repos() -> Vec<RepoEntry> {
     store::load().repos
 }
 
+// ---------- 初始化向导：把普通文件夹变成仓库 ----------
+
+/// 文件夹顶层的一项（初始化时用来勾选排除项）
+#[derive(Clone, Debug, PartialEq)]
+pub struct DirItem {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+/// 列出文件夹顶层内容。目录排前面，各自按名称排；`.git` 不列（本来就要忽略）。
+pub fn list_dir_items(path: &str) -> Vec<DirItem> {
+    let mut items: Vec<DirItem> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(path) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name == ".git" {
+                continue;
+            }
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            items.push(DirItem { name, is_dir });
+        }
+    }
+    items.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    items
+}
+
+/// 把非 git 文件夹初始化为仓库：`git init` → 勾选的排除项写进 `.gitignore`
+/// → 初始提交 → 加入管理列表。
+///
+/// 排除项只**追加**，不动已有 `.gitignore` 的内容（用户自己的规则不能被覆盖）。
+pub fn init_repo(path: &str, excludes: &[String]) -> Result<RepoEntry, String> {
+    let path = path.trim().to_string();
+    let dir = std::path::Path::new(&path);
+    if !dir.is_dir() {
+        return Err("文件夹不存在".into());
+    }
+    if valid_repo(&path) {
+        return Err("该文件夹已经是 git 仓库".into());
+    }
+
+    // -b main：老版本 git 不认这个参数，失败就退回不带参数的 init
+    let init = run_local(&path, &["init", "-b", "main"]);
+    if !init.success {
+        let fallback = run_local(&path, &["init"]);
+        if !fallback.success {
+            return Err(format!("git init 失败：{}", fallback.stderr.trim()));
+        }
+    }
+
+    if !excludes.is_empty() {
+        let gi = dir.join(".gitignore");
+        let mut content = String::new();
+        if gi.exists() {
+            content = std::fs::read_to_string(&gi).unwrap_or_default();
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+        }
+        content.push_str("# 由青鸟 Git 添加的排除项\n");
+        for e in excludes {
+            content.push_str(e.trim());
+            content.push('\n');
+        }
+        std::fs::write(&gi, content).map_err(|e| format!("写入 .gitignore 失败：{e}"))?;
+    }
+
+    run_local(&path, &["add", "-A"]);
+
+    let id = crate::net::identity_config(&store::load());
+    let mut argv: Vec<String> = id;
+    argv.extend(["commit".to_string(), "-m".to_string(), "init: 初始提交".into()]);
+    let argv: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+    let commit = run_local(&path, &argv);
+    if !commit.success {
+        // 没配 Git 身份是最常见的失败原因，说清楚而不是甩一句「提交失败」
+        let msg = if commit.stderr.contains("Please tell me who you are")
+            || commit.stderr.contains("unable to auto-detect email")
+        {
+            "仓库已初始化，但初始提交失败：还没有配置 Git 身份，请在「设置 → Git 身份」里填写姓名和邮箱"
+        } else {
+            "仓库已初始化，但初始提交失败"
+        };
+        return Err(format!("{msg}：{}", commit.stderr.trim()));
+    }
+
+    let mut cfg = store::load();
+    let entry = RepoEntry {
+        name: repo_name(&path),
+        path: path.clone(),
+        added_at: store::now_secs(),
+        last_used: store::now_secs(),
+        ..RepoEntry::default()
+    };
+    if !cfg.repos.iter().any(|r| r.path == path) {
+        cfg.repos.push(entry.clone());
+    }
+    store::save(&cfg)?;
+    Ok(entry)
+}
+
 /// 整理用户粘进来的路径：资源管理器「复制文件地址」给的是 `C:\repo`，
 /// 复制文件链接给的可能是 `file:///C:/repo`，拖拽进来时常带引号与尾部斜杠。
 /// 统一归一成能直接喂给 git 的形态（Windows 上正斜杠也没问题）。
@@ -485,6 +589,106 @@ mod tests {
         let e = full_entry();
         assert!(e.cmd_runs.is_empty());
         assert!(e.pinned_cmds.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod init_tests {
+    use super::*;
+
+    #[test]
+    fn dir_items_put_folders_first_and_hide_git() {
+        let root = std::env::temp_dir().join(format!("qbg-items-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("beta")).unwrap();
+        std::fs::write(root.join("aaa.txt"), "").unwrap();
+        std::fs::write(root.join("zzz.txt"), "").unwrap();
+
+        let items = list_dir_items(root.to_str().unwrap());
+        assert_eq!(
+            items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+            vec!["beta", "aaa.txt", "zzz.txt"],
+            "目录在前、名称升序、.git 不出现"
+        );
+        assert!(items[0].is_dir && !items[1].is_dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn init_rejects_missing_dir_and_existing_repo() {
+        let _guard = crate::git::GIT_TEST_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("qbg-init-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // 不存在的目录
+        assert_eq!(init_repo(root.to_str().unwrap(), &[]).unwrap_err(), "文件夹不存在");
+        // 已经是仓库的目录：不能再 init 一次（那会重置已有历史）
+        std::fs::create_dir_all(&root).unwrap();
+        sh(&root, &["init", "-q"]);
+        assert_eq!(
+            init_repo(root.to_str().unwrap(), &[]).unwrap_err(),
+            "该文件夹已经是 git 仓库"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 端到端：普通文件夹 → 仓库 + .gitignore + 初始提交。
+    /// 初始提交要 Git 身份（设置的或全局的），本机没配时走错误分支——
+    /// 两种结果都合法，前面几步（init / .gitignore）在两种情况下都验了。
+    #[test]
+    fn init_makes_a_repo_and_writes_excludes() {
+        let _guard = crate::git::GIT_TEST_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("qbg-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::write(root.join("node_modules/x.js"), "1").unwrap();
+        std::fs::write(root.join("app.rs"), "fn main() {}").unwrap();
+
+        match init_repo(
+            root.to_str().unwrap(),
+            &["node_modules".to_string(), "dist".to_string()],
+        ) {
+            Ok(entry) => {
+                assert!(valid_repo(root.to_str().unwrap()));
+                assert_eq!(entry.name, "qbg-init-".to_owned() + &std::process::id().to_string());
+                // 排除项进了 .gitignore，且被 git 真的忽略掉
+                let gi = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+                assert!(gi.contains("node_modules") && gi.contains("dist"));
+                assert!(!run_local(root.to_str().unwrap(), &["status", "--porcelain"])
+                    .stdout
+                    .contains("node_modules"));
+            }
+            Err(e) => {
+                // 没配 Git 身份时 init 与 .gitignore 都已生效，只卡在提交
+                assert!(e.starts_with("仓库已初始化，但初始提交失败"), "实际错误：{e}");
+                assert!(valid_repo(root.to_str().unwrap()));
+                assert!(std::fs::read_to_string(root.join(".gitignore"))
+                    .unwrap()
+                    .contains("node_modules"));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 已有的 .gitignore 内容不能被我们的追加冲掉
+    #[test]
+    fn init_appends_to_existing_gitignore() {
+        let _guard = crate::git::GIT_TEST_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("qbg-init-gi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        let _ = init_repo(root.to_str().unwrap(), &["dist".to_string()]);
+        let gi = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert!(gi.starts_with("*.log"), "原有规则要留着：{gi}");
+        assert!(gi.contains("dist"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

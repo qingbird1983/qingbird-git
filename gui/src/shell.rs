@@ -8,21 +8,24 @@
 //! 数据全部来自 qingbird-core：真实仓库列表、真实 git 状态、真实命令。
 //! 耗时操作（扫状态、跑命令、扫磁盘）一律进后台线程，界面先画上一次结果。
 
+// 图标只认这一套：assets 里是完整 lucide，外加品牌 Bird。
+// 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
+// 混在同一屏里一眼就能看出不一致。
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::InteractiveElementExt as _;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::Disableable as _;
+use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, Size, Theme, WindowExt as _,
-};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Size, Theme, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, AnyElement, AppContext as _, Context, Div, Entity, FontWeight, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Task, Window, px, rgb,
+    div, ease_in_out, relative, AnyElement, AnyWindowHandle, Animation, AnimationExt as _,
+    AppContext as _, Context, Div, Entity, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement, Render, SharedString, Stateful, StatefulInteractiveElement as _,
+    Styled, Task, Window, px, rgb,
 };
 use qingbird_core::repos::{self, ActivityDay, LangStat, ReadmePreview};
 use qingbird_core::run_cmd::{self, Slot, MAX_PINNED_CMDS};
@@ -82,6 +85,67 @@ fn edge(_t: &Theme) -> Hsla {
 /// theme.json 已把 `chart.3` 定成规范板的 #DD5B00，这里借用它。
 fn orange(t: &Theme) -> Hsla {
     t.colors.chart_3
+}
+
+// ---------- 版面规范：字号 / 圆角 / 间距 / 按钮 / 图标 ----------
+// 之前这些值是就地硬编码，结果同一个「卡片圆角」在不同屏上冒出
+// 1/2/3/5/10 五种杂值，按钮高度有 6 种。这里定成档位，新增元素只能选档，
+// 不许再写裸数字——视觉一致靠的是只有这几档可挑。
+
+/// 元信息、弱提示（标签、说明）
+const FS_META: f32 = 11.0;
+/// 次要文字（表格行、副标题）
+const FS_SEC: f32 = 12.0;
+/// 正文
+const FS_BODY: f32 = 13.0;
+/// 卡片标题 / 弹窗标题
+const FS_TITLE: f32 = 16.0;
+/// 页面主标题
+const FS_HEAD: f32 = 18.0;
+/// 统计卡大数字
+const FS_NUM: f32 = 20.0;
+
+/// 小色块 / 进度条
+const R_SM: f32 = 4.0;
+/// chip、徽章、图例方块
+const R_MD: f32 = 6.0;
+/// 按钮、列表行、小面板
+const R_LG: f32 = 8.0;
+/// 大卡片、表格容器
+const R_XL: f32 = 12.0;
+
+/// 紧密（标签与值、柱间）
+const GAP_TIGHT: f32 = 4.0;
+/// 常规（图标与文字、行内元素）
+const GAP: f32 = 8.0;
+/// 分组（卡片内区块）
+const GAP_LG: f32 = 12.0;
+
+/// 行内小按钮
+const BTN_SM: f32 = 26.0;
+/// 常规按钮
+const BTN: f32 = 30.0;
+/// 主操作按钮（拉取 / 保存）
+const BTN_LG: f32 = 34.0;
+
+/// 图标档位：行内小图标
+const ICON_SM: f32 = 14.0;
+/// 图标档位：按钮内图标
+const ICON: f32 = 16.0;
+
+/// 悬停状态的 key：仓库行用路径，「添加仓库」这条没有路径，用固定 key
+const ADD_HOVER_KEY: &str = "__add_repo__";
+
+/// 行内图标（统一走 lucide 一套，只有品牌 logo 用 assets 的 Bird）。
+/// 尺寸显式写死而不是 `.small()`：两套图标集混着用时，默认尺寸并不一致，
+/// 显式档位才能保证行与行对齐。
+fn icon_sm(name: impl Into<Icon>) -> Icon {
+    Icon::new(name).with_size(Size::Size(px(ICON_SM)))
+}
+
+/// 按钮内图标
+fn icon_md(name: impl Into<Icon>) -> Icon {
+    Icon::new(name).with_size(Size::Size(px(ICON)))
 }
 
 /// 一个仓库在界面上要显示的东西
@@ -158,6 +222,8 @@ enum Page {
 }
 
 pub struct Shell {
+    /// 窗口句柄：异步跑完（初始化仓库等）要回来关弹窗
+    win: AnyWindowHandle,
     page: Page,
     repos: Vec<RepoEntry>,
     views: HashMap<String, RepoView>,
@@ -185,6 +251,9 @@ pub struct Shell {
     batch: Option<BatchRun>,
     /// 添加 / 编辑仓库弹窗；None = 弹窗未打开
     dlg: Option<RepoDialog>,
+    /// 鼠标悬停在哪一行（侧栏仓库 / 总览表格行）。
+    /// gpui 没有 CSS 那样的 `:hover` 样式，悬停反馈只能靠事件记状态再重画。
+    hovered: Option<String>,
 }
 
 /// 添加 / 编辑仓库弹窗的状态。
@@ -198,7 +267,39 @@ struct RepoDialog {
     /// 归属：第三方仓库（false = 我的）
     third: bool,
     error: Option<String>,
+    /// 非空 = 初始化向导：填的路径还不是 git 仓库，转这里引导 git init
+    init: Option<InitState>,
 }
+
+/// 初始化向导的状态：顶层目录清单 + 勾选的排除项
+#[derive(Clone)]
+struct InitState {
+    path: String,
+    items: Vec<repos::DirItem>,
+    excludes: std::collections::HashSet<String>,
+    working: bool,
+}
+
+/// 初始化时默认勾选的排除项：构建产物 / 依赖 / IDE 目录。
+/// 与旧版同一份清单——用户大概率不想把这些提交进去。
+const INIT_EXCLUDE_HINTS: &[&str] = &[
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    "target",
+    ".idea",
+    ".vs",
+    "vendor",
+    "__pycache__",
+    ".gradle",
+    "bin",
+    "obj",
+    "coverage",
+    ".next",
+    ".nuxt",
+    "venv",
+];
 
 /// 总览页的一键批量。与旧版约定一致：前端串行循环 core 的 pull/push，
 /// 不新增后端批量命令——代理回退、脏工作区判定都已在那两条路径里。
@@ -235,6 +336,7 @@ impl Shell {
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索仓库 · Ctrl K"));
         let side_filter = cx.new(|cx| InputState::new(window, cx).placeholder("筛选名称或分支"));
         let mut this = Self {
+            win: window.window_handle(),
             page: Page::Repos,
             repos,
             views,
@@ -254,6 +356,7 @@ impl Shell {
             ov_checked: std::collections::HashSet::new(),
             batch: None,
             dlg: None,
+            hovered: None,
         };
         this.refresh_status(cx);
         this.scan_space(cx);
@@ -385,6 +488,7 @@ impl Shell {
             name_input: cx.new(|cx| InputState::new(window, cx).placeholder("留空用目录名")),
             third: false,
             error: None,
+            init: None,
         });
         self.build_dlg(window, cx);
     }
@@ -408,6 +512,7 @@ impl Shell {
             name_input: cx.new(|cx| InputState::new(window, cx).placeholder(name_hint)),
             third,
             error: None,
+            init: None,
         });
         self.build_dlg(window, cx);
     }
@@ -428,9 +533,16 @@ impl Shell {
             let state = this.read(cx).dlg.as_ref();
             let third = state.map(|d| d.third).unwrap_or(false);
             let error: Option<String> = state.and_then(|d| d.error.clone());
+            let init: Option<InitState> = state.and_then(|d| d.init.clone());
 
             dialog
-                .title(if editing.is_some() { "仓库设置" } else { "添加仓库" })
+                .title(if init.is_some() {
+                    "初始化为 Git 仓库"
+                } else if editing.is_some() {
+                    "仓库设置"
+                } else {
+                    "添加仓库"
+                })
                 // content / footer 的 builder 会被反复调用，每次重画一份
                 .content({
                     let t = t.clone();
@@ -438,9 +550,11 @@ impl Shell {
                     let path_input = path_input.clone();
                     let name_input = name_input.clone();
                     let error = error.clone();
+                    let init = init.clone();
                     let this = this.clone();
-                    move |c, _, _| {
-                        c.child(dlg_body(
+                    move |c, _, _| match &init {
+                        Some(i) => c.child(init_body(&t, i, &error, &this)),
+                        None => c.child(dlg_body(
                             &t,
                             &editing,
                             third,
@@ -448,10 +562,13 @@ impl Shell {
                             &path_input,
                             &name_input,
                             &this,
-                        ))
+                        )),
                     }
                 })
-                .footer(dlg_footer(&this, &editing, &path_input, &name_input))
+                .footer(match &init {
+                    Some(i) => init_footer(&t, i, &this),
+                    None => dlg_footer(&this, &editing, &path_input, &name_input),
+                })
         });
     }
 
@@ -476,6 +593,15 @@ impl Shell {
                 }
                 if self.repos.iter().any(|r| r.path == path) {
                     self.set_dlg_error("这个仓库已经在列表里了", cx);
+                    return false;
+                }
+                // 不是 git 仓库不是用户的错：转初始化向导，别甩一句报错（旧版同行为）
+                if !repos::valid_repo(&path) {
+                    if !std::path::Path::new(&path).is_dir() {
+                        self.set_dlg_error("文件夹不存在，请检查路径", cx);
+                        return false;
+                    }
+                    self.enter_init(path, cx);
                     return false;
                 }
                 let list = match repos::add_repo(&path) {
@@ -524,6 +650,92 @@ impl Shell {
                 true
             }
         }
+    }
+
+    /// 弹窗切到初始化向导：读出顶层目录，预勾常见排除项
+    fn enter_init(&mut self, path: String, cx: &mut Context<Self>) {
+        let items = repos::list_dir_items(&path);
+        let mut excludes = std::collections::HashSet::new();
+        for it in &items {
+            if it.is_dir && INIT_EXCLUDE_HINTS.contains(&it.name.as_str()) {
+                excludes.insert(it.name.clone());
+            }
+        }
+        if let Some(d) = self.dlg.as_mut() {
+            d.init = Some(InitState {
+                path,
+                items,
+                excludes,
+                working: false,
+            });
+            d.error = None;
+        }
+        cx.notify();
+    }
+
+    /// 跑初始化：后台线程（git init + add + commit 要好几秒），
+    /// 成功则入列表并选中，失败把原因留在弹窗里。
+    fn run_init(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.dlg.as_ref() else {
+            return;
+        };
+        let Some(init) = d.init.as_ref() else {
+            return;
+        };
+        if init.working {
+            return;
+        }
+        let path = init.path.clone();
+        let excludes: Vec<String> = init.excludes.iter().cloned().collect();
+        if let Some(d) = self.dlg.as_mut() {
+            if let Some(i) = d.init.as_mut() {
+                i.working = true;
+            }
+            d.error = None;
+        }
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_executor()
+                .spawn(async move { repos::init_repo(&path, &excludes) })
+                .await;
+            let win = this.update(cx, |this, _| this.win).ok();
+            this.update(cx, |this, cx| {
+                match r {
+                    Ok(entry) => {
+                        this.repos = repos::list_repos();
+                        this.views
+                            .entry(entry.path.clone())
+                            .or_insert_with(RepoView::blank)
+                            .detected = run_cmd::detect_cmds(&entry.path);
+                        this.selected = Some(entry.path.clone());
+                        this.out = OutState::default();
+                        this.dlg = None;
+                        this.refresh_status(cx);
+                        this.scan_space(cx);
+                        this.scan_profile(cx);
+                        // 成了就把弹窗关掉；失败留在原地让用户看到原因
+                        if let Some(win) = win {
+                            let _ = cx.update_window(win, |_, window, cx| {
+                                window.close_dialog(cx);
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(d) = this.dlg.as_mut() {
+                            d.error = Some(e);
+                            if let Some(i) = d.init.as_mut() {
+                                i.working = false;
+                            }
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// 写错误提示并通知重画：弹窗是浮层，不 notify 的话错误文案不会刷出来
@@ -1090,7 +1302,7 @@ impl Shell {
             .h(px(48.0))
             .flex_shrink_0()
             .px(px(16.0))
-            .gap(px(12.0))
+            .gap(px(GAP_LG))
             .bg(t.colors.popover)
             .border_b_1()
             .border_color(t.colors.border)
@@ -1101,16 +1313,16 @@ impl Shell {
                     .w(px(20.0))
                     .h(px(20.0))
                     .flex_shrink_0()
-                    .rounded(px(4.0))
+                    .rounded(px(R_SM))
                     .bg(t.colors.primary)
                     .items_center()
                     .justify_center()
                     .text_color(t.colors.popover)
-                    .child(Icon::new(AssetIcon::Bird).small()),
+                    .child(icon_sm(AssetIcon::Bird)),
             )
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(FS_BODY))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(body(t))
                     .child("青鸟 Git"),
@@ -1119,7 +1331,7 @@ impl Shell {
             // 全局搜索：官方 Input（检索逻辑待接 Ctrl K）
             .child(
                 Input::new(&self.global_search)
-                    .prefix(Icon::new(IconName::Search).small())
+                    .prefix(icon_sm(AssetIcon::Search))
                     .xsmall()
                     .w(px(260.0)),
             )
@@ -1138,35 +1350,35 @@ impl Shell {
             .bg(t.colors.popover)
             .items_center()
             .p(px(10.0))
-            .gap(px(6.0))
-            .child(self.nav_item(IconName::Folder, Page::Repos, t, cx))
-            .child(self.nav_item(IconName::LayoutDashboard, Page::Overview, t, cx))
+            .gap(px(GAP_TIGHT))
+            .child(self.nav_item(AssetIcon::Folder, Page::Repos, t, cx))
+            .child(self.nav_item(AssetIcon::LayoutDashboard, Page::Overview, t, cx))
             .child(div().flex_1())
             .child(
                 Button::new("nav-plus")
-                    .icon(IconName::Plus)
+                    .icon(AssetIcon::Plus)
                     .ghost()
-                    .with_size(Size::Size(px(36.0))),
+                    .with_size(Size::Size(px(BTN_LG))),
             )
             .child(
                 Button::new("nav-scan")
-                    .icon(IconName::RefreshCw)
+                    .icon(AssetIcon::RefreshCw)
                     .ghost()
-                    .with_size(Size::Size(px(36.0)))
+                    .with_size(Size::Size(px(BTN_LG)))
                     .loading(self.scanning),
             )
             .child(
                 Button::new("nav-settings")
-                    .icon(IconName::Settings)
+                    .icon(AssetIcon::Settings)
                     .ghost()
-                    .with_size(Size::Size(px(36.0))),
+                    .with_size(Size::Size(px(BTN_LG))),
             )
     }
 
     /// 可点导航项：36x36 圆角 8，选中暖灰面 + 墨色图标
     fn nav_item(
         &self,
-        icon: IconName,
+        icon: AssetIcon,
         page: Page,
         t: &Theme,
         cx: &mut Context<Self>,
@@ -1182,11 +1394,11 @@ impl Shell {
             .w(px(36.0))
             .h(px(36.0))
             .flex_shrink_0()
-            .rounded(px(8.0))
+            .rounded(px(R_LG))
             .items_center()
             .justify_center()
             .when(active, |it| it.bg(warm(t)))
-            .child(div().text_color(color).child(Icon::new(icon).small()))
+            .child(div().text_color(color).child(icon_md(icon)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.page != page {
                     this.page = page;
@@ -1207,7 +1419,7 @@ impl Shell {
             .flex_shrink_0()
             .bg(t.colors.popover)
             .p(px(12.0))
-            .gap(px(8.0))
+            .gap(px(GAP))
             .child(
                 h_flex()
                     .w_full()
@@ -1215,14 +1427,14 @@ impl Shell {
                     .justify_between()
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(tier4(t))
                             .child("仓库"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .text_color(tier4(t))
                             .child(format!("{}", self.repos.len())),
                     ),
@@ -1230,7 +1442,7 @@ impl Shell {
             .child(
                 // 侧栏过滤：官方 Input
                 Input::new(&self.side_filter)
-                    .prefix(Icon::new(IconName::Search).small())
+                    .prefix(icon_sm(AssetIcon::Search))
                     .xsmall()
                     .w_full(),
             );
@@ -1241,16 +1453,16 @@ impl Shell {
                     .flex_1()
                     .items_center()
                     .justify_center()
-                    .gap(px(4.0))
+                    .gap(px(GAP_TIGHT))
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .text_color(tier4(t))
                             .child("还没有仓库"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .text_color(tier4(t))
                             .child("用下面的「添加仓库」加一个"),
                     ),
@@ -1287,13 +1499,29 @@ impl Shell {
                 .w_full()
                 .h(px(36.0))
                 .px(px(10.0))
-                .rounded(px(8.0))
+                .rounded(px(R_LG))
                 .items_center()
-                .gap(px(8.0))
+                .gap(px(GAP))
                 .text_color(tier4(t))
-                .child(Icon::new(IconName::Plus).small())
-                .child(div().text_size(px(13.0)).child("添加仓库"))
-                .on_click(cx.listener(|this, _, window, cx| this.open_add_dlg(window, cx))),
+                .when(self.hovered.as_deref() == Some(ADD_HOVER_KEY), |r| {
+                    r.bg(t.colors.list_hover)
+                })
+                .child(icon_sm(AssetIcon::Plus))
+                .child(div().text_size(px(FS_BODY)).child("添加仓库"))
+                .on_click(cx.listener(|this, _, window, cx| this.open_add_dlg(window, cx)))
+                .on_hover({
+                    let this = cx.entity();
+                    move |hovered, _, cx| {
+                        this.update(cx, |this, cx| {
+                            if *hovered {
+                                this.hovered = Some(ADD_HOVER_KEY.to_string());
+                            } else if this.hovered.as_deref() == Some(ADD_HOVER_KEY) {
+                                this.hovered = None;
+                            }
+                            cx.notify();
+                        });
+                    }
+                }),
         )
     }
 
@@ -1301,6 +1529,7 @@ impl Shell {
     fn repo_row(&self, r: &RepoEntry, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let path = r.path.clone();
         let toggle_path = path.clone();
+        let hov_path = path.clone();
         let name = self.title(&path);
         let status = self
             .view(&path)
@@ -1308,15 +1537,18 @@ impl Shell {
             .unwrap_or_default();
         let b = bucket_of(&status);
         let selected = self.selected.as_deref() == Some(path.as_str());
+        let hovered = self.hovered.as_deref() == Some(path.as_str());
 
         let mut row = h_flex()
             .id(SharedString::from(format!("repo-{path}")))
             .w_full()
             .h(px(38.0))
             .px(px(10.0))
-            .rounded(px(8.0))
+            .rounded(px(R_LG))
             .items_center()
-            .gap(px(8.0))
+            .gap(px(GAP))
+            // 悬停给一层极淡的底色：整行可点，鼠标放上去必须看得出能点
+            .when(hovered && !selected, |r| r.bg(t.colors.list_hover))
             .child(
                 div()
                     .w(px(7.0))
@@ -1328,7 +1560,7 @@ impl Shell {
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_size(px(13.0))
+                    .text_size(px(FS_BODY))
                     .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
                     .text_color(if selected {
                         t.colors.foreground
@@ -1364,7 +1596,7 @@ impl Shell {
                     .items_center()
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(FS_META))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(fg)
                             .child(text),
@@ -1376,13 +1608,26 @@ impl Shell {
             .on_double_click(cx.listener(move |this, _, window, cx| {
                 this.open_edit_dlg(toggle_path.clone(), window, cx)
             }))
+            .on_hover({
+                let this = cx.entity();
+                move |hovered, _, cx| {
+                    this.update(cx, |this, cx| {
+                        if *hovered {
+                            this.hovered = Some(hov_path.clone());
+                        } else if this.hovered.as_deref() == Some(hov_path.as_str()) {
+                            this.hovered = None;
+                        }
+                        cx.notify();
+                    });
+                }
+            })
     }
 }
 
 fn group_header(text: &str, t: &Theme) -> Div {
     h_flex().w_full().px(px(2.0)).pt(px(4.0)).child(
         div()
-            .text_size(px(11.0))
+            .text_size(px(FS_META))
             .font_weight(FontWeight::MEDIUM)
             .text_color(tier4(t))
             .child(text.to_string()),
@@ -1401,7 +1646,7 @@ fn empty_main(t: &Theme) -> AnyElement {
         .bg(t.colors.background)
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(px(FS_BODY))
                 .text_color(tier3(t))
                 .child("选一个仓库"),
         )
@@ -1466,17 +1711,17 @@ impl Shell {
             .items_start()
             .child(
                 v_flex()
-                    .gap(px(4.0))
+                    .gap(px(GAP_TIGHT))
                     .child(
                         div()
-                            .text_size(px(18.0))
+                            .text_size(px(FS_HEAD))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(t.colors.foreground)
                             .child("总览"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .text_color(tier3(t))
                             .child(format!(
                                 "{} 个仓库 · 我的 {} · 第三方 {}",
@@ -1488,7 +1733,7 @@ impl Shell {
             )
             .child(
                 h_flex()
-                    .gap(px(8.0))
+                    .gap(px(GAP))
                     .child(
                         Button::new("ov-pull-all")
                             .label(if pull_paths.is_empty() {
@@ -1498,7 +1743,7 @@ impl Shell {
                             })
                             .outline()
                             .disabled(pull_paths.is_empty() || batch_running)
-                            .with_size(Size::Size(px(32.0)))
+                            .with_size(Size::Size(px(BTN_LG)))
                             .on_click(cx.listener({
                                 let paths = pull_paths.clone();
                                 move |this, _, _, cx| this.run_batch(true, paths.clone(), cx)
@@ -1513,7 +1758,7 @@ impl Shell {
                             })
                             .primary()
                             .disabled(push_paths.is_empty() || batch_running)
-                            .with_size(Size::Size(px(32.0)))
+                            .with_size(Size::Size(px(BTN_LG)))
                             .on_click(cx.listener({
                                 let paths = push_paths.clone();
                                 move |this, _, _, cx| this.run_batch(false, paths.clone(), cx)
@@ -1523,7 +1768,7 @@ impl Shell {
 
         let cards = h_flex()
             .w_full()
-            .gap(px(10.0))
+            .gap(px(GAP))
             .child(stat_card(synced_n, "最新", t.colors.success, t))
             .child(stat_card(behind_n, "落后云端", orange(t), t))
             .child(stat_card(fork_n, "已分叉", orange(t), t))
@@ -1541,24 +1786,27 @@ impl Shell {
                 .items_center()
                 .px(px(12.0))
                 .h(px(32.0))
-                .gap(px(8.0))
+                .gap(px(GAP))
                 .child(div().w(px(24.0))) // 复选框占位
                 .child(
                     div()
                         .flex_1()
-                        .text_size(px(11.0))
+                        .text_size(px(FS_META))
                         .text_color(tier4(t))
                         .child(name.to_string()),
                 )
-                .child(div().w(col_branch).text_size(px(11.0)).text_color(tier4(t)).child("分支"))
-                .child(div().w(col_status).text_size(px(11.0)).text_color(tier4(t)).child("状态"))
-                .child(div().w(col_counts).text_size(px(11.0)).text_color(tier4(t)).child("领先 · 落后"))
-                .child(div().w(col_synced).text_size(px(11.0)).text_color(tier4(t)).child("上次同步"))
-                .child(div().w(col_action).text_size(px(11.0)).text_color(tier4(t)).child("操作"))
+                .child(div().w(col_branch).text_size(px(FS_META)).text_color(tier4(t)).child("分支"))
+                .child(div().w(col_status).text_size(px(FS_META)).text_color(tier4(t)).child("状态"))
+                .child(div().w(col_counts).text_size(px(FS_META)).text_color(tier4(t)).child("领先 · 落后"))
+                .child(div().w(col_synced).text_size(px(FS_META)).text_color(tier4(t)).child("上次同步"))
+                .child(div().w(col_action).text_size(px(FS_META)).text_color(tier4(t)).child("操作"))
         };
 
-        let row = |(i, (e, v)): (usize, (&RepoEntry, &RepoView)), cx: &mut Context<Self>| -> Div {
+        // 返回 Stateful<Div>：行要能响应悬停（on_hover 只在 Stateful 上）
+        let row =
+            |(i, (e, v)): (usize, (&RepoEntry, &RepoView)), cx: &mut Context<Self>| -> Stateful<Div> {
             let path = e.path.clone();
+            let hov_path = path.clone();
             let b = bucket_of(&v.status);
             let name = if e.alias.trim().is_empty() {
                 e.name.clone()
@@ -1575,7 +1823,7 @@ impl Shell {
                         .label("拉取")
                         .outline()
                         .disabled(batch_running)
-                        .with_size(Size::Size(px(26.0)))
+                        .with_size(Size::Size(px(BTN_SM)))
                         .on_click(cx.listener({
                             let path = path.clone();
                             move |this, _, _, cx| {
@@ -1590,7 +1838,7 @@ impl Shell {
                         .label("推送")
                         .outline()
                         .disabled(batch_running)
-                        .with_size(Size::Size(px(26.0)))
+                        .with_size(Size::Size(px(BTN_SM)))
                         .on_click(cx.listener({
                             let path = path.clone();
                             move |this, _, _, cx| {
@@ -1603,7 +1851,7 @@ impl Shell {
                     Button::new(SharedString::from(format!("ov-act-view-{i}")))
                         .label("查看")
                         .ghost()
-                        .with_size(Size::Size(px(26.0)))
+                        .with_size(Size::Size(px(BTN_SM)))
                         .on_click(cx.listener({
                             let path = path.clone();
                             move |this, _, _, cx| {
@@ -1621,7 +1869,7 @@ impl Shell {
                 .items_center()
                 .px(px(12.0))
                 .h(px(36.0))
-                .gap(px(8.0))
+                .gap(px(GAP))
                 .child(
                     div().w(px(24.0)).flex_shrink_0().child(
                         Checkbox::new(SharedString::from(format!("ov-cb-{i}")))
@@ -1646,7 +1894,7 @@ impl Shell {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(13.0))
+                        .text_size(px(FS_BODY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(t.colors.foreground)
                         .child(name),
@@ -1654,7 +1902,7 @@ impl Shell {
                 .child(
                     div()
                         .w(col_branch)
-                        .text_size(px(12.0))
+                        .text_size(px(FS_SEC))
                         .font_family(t.mono_font_family.clone())
                         .text_color(tier3(t))
                         .child(if v.status.branch.is_empty() {
@@ -1667,7 +1915,7 @@ impl Shell {
                 .child(
                     div()
                         .w(col_counts)
-                        .text_size(px(12.0))
+                        .text_size(px(FS_SEC))
                         .font_family(t.mono_font_family.clone())
                         .text_color(if v.status.ahead > 0 || v.status.behind > 0 {
                             body(t)
@@ -1679,7 +1927,7 @@ impl Shell {
                 .child(
                     div()
                         .w(col_synced)
-                        .text_size(px(12.0))
+                        .text_size(px(FS_SEC))
                         .text_color(tier3(t))
                         .child({
                             let ts = e.last_auto_check;
@@ -1692,6 +1940,23 @@ impl Shell {
                         None => div().into_any_element(),
                     }),
                 )
+                .id(SharedString::from(format!("ov-row-{i}")))
+                .when(self.hovered.as_deref() == Some(path.as_str()), |r| {
+                    r.bg(t.colors.list_hover)
+                })
+                .on_hover({
+                    let this = cx.entity();
+                    move |hovered, _, cx| {
+                        this.update(cx, |this, cx| {
+                            if *hovered {
+                                this.hovered = Some(hov_path.clone());
+                            } else if this.hovered.as_deref() == Some(hov_path.as_str()) {
+                                this.hovered = None;
+                            }
+                            cx.notify();
+                        });
+                    }
+                })
         };
 
         // 分组表格：组头 + 行；空组不画
@@ -1701,7 +1966,7 @@ impl Shell {
             .min_h_0()
             .id("ov-table")
             .overflow_y_scroll()
-            .rounded(px(10.0))
+            .rounded(px(R_LG))
             .bg(t.colors.popover)
             .border_1()
             .border_color(t.colors.border)
@@ -1709,20 +1974,22 @@ impl Shell {
         if !mine.is_empty() {
             table = table.child(group_header("我的仓库 · 重点关注", t));
             for (i, idx) in mine.iter().enumerate() {
-                table = table.child(row((*idx, rows[*idx]), cx).when(i % 2 == 1, |r| r.bg(t.colors.list_even)));
+                table = table
+                    .child(row((*idx, rows[*idx]), cx).when(i % 2 == 1, |r| r.bg(t.colors.list_even)));
             }
         }
         if !third.is_empty() {
             table = table.child(group_header("第三方仓库 · 跟踪更新", t));
             for (i, idx) in third.iter().enumerate() {
-                table = table.child(row((*idx, rows[*idx]), cx).when(i % 2 == 1, |r| r.bg(t.colors.list_even)));
+                table = table
+                    .child(row((*idx, rows[*idx]), cx).when(i % 2 == 1, |r| r.bg(t.colors.list_even)));
             }
         }
         if rows.is_empty() {
             table = table.child(
                 div()
                     .p(px(32.0))
-                    .text_size(px(13.0))
+                    .text_size(px(FS_BODY))
                     .text_color(tier3(t))
                     .child("还没有仓库。回到工作台添加一个吧。"),
             );
@@ -1757,7 +2024,7 @@ impl Shell {
             .justify_between()
             .items_center()
             .child(
-                div().text_size(px(12.0)).text_color(tier3(t)).child(
+                div().text_size(px(FS_SEC)).text_color(tier3(t)).child(
                     match &self.batch {
                         Some(b) if b.running => format!(
                             "批量{}中 {}/{}…",
@@ -1773,14 +2040,14 @@ impl Shell {
         if !checked_paths.is_empty() {
             bottom_bar = bottom_bar.child(
                 h_flex()
-                    .gap(px(8.0))
+                    .gap(px(GAP))
                     .when(!checked_pull.is_empty(), |bar| {
                         bar.child(
                             Button::new("ov-batch-checked-pull")
                                 .label(format!("拉取所选 ({})", checked_pull.len()))
                                 .primary()
                                 .disabled(batch_running)
-                                .with_size(Size::Size(px(28.0)))
+                                .with_size(Size::Size(px(BTN)))
                                 .on_click(cx.listener({
                                     let paths = checked_pull.clone();
                                     move |this, _, _, cx| this.run_batch(true, paths.clone(), cx)
@@ -1793,7 +2060,7 @@ impl Shell {
                                 .label(format!("推送所选 ({})", checked_push.len()))
                                 .primary()
                                 .disabled(batch_running)
-                                .with_size(Size::Size(px(28.0)))
+                                .with_size(Size::Size(px(BTN)))
                                 .on_click(cx.listener({
                                     let paths = checked_push.clone();
                                     move |this, _, _, cx| this.run_batch(false, paths.clone(), cx)
@@ -1809,7 +2076,7 @@ impl Shell {
             .h_full()
             .bg(t.colors.background)
             .p(px(24.0))
-            .gap(px(14.0))
+            .gap(px(GAP_LG))
             .child(head)
             .child(cards)
             .child(table)
@@ -1851,10 +2118,10 @@ fn dlg_body(
     let field = |label: &str, input: &Entity<InputState>| -> Div {
         v_flex()
             .w_full()
-            .gap(px(4.0))
+            .gap(px(GAP_TIGHT))
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(FS_META))
                     .text_color(tier4(t))
                     .child(label.to_string()),
             )
@@ -1864,17 +2131,17 @@ fn dlg_body(
         // 编辑时路径只读：换路径等于换仓库，不该在这个框里发生
         Some(p) => v_flex()
             .w_full()
-            .gap(px(4.0))
+            .gap(px(GAP_TIGHT))
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(FS_META))
                     .text_color(tier4(t))
                     .child("路径"),
             )
             .child(
                 div()
                     .w_full()
-                    .text_size(px(12.0))
+                    .text_size(px(FS_SEC))
                     .font_family(t.mono_font_family.clone())
                     .text_color(tier3(t))
                     .child(p.clone()),
@@ -1884,22 +2151,22 @@ fn dlg_body(
 
     v_flex()
         .w_full()
-        .gap(px(14.0))
+        .gap(px(GAP_LG))
         .child(path_field)
         .child(field("显示名", name_input))
         .child(
             v_flex()
                 .w_full()
-                .gap(px(4.0))
+                .gap(px(GAP_TIGHT))
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(FS_META))
                         .text_color(tier4(t))
                         .child("归属"),
                 )
                 .child(
                     h_flex()
-                        .gap(px(8.0))
+                        .gap(px(GAP))
                         .child(
                             Button::new("dlg-mine")
                                 .label("我的仓库")
@@ -1938,11 +2205,161 @@ fn dlg_body(
             b.child(
                 div()
                     .w_full()
-                    .text_size(px(12.0))
+                    .text_size(px(FS_SEC))
                     .text_color(t.colors.danger)
                     .child(e),
             )
         })
+}
+
+/// 初始化向导正文：说明 + 路径 + 排除项勾选列表。
+/// 常见构建产物 / 依赖目录默认勾上（进 `enter_init` 时预勾），用户可改。
+fn init_body(
+    t: &Theme,
+    init: &InitState,
+    error: &Option<String>,
+    this: &Entity<Shell>,
+) -> Div {
+    let dir_name = std::path::Path::new(&init.path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| init.path.clone());
+
+    let mut list = v_flex()
+        .id("init-excludes")
+        .w_full()
+        .max_h(px(180.0))
+        .overflow_y_scroll()
+        .gap(px(2.0))
+        .p(px(8.0))
+        .rounded(px(R_LG))
+        .bg(t.colors.background)
+        .border_1()
+        .border_color(t.colors.border);
+    if init.items.is_empty() {
+        list = list.child(
+            div()
+                .text_size(px(FS_SEC))
+                .text_color(tier4(t))
+                .child("（空文件夹）"),
+        );
+    }
+    for (ix, it) in init.items.iter().enumerate() {
+        let name = it.name.clone();
+        let checked = init.excludes.contains(&name);
+        list = list.child(
+            h_flex()
+                .w_full()
+                .h(px(26.0))
+                .px(px(6.0))
+                .items_center()
+                .gap(px(GAP))
+                .child(
+                    Checkbox::new(SharedString::from(format!("init-cb-{ix}")))
+                        .checked(checked)
+                        .on_click({
+                            let this = this.clone();
+                            let name = name.clone();
+                            move |checked, _, cx| {
+                                this.update(cx, |this, cx| {
+                                    if let Some(i) = this.dlg.as_mut().and_then(|d| d.init.as_mut())
+                                    {
+                                        if *checked {
+                                            i.excludes.insert(name.clone());
+                                        } else {
+                                            i.excludes.remove(&name);
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(px(FS_SEC))
+                        .text_color(body(t))
+                        .child(name.clone()),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .text_size(px(FS_META))
+                        .text_color(tier4(t))
+                        .child(if it.is_dir { "文件夹" } else { "文件" }.to_string()),
+                ),
+        );
+    }
+
+    v_flex()
+        .w_full()
+        .gap(px(GAP_LG))
+        .child(
+            div()
+                .w_full()
+                .text_size(px(FS_BODY))
+                .line_height(px(20.0))
+                .text_color(tier3(t))
+                .child(format!(
+                    "「{dir_name}」还不是 git 仓库。初始化后自动生成首次提交；勾选不想纳入版本管理的项，会写入 .gitignore："
+                )),
+        )
+        .child(
+            div()
+                .w_full()
+                .text_size(px(FS_SEC))
+                .font_family(t.mono_font_family.clone())
+                .text_color(tier4(t))
+                .child(init.path.clone()),
+        )
+        .child(list)
+        .when_some(error.clone(), |b, e| {
+            b.child(
+                div()
+                    .w_full()
+                    .text_size(px(FS_SEC))
+                    .text_color(t.colors.danger)
+                    .child(e),
+            )
+        })
+}
+
+/// 初始化向导底栏：取消 / 初始化（跑起来时按钮转圈）
+fn init_footer(t: &Theme, init: &InitState, this: &Entity<Shell>) -> Div {
+    let _ = t;
+    h_flex()
+        .w_full()
+        .justify_end()
+        .items_center()
+        .gap(px(GAP))
+        .child(
+            Button::new("init-cancel")
+                .label("取消")
+                .ghost()
+                .disabled(init.working)
+                .on_click({
+                    let this = this.clone();
+                    move |_, window, cx| {
+                        this.update(cx, |this, cx| {
+                            this.dlg = None;
+                            cx.notify();
+                        });
+                        window.close_dialog(cx);
+                    }
+                }),
+        )
+        .child(
+            Button::new("init-go")
+                .label("初始化")
+                .primary()
+                .loading(init.working)
+                .on_click({
+                    let this = this.clone();
+                    move |_, _, cx| {
+                        this.update(cx, |this, cx| this.run_init(cx));
+                    }
+                }),
+        )
 }
 
 /// 弹窗底栏：编辑模式左侧「移除仓库」，右侧取消 / 保存。
@@ -1973,7 +2390,7 @@ fn dlg_footer(
     }
     footer.child(
         h_flex()
-            .gap(px(8.0))
+            .gap(px(GAP))
             .child(
                 Button::new("dlg-cancel")
                     .label("取消")
@@ -2020,17 +2437,17 @@ fn stat_card(n: usize, label: &str, color: Hsla, t: &Theme) -> Div {
         .flex_1()
         .gap(px(2.0))
         .p(px(14.0))
-        .rounded(px(10.0))
+        .rounded(px(R_LG))
         .bg(t.colors.popover)
         .border_1()
         .border_color(t.colors.border)
         .child(
             div()
-                .text_size(px(20.0))
+                .text_size(px(FS_NUM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(if n > 0 { color } else { tier4(t) }),
         )
-        .child(div().text_size(px(12.0)).text_color(tier3(t)).child(label.to_string()))
+        .child(div().text_size(px(FS_SEC)).text_color(tier3(t)).child(label.to_string()))
 }
 
 /// 总览行状态 pill：分叉 > 落后/可更新 > 未提交 > 待推送 > 最新。
@@ -2066,10 +2483,10 @@ impl Shell {
 
         let title_row = h_flex()
             .items_center()
-            .gap(px(10.0))
+            .gap(px(GAP))
             .child(
                 div()
-                    .text_size(px(18.0))
+                    .text_size(px(FS_HEAD))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(t.colors.foreground)
                     .child(self.title(path)),
@@ -2107,14 +2524,14 @@ impl Shell {
             .w_full()
             .justify_between()
             .items_start()
-            .gap(px(12.0))
+            .gap(px(GAP_LG))
             .child(
                 v_flex()
-                    .gap(px(5.0))
+                    .gap(px(GAP_TIGHT))
                     .child(title_row)
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .text_color(tier3(t))
                             .child(format!("我的仓库 · 本地路径 {path}")),
                     ),
@@ -2157,9 +2574,9 @@ impl Shell {
             // 设计稿：命令卡与底排分摊主区剩余高度（fill_container），不是按内容收缩
             .flex_1()
             .min_h_0()
-            .gap(px(6.0))
+            .gap(px(GAP_TIGHT))
             .p(px(16.0))
-            .rounded(px(12.0))
+            .rounded(px(R_XL))
             .bg(t.colors.popover)
             .border_1()
             .border_color(t.colors.border)
@@ -2167,10 +2584,10 @@ impl Shell {
                 h_flex()
                     .w_full()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(GAP))
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(px(FS_BODY))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(t.colors.foreground)
                             .child("常用命令"),
@@ -2178,7 +2595,7 @@ impl Shell {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.0))
+                            .text_size(px(FS_META))
                             .text_color(tier4(t))
                             .child("一键运行 · 输出实时回显 · 可钉住自定义命令（上限 3）"),
                     )
@@ -2186,7 +2603,7 @@ impl Shell {
                         Button::new("cmd-edit")
                             .label("编辑")
                             .ghost()
-                            .with_size(Size::Size(px(26.0))),
+                            .with_size(Size::Size(px(BTN_SM))),
                     ),
             )
             .children(rows)
@@ -2196,7 +2613,7 @@ impl Shell {
             .w_full()
             .flex_1()
             .min_h_0()
-            .gap(px(12.0))
+            .gap(px(GAP_LG))
             .child(self.space_card(t, cx))
             .child(self.git_card(path, &status, changed, t));
 
@@ -2206,7 +2623,7 @@ impl Shell {
             .h_full()
             .bg(t.colors.background)
             .p(px(24.0))
-            .gap(px(14.0))
+            .gap(px(GAP_LG))
             .child(head)
             .child(cmd_card)
             .child(bottom)
@@ -2220,49 +2637,49 @@ impl Shell {
         h_flex()
             .flex_shrink_0()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(GAP))
             .child(
                 Button::new("wb-pull")
                     .label("拉取")
-                    .icon(IconName::ArrowDown)
+                    .icon(AssetIcon::ArrowDown)
                     .outline()
                     .loading(pulling)
-                    .with_size(Size::Size(px(30.0)))
+                    .with_size(Size::Size(px(BTN)))
                     .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
             )
             .child(
                 Button::new("wb-push")
                     .label("推送")
-                    .icon(IconName::ArrowUp)
+                    .icon(AssetIcon::ArrowUp)
                     .outline()
                     .loading(pushing)
-                    .with_size(Size::Size(px(30.0)))
+                    .with_size(Size::Size(px(BTN)))
                     .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Push, cx))),
             )
             .child(div().w(px(1.0)).h(px(20.0)).bg(t.colors.border))
             .child(
                 Button::new("act-folder")
-                    .icon(IconName::FolderOpen)
+                    .icon(AssetIcon::FolderOpen)
                     .ghost()
-                    .with_size(Size::Size(px(30.0))),
+                    .with_size(Size::Size(px(BTN))),
             )
             .child(
                 Button::new("act-cloud")
-                    .icon(IconName::Globe)
+                    .icon(AssetIcon::Globe)
                     .ghost()
-                    .with_size(Size::Size(px(30.0))),
+                    .with_size(Size::Size(px(BTN))),
             )
             .child(
                 Button::new("act-doc")
-                    .icon(IconName::BookOpen)
+                    .icon(AssetIcon::BookOpen)
                     .ghost()
-                    .with_size(Size::Size(px(30.0))),
+                    .with_size(Size::Size(px(BTN))),
             )
             .child(
                 Button::new("act-timer")
                     .icon(AssetIcon::Clock)
                     .ghost()
-                    .with_size(Size::Size(px(30.0))),
+                    .with_size(Size::Size(px(BTN))),
             )
     }
 
@@ -2276,13 +2693,13 @@ impl Shell {
         h_flex()
             .h(px(22.0))
             .px(px(8.0))
-            .rounded(px(6.0))
+            .rounded(px(R_MD))
             .bg(t.colors.muted)
             .items_center()
-            .gap(px(4.0))
+            .gap(px(GAP_TIGHT))
             .text_color(tier3(t))
-            .child(Icon::new(AssetIcon::GitBranch).small())
-            .child(div().text_size(px(12.0)).child(text))
+            .child(icon_md(AssetIcon::GitBranch))
+            .child(div().text_size(px(FS_SEC)).child(text))
     }
 
     /// 命令卡里的一行：圆形播放钮 + 槽位名 + 命令文本 + 上次结果
@@ -2306,9 +2723,9 @@ impl Shell {
             .w_full()
             .h(px(40.0))
             .px(px(10.0))
-            .rounded(px(6.0))
+            .rounded(px(R_MD))
             .items_center()
-            .gap(px(12.0))
+            .gap(px(GAP_LG))
             .child(
                 // 22px 墨色圆 + 白色播放三角；运行中换成加载图标
                 div()
@@ -2321,16 +2738,16 @@ impl Shell {
                     .justify_center()
                     .text_color(t.colors.popover)
                     .child(if running {
-                        Icon::new(IconName::LoaderCircle).small()
+                        icon_sm(AssetIcon::LoaderCircle)
                     } else {
-                        Icon::new(IconName::Play).small()
+                        icon_sm(AssetIcon::Play)
                     }),
             )
             .child(
                 div()
                     .w(px(76.0))
                     .flex_shrink_0()
-                    .text_size(px(13.0))
+                    .text_size(px(FS_BODY))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(body(t))
                     .child(label),
@@ -2338,7 +2755,7 @@ impl Shell {
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(12.0))
+                    .text_size(px(FS_SEC))
                     .font_family(t.mono_font_family.clone())
                     .text_color(tier3(t))
                     .child(if cmd.is_empty() {
@@ -2359,7 +2776,7 @@ impl Shell {
             row = row.child(
                 div()
                     .flex_shrink_0()
-                    .text_size(px(11.0))
+                    .text_size(px(FS_META))
                     .text_color(if r.ok { tier4(t) } else { t.colors.danger })
                     .child(format!(
                         "{}{}{}",
@@ -2386,11 +2803,11 @@ impl Shell {
             .min_h(px(96.0))
             .overflow_y_scroll()
             .p(px(10.0))
-            .gap(px(4.0))
-            .rounded(px(8.0))
+            .gap(px(GAP_TIGHT))
+            .rounded(px(R_LG))
             .bg(ink)
             .font_family(t.mono_font_family.clone())
-            .text_size(px(11.0))
+            .text_size(px(FS_META))
             .text_color(text);
 
         if self.out.lines.is_empty() {
@@ -2488,9 +2905,9 @@ impl Shell {
         let mut card = v_flex()
             .flex_1()
             .min_h_0()
-            .gap(px(10.0))
+            .gap(px(GAP))
             .p(px(16.0))
-            .rounded(px(12.0))
+            .rounded(px(R_XL))
             .bg(t.colors.popover)
             .border_1()
             .border_color(t.colors.border)
@@ -2498,10 +2915,10 @@ impl Shell {
                 h_flex()
                     .w_full()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(GAP))
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(px(FS_BODY))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(t.colors.foreground)
                             .child("磁盘占用"),
@@ -2509,7 +2926,7 @@ impl Shell {
                     .child(div().flex_1())
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .text_color(tier3(t))
                             .child(total_text),
                     )
@@ -2517,7 +2934,7 @@ impl Shell {
                         Button::new("space-rescan")
                             .label(if self.space.scanning { "扫描中…" } else { "重新扫描" })
                             .ghost()
-                            .with_size(Size::Size(px(26.0)))
+                            .with_size(Size::Size(px(BTN_SM)))
                             .loading(self.space.scanning)
                             .on_click(cx.listener(|this, _, _, cx| this.scan_space(cx))),
                     ),
@@ -2528,33 +2945,33 @@ impl Shell {
             let mut bar = h_flex()
                 .w_full()
                 .h(px(8.0))
-                .rounded(px(4.0))
+                .rounded(px(R_SM))
                 .overflow_hidden()
                 .gap(px(2.0))
                 .bg(track(t));
             for (color, size, _, _) in &segs {
-                bar = bar.child(div().h_full().rounded(px(4.0)).bg(*color).flex_grow(*size as f32));
+                bar = bar.child(div().h_full().rounded(px(R_SM)).bg(*color).flex_grow(*size as f32));
             }
             card = card.child(bar);
 
-            let mut legend = v_flex().w_full().gap(px(4.0));
+            let mut legend = v_flex().w_full().gap(px(GAP_TIGHT));
             for (color, _, _, text) in &segs {
                 legend = legend.child(
                     h_flex()
                         .w_full()
                         .items_center()
-                        .gap(px(8.0))
+                        .gap(px(GAP))
                         .child(
                             div()
                                 .w(px(8.0))
                                 .h(px(8.0))
                                 .flex_shrink_0()
-                                .rounded(px(2.0))
+                                .rounded(px(R_SM))
                                 .bg(*color),
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(px(FS_SEC))
                                 .text_color(body(t))
                                 .child(text.clone()),
                         ),
@@ -2562,16 +2979,20 @@ impl Shell {
             }
             card = card.child(legend);
         } else {
-            card = card.child(
+            card = card.child(if self.space.scanning {
+                v_flex()
+                    .w_full()
+                    .gap(px(GAP_TIGHT))
+                    .child(skeleton_bar(None, t))
+                    .child(skeleton_bar(Some(px(160.0)), t))
+                    .into_any_element()
+            } else {
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(FS_SEC))
                     .text_color(tier3(t))
-                    .child(if self.space.scanning {
-                        "正在统计各目录占用…".to_string()
-                    } else {
-                        "扫描完成后在这里展示目录构成".to_string()
-                    }),
-            );
+                    .child("扫描完成后在这里展示目录构成".to_string())
+                    .into_any_element()
+            });
         }
 
         // 清理条：暖橙底 + 深橙文字 + 墨色一键清理
@@ -2580,14 +3001,14 @@ impl Shell {
                 h_flex()
                     .w_full()
                     .p(px(10.0))
-                    .rounded(px(8.0))
+                    .rounded(px(R_LG))
                     .bg(orange_bg(t))
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(px(GAP))
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(orange_text(t))
                             .child(format!(
@@ -2600,7 +3021,7 @@ impl Shell {
                         Button::new("clean-all")
                             .label(if self.space.cleaning { "清理中…" } else { "一键清理" })
                             .primary()
-                            .with_size(Size::Size(px(28.0)))
+                            .with_size(Size::Size(px(BTN)))
                             .loading(self.space.cleaning)
                             .on_click(cx.listener(|this, _, _, cx| this.clean_all(cx))),
                     ),
@@ -2610,12 +3031,12 @@ impl Shell {
                 h_flex()
                     .w_full()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(GAP_TIGHT))
                     .text_color(t.colors.success)
-                    .child(Icon::new(IconName::CircleCheck).small())
+                    .child(icon_sm(AssetIcon::CircleCheck))
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .text_color(tier3(t))
                             .child("没有可清理的构建缓存"),
                     ),
@@ -2638,15 +3059,15 @@ impl Shell {
         v_flex()
             .w(px(300.0))
             .flex_shrink_0()
-            .gap(px(10.0))
+            .gap(px(GAP))
             .p(px(16.0))
-            .rounded(px(12.0))
+            .rounded(px(R_XL))
             .bg(t.colors.popover)
             .border_1()
             .border_color(t.colors.border)
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(FS_SEC))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(tier3(t))
                     .child("Git · 附带功能"),
@@ -2654,21 +3075,21 @@ impl Shell {
             .child(
                 h_flex()
                     .items_baseline()
-                    .gap(px(8.0))
+                    .gap(px(GAP))
                     .child(
                         div()
-                            .text_size(px(16.0))
+                            .text_size(px(FS_TITLE))
                             .font_family(t.mono_font_family.clone())
                             .font_weight(FontWeight::BOLD)
                             .text_color(t.colors.foreground)
                             .child(format!("↑{} ↓{}", s.ahead, s.behind)),
                     )
-                    .child(div().text_size(px(11.0)).text_color(tier4(t)).child(desc)),
+                    .child(div().text_size(px(FS_META)).text_color(tier4(t)).child(desc)),
             )
             .child(
                 h_flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(GAP))
                     .child(
                         div()
                             .w(px(7.0))
@@ -2682,7 +3103,7 @@ impl Shell {
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .text_color(body(t))
                             .child(if changed > 0 {
                                 format!("{changed} 个文件待提交")
@@ -2694,30 +3115,30 @@ impl Shell {
             .child(
                 h_flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(GAP))
                     .child(
                         Button::new("git-pull")
                             .label("拉取")
                             .secondary()
-                            .with_size(Size::Size(px(30.0))),
+                            .with_size(Size::Size(px(BTN))),
                     )
                     .child(
                         Button::new("git-push")
                             .label("推送")
                             .secondary()
-                            .with_size(Size::Size(px(30.0))),
+                            .with_size(Size::Size(px(BTN))),
                     ),
             )
             .child(div().w_full().h(px(1.0)).bg(track(t)))
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(FS_SEC))
                     .text_color(t.colors.accent)
                     .child("查看提交历史与文件变更"),
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(FS_META))
                     .text_color(tier4(t))
                     .child(format!(
                         "上次运行 {} · 定时 {}",
@@ -2741,11 +3162,11 @@ impl Shell {
             .h(px(26.0))
             .flex_shrink_0()
             .items_center()
-            .gap(px(12.0))
+            .gap(px(GAP_LG))
             .child(
                 h_flex()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(GAP_TIGHT))
                     .child(
                         div()
                             .w(px(6.0))
@@ -2755,7 +3176,7 @@ impl Shell {
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .text_color(tier3(t))
                             .child(if running {
                                 "命令运行中".to_string()
@@ -2767,7 +3188,7 @@ impl Shell {
             .child(div().flex_1())
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(FS_SEC))
                     .text_color(tier4(t))
                     .child(format!(
                         "定时同步：{}",
@@ -2790,7 +3211,7 @@ fn pill(text: &str, fg: Hsla, bg: Hsla, _t: &Theme) -> Div {
         .justify_center()
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(px(FS_META))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg)
                 .child(text.to_string()),
@@ -2819,10 +3240,10 @@ impl Shell {
 
         let title_row = h_flex()
             .items_center()
-            .gap(px(10.0))
+            .gap(px(GAP))
             .child(
                 div()
-                    .text_size(px(18.0))
+                    .text_size(px(FS_HEAD))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(t.colors.foreground)
                     .child(self.title(path)),
@@ -2852,14 +3273,14 @@ impl Shell {
             .w_full()
             .justify_between()
             .items_start()
-            .gap(px(12.0))
+            .gap(px(GAP_LG))
             .child(
                 v_flex()
-                    .gap(px(5.0))
+                    .gap(px(GAP_TIGHT))
                     .child(title_row)
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(px(FS_BODY))
                             .text_color(tier3(t))
                             .child(format!("本地路径 {path}")),
                     ),
@@ -2869,30 +3290,30 @@ impl Shell {
                 h_flex()
                     .flex_shrink_0()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(GAP))
                     .child(
                         Button::new("pf-folder")
-                            .icon(IconName::FolderOpen)
+                            .icon(AssetIcon::FolderOpen)
                             .ghost()
-                            .with_size(Size::Size(px(30.0))),
+                            .with_size(Size::Size(px(BTN))),
                     )
                     .child(
                         Button::new("pf-cloud")
-                            .icon(IconName::Globe)
+                            .icon(AssetIcon::Globe)
                             .ghost()
-                            .with_size(Size::Size(px(30.0))),
+                            .with_size(Size::Size(px(BTN))),
                     )
                     .child(
                         Button::new("pf-doc")
-                            .icon(IconName::BookOpen)
+                            .icon(AssetIcon::BookOpen)
                             .ghost()
-                            .with_size(Size::Size(px(30.0))),
+                            .with_size(Size::Size(px(BTN))),
                     )
                     .child(
                         Button::new("pf-timer")
                             .icon(AssetIcon::Clock)
                             .ghost()
-                            .with_size(Size::Size(px(30.0))),
+                            .with_size(Size::Size(px(BTN))),
                     )
                     .child(div().w(px(1.0)).h(px(20.0)).bg(t.colors.border))
                     .child(
@@ -2900,7 +3321,7 @@ impl Shell {
                             .label("检测更新")
                             .outline()
                             .loading(self.out.running && self.out.op == Some(Op::Check))
-                            .with_size(Size::Size(px(34.0)))
+                            .with_size(Size::Size(px(BTN_LG)))
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Check, cx))),
                     )
                     .child(
@@ -2908,7 +3329,7 @@ impl Shell {
                             .label("拉取更新")
                             .primary()
                             .loading(self.out.running && self.out.op == Some(Op::Pull))
-                            .with_size(Size::Size(px(34.0)))
+                            .with_size(Size::Size(px(BTN_LG)))
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
                     ),
             );
@@ -2919,21 +3340,21 @@ impl Shell {
             h_flex()
                 .h(px(30.0))
                 .px(px(10.0))
-                .rounded(px(6.0))
+                .rounded(px(R_MD))
                 .bg(t.colors.popover)
                 .border_1()
                 .border_color(t.colors.border)
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(GAP_TIGHT))
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(FS_META))
                         .text_color(tier4(t))
                         .child(label.to_string()),
                 )
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(px(FS_SEC))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(body(t))
                         .child(value.to_string()),
@@ -2964,7 +3385,7 @@ impl Shell {
         };
         let chips = h_flex()
             .w_full()
-            .gap(px(8.0))
+            .gap(px(GAP))
             .child(chip("技术栈", &stack_text))
             .child(chip("Stars", "—"))
             .child(chip("最近提交", &last_commit_text))
@@ -2973,15 +3394,15 @@ impl Shell {
                 h_flex()
                     .h(px(30.0))
                     .px(px(10.0))
-                    .gap(px(8.0))
-                    .rounded(px(6.0))
+                    .gap(px(GAP))
+                    .rounded(px(R_MD))
                     .bg(t.colors.popover)
                     .border_1()
                     .border_color(t.colors.border)
                     .items_center()
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(FS_META))
                             .text_color(tier4(t))
                             .child("近 30 天活跃度"),
                     )
@@ -3002,7 +3423,7 @@ impl Shell {
             .w_full()
             .flex_1()
             .min_h_0()
-            .rounded(px(12.0))
+            .rounded(px(R_XL))
             .bg(t.colors.popover)
             .border_1()
             .border_color(t.colors.border)
@@ -3014,17 +3435,17 @@ impl Shell {
                     .id("readme-pane")
                     .overflow_y_scroll()
                     .p(px(20.0))
-                    .gap(px(12.0))
+                    .gap(px(GAP_LG))
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(FS_META))
                             .font_family(t.mono_font_family.clone())
                             .text_color(tier4(t))
                             .child("README"),
                     )
                     .child(
                         div()
-                            .text_size(px(16.0))
+                            .text_size(px(FS_TITLE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(t.colors.foreground)
                             .child(readme_title),
@@ -3032,33 +3453,36 @@ impl Shell {
                     .children(match &readme {
                         Some(r) if !r.intro.is_empty() => vec![div()
                             .w_full()
-                            .text_size(px(13.0))
+                            .text_size(px(FS_BODY))
                             .line_height(px(22.0))
                             .text_color(tier3(t))
-                            .child(r.intro.clone())],
+                            .child(r.intro.clone())
+                            .into_any_element()],
                         Some(_) => vec![div()
                             .w_full()
-                            .text_size(px(13.0))
+                            .text_size(px(FS_BODY))
                             .line_height(px(22.0))
                             .text_color(tier3(t))
-                            .child("这份仓库的 README 没有可展示的简介段落。")],
+                            .child("这份仓库的 README 没有可展示的简介段落。")
+                            .into_any_element()],
                         None => {
                             if self.profile.scanning {
                                 vec![skeleton_bar(None, t), skeleton_bar(Some(px(420.0)), t)]
                             } else {
                                 vec![div()
                                     .w_full()
-                                    .text_size(px(13.0))
+                                    .text_size(px(FS_BODY))
                                     .line_height(px(22.0))
                                     .text_color(tier3(t))
-                                    .child("仓库根目录没有找到 README 文件。")]
+                                    .child("仓库根目录没有找到 README 文件。")
+                                    .into_any_element()]
                             }
                         }
                     })
                     .child(
                         div()
                             .pt(px(4.0))
-                            .text_size(px(11.0))
+                            .text_size(px(FS_META))
                             .text_color(tier4(t))
                             .child("语言构成"),
                     )
@@ -3073,7 +3497,7 @@ impl Shell {
             .h_full()
             .bg(t.colors.background)
             .p(px(24.0))
-            .gap(px(14.0))
+            .gap(px(GAP_LG))
             .child(head)
             .child(chips)
             .child(content_card)
@@ -3109,7 +3533,7 @@ impl Shell {
                 div()
                     .flex_1()
                     .h(px(h))
-                    .rounded(px(1.0))
+                    .rounded(px(R_SM))
                     .bg(if i < n { t.colors.accent } else { track(t) })
             }))
     }
@@ -3130,15 +3554,15 @@ impl Shell {
             return h_flex()
                 .w_full()
                 .h(px(8.0))
-                .rounded(px(4.0))
+                .rounded(px(R_SM))
                 .overflow_hidden()
                 .bg(track(t))
-                .child(div().h_full().rounded(px(4.0)).bg(track(t)));
+                .child(div().h_full().rounded(px(R_SM)).bg(track(t)));
         }
         let mut bar = h_flex()
             .w_full()
             .h(px(8.0))
-            .rounded(px(4.0))
+            .rounded(px(R_SM))
             .overflow_hidden()
             .gap(px(2.0))
             .bg(track(t));
@@ -3146,7 +3570,7 @@ impl Shell {
             bar = bar.child(
                 div()
                     .h_full()
-                    .rounded(px(4.0))
+                    .rounded(px(R_SM))
                     .bg(palette[i % palette.len()])
                     .flex_grow(l.percent.max(0.5)),
             );
@@ -3166,15 +3590,15 @@ impl Shell {
             .min_h_0()
             .overflow_y_scroll()
             .p(px(10.0))
-            .gap(px(4.0))
-            .rounded(px(8.0))
+            .gap(px(GAP_TIGHT))
+            .rounded(px(R_LG))
             .bg(t.colors.popover)
             .border_1()
             .border_color(t.colors.border);
         if self.out.lines.is_empty() {
             log_area = log_area.child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(FS_SEC))
                     .font_family(t.mono_font_family.clone())
                     .text_color(tier4(t))
                     .child("透明拉取：进度、日志与最终状态会显示在这里"),
@@ -3195,7 +3619,7 @@ impl Shell {
                 };
                 log_area = log_area.child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(FS_META))
                         .font_family(t.mono_font_family.clone())
                         .text_color(color)
                         .child(line.clone()),
@@ -3209,7 +3633,7 @@ impl Shell {
             .flex_shrink_0()
             .bg(t.colors.background)
             .p(px(16.0))
-            .gap(px(12.0))
+            .gap(px(GAP_LG))
             .child(
                 h_flex()
                     .w_full()
@@ -3217,14 +3641,14 @@ impl Shell {
                     .items_center()
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(px(FS_BODY))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(t.colors.foreground)
                             .child("同步"),
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(FS_META))
                             .text_color(if busy { orange_text(t) } else { tier4(t) })
                             .child(if busy {
                                 "同步中…".to_string()
@@ -3237,7 +3661,7 @@ impl Shell {
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(FS_SEC))
                     .text_color(tier3(t))
                     .child(match (busy, running_op) {
                         (true, Some(Op::Pull)) => "正在拉取云端更新…".to_string(),
@@ -3247,31 +3671,44 @@ impl Shell {
                         (false, _) => "点击下方按钮开始同步".to_string(),
                     }),
             )
-            .child(
-                div()
+            .child({
+                let bar = div()
                     .w_full()
                     .h(px(6.0))
-                    .rounded(px(3.0))
+                    .rounded(px(R_SM))
                     .bg(track(t))
-                    .child(
+                    .overflow_hidden();
+                if busy {
+                    // git 的进度给不出可信百分比，跑来回扫动的 indeterminate 条：
+                    // 固定不动的一段会让人以为程序卡住了
+                    bar.child(
                         div()
-                            .w(if busy { px(60.0) } else { px(0.0) })
                             .h_full()
-                            .rounded(px(3.0))
-                            .bg(t.colors.accent),
-                    ),
-            )
+                            .rounded(px(R_SM))
+                            .bg(t.colors.accent)
+                            .with_animation(
+                                "sync-bar",
+                                Animation::new(Duration::from_millis(1400))
+                                    .repeat()
+                                    .with_easing(ease_in_out),
+                                |this, delta| this.w(relative(0.15 + delta * 0.7)),
+                            ),
+                    )
+                } else {
+                    bar.child(div().w(px(0.0)).h_full())
+                }
+            })
             .child(log_area)
             .child(
                 h_flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(GAP))
                     .child(
                         Button::new("sync-pull")
                             .label("拉取")
                             .secondary()
                             .loading(busy && running_op == Some(Op::Pull))
-                            .with_size(Size::Size(px(30.0)))
+                            .with_size(Size::Size(px(BTN)))
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
                     )
                     .child(
@@ -3279,7 +3716,7 @@ impl Shell {
                             .label("推送")
                             .secondary()
                             .loading(busy && running_op == Some(Op::Push))
-                            .with_size(Size::Size(px(30.0)))
+                            .with_size(Size::Size(px(BTN)))
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Push, cx))),
                     )
                     .child(
@@ -3287,7 +3724,7 @@ impl Shell {
                             .label("检测更新")
                             .ghost()
                             .loading(busy && running_op == Some(Op::Check))
-                            .with_size(Size::Size(px(30.0)))
+                            .with_size(Size::Size(px(BTN)))
                             .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Check, cx))),
                     ),
             )
@@ -3299,11 +3736,11 @@ impl Shell {
             .h(px(26.0))
             .flex_shrink_0()
             .items_center()
-            .gap(px(12.0))
+            .gap(px(GAP_LG))
             .child(
                 h_flex()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(GAP_TIGHT))
                     .child(
                         div()
                             .w(px(6.0))
@@ -3317,7 +3754,7 @@ impl Shell {
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(FS_SEC))
                             .text_color(tier3(t))
                             .child(if self.scanning {
                                 "扫描中".to_string()
@@ -3329,7 +3766,7 @@ impl Shell {
             .child(div().flex_1())
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(FS_SEC))
                     .text_color(tier4(t))
                     .child("上次操作：—"),
             )
@@ -3337,16 +3774,15 @@ impl Shell {
 }
 
 /// README 骨架条（数据接入前的占位）
-fn skeleton_bar(w: Option<gpui_kit::Pixels>, t: &Theme) -> Div {
-    let mut bar = div()
-        .w_full()
-        .h(px(10.0))
-        .rounded(px(5.0))
-        .bg(track(t));
-    if let Some(w) = w {
-        bar = bar.w(w).flex_shrink_0();
-    }
-    bar
+/// 骨架占位条：用官方 Skeleton——它自带 2 秒循环的呼吸动画，
+/// 静态的灰条看不出"正在加载"，只会像渲染坏了。
+fn skeleton_bar(w: Option<gpui_kit::Pixels>, _t: &Theme) -> AnyElement {
+    let mut bar = Skeleton::new().h(px(10.0)).rounded(px(R_MD));
+    bar = match w {
+        Some(w) => bar.w(w).flex_shrink_0(),
+        None => bar.w_full(),
+    };
+    bar.into_any_element()
 }
 
 fn vline(t: &Theme) -> Div {
