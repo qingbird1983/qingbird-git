@@ -20,7 +20,7 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement as _, Styled, Task, Window, px, rgb,
 };
-use qingbird_core::repos;
+use qingbird_core::repos::{self, ActivityDay, LangStat, ReadmePreview};
 use qingbird_core::run_cmd::{self, Slot, MAX_PINNED_CMDS};
 use qingbird_core::space;
 use qingbird_core::store::RepoEntry;
@@ -131,6 +131,19 @@ struct SpaceState {
     error: Option<String>,
 }
 
+/// 档案页（Screen 1）的本地数据：语言统计 / 活跃度 / 最近提交 / README。
+/// 全部是几条本地 git 命令 + 读一个文件，放后台线程扫，界面先画占位。
+#[derive(Default)]
+struct ProfileState {
+    langs: Vec<LangStat>,
+    /// 近 30 天有提交的日子（后端不补空白日）
+    activity: Vec<ActivityDay>,
+    /// 最近一次提交的秒级时间戳，0 = 从没提交过
+    last_commit_ts: u64,
+    readme: Option<ReadmePreview>,
+    scanning: bool,
+}
+
 /// 导航轨指向的页面
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Page {
@@ -159,6 +172,9 @@ pub struct Shell {
     /// 磁盘扫描的代数：切仓库 / 重扫时作废旧结果
     space_seq: u64,
     space_task: Option<Task<()>>,
+    profile: ProfileState,
+    profile_seq: u64,
+    profile_task: Option<Task<()>>,
 }
 
 impl Shell {
@@ -193,9 +209,13 @@ impl Shell {
             space: SpaceState::default(),
             space_seq: 0,
             space_task: None,
+            profile: ProfileState::default(),
+            profile_seq: 0,
+            profile_task: None,
         };
         this.refresh_status(cx);
         this.scan_space(cx);
+        this.scan_profile(cx);
         this
     }
 
@@ -307,6 +327,7 @@ impl Shell {
         self.out = OutState::default();
         repos::touch_repo(&path);
         self.scan_space(cx);
+        self.scan_profile(cx);
         cx.notify();
     }
 
@@ -321,6 +342,8 @@ impl Shell {
             return; // 落盘失败就当没点，下次打开再试
         }
         self.repos = repos::list_repos();
+        // 归属变了主区换页：划成第三方要立刻补扫档案数据，划回来清掉
+        self.scan_profile(cx);
         cx.notify();
     }
 
@@ -597,7 +620,69 @@ impl Shell {
         })
         .detach();
     }
+
+    // ---------- 档案页数据（Screen 1） ----------
+
+    /// 扫当前仓库的档案数据：语言统计 / 近 30 天活跃度 / 最近提交 / README。
+    /// 合起来十几条本地 git 命令，一个后台任务跑完一次性上屏。
+    /// 只有第三方仓库显示档案页，「我的」仓库不扫这些。
+    fn scan_profile(&mut self, cx: &mut Context<Self>) {
+        let need = self
+            .selected
+            .as_deref()
+            .and_then(|p| self.entry(p))
+            .map(|e| e.is_third_party)
+            .unwrap_or(false);
+        self.profile_seq += 1;
+        self.profile_task = None;
+        if !need {
+            self.profile = ProfileState::default();
+            return;
+        }
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        let seq = self.profile_seq;
+        self.profile = ProfileState {
+            scanning: true,
+            ..ProfileState::default()
+        };
+        cx.notify();
+
+        self.profile_task = Some(cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_executor()
+                .spawn(async move {
+                    (
+                        repos::repo_languages(&path),
+                        repos::commit_activity(&path, PROFILE_ACTIVITY_DAYS),
+                        repos::last_commit_ts(&path),
+                        repos::read_readme(&path),
+                    )
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.profile_seq != seq {
+                    return; // 切了仓库 / 已有新一轮，这批过期
+                }
+                let (langs, activity, ts, readme) = r;
+                this.profile = ProfileState {
+                    langs,
+                    activity,
+                    last_commit_ts: ts,
+                    readme,
+                    scanning: false,
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
 }
+
+/// 档案页迷你柱图的天数窗口。设计稿标「近 30 天活跃度」；
+/// 与旧检视抽屉的 14 天不是一回事，各用各的参数。
+const PROFILE_ACTIVITY_DAYS: u32 = 30;
 
 /// 仓库在侧栏的状态口径：分叉 > 落后 > 领先 > 脏 > 已同步。
 /// 与后端 `ForkInfo` 一致（ahead>0 && behind>0 就是分叉），不另立标准。
@@ -1914,7 +1999,8 @@ impl Shell {
                     ),
             );
 
-        // 信息页签：标签 + 值；README / Stars 数据源未接入的先给「—」占位
+        // 信息页签：标签 + 值。技术栈 / 最近提交 / 本地来自本地扫描；
+        // Stars 要远端 API（GitHub / Gitee），等克隆 / 新建仓库接入时一起做。
         let chip = |label: &str, value: &str| -> Div {
             h_flex()
                 .h(px(30.0))
@@ -1939,13 +2025,36 @@ impl Shell {
                         .child(value.to_string()),
                 )
         };
+        // 技术栈：语言占比前二，跟设计稿「TypeScript 63% · Vue 32%」一个格式
+        let stack_text = if self.profile.scanning {
+            "…".to_string()
+        } else {
+            match self.profile.langs.len() {
+                0 => "—".to_string(),
+                1 => format!("{} {:.0}%", self.profile.langs[0].language, self.profile.langs[0].percent),
+                _ => self.profile.langs[..2]
+                    .iter()
+                    .map(|l| format!("{} {:.0}%", l.language, l.percent))
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            }
+        };
+        let last_commit_text = if self.profile.last_commit_ts == 0 {
+            "—".to_string()
+        } else {
+            rel_time(self.profile.last_commit_ts)
+        };
+        let local_size_text = match &self.space.report {
+            Some(r) => space::human_size(r.total),
+            None => "—".to_string(),
+        };
         let chips = h_flex()
             .w_full()
             .gap(px(8.0))
-            .child(chip("技术栈", "—"))
+            .child(chip("技术栈", &stack_text))
             .child(chip("Stars", "—"))
-            .child(chip("最近提交", "—"))
-            .child(chip("本地", "—"))
+            .child(chip("最近提交", &last_commit_text))
+            .child(chip("本地", &local_size_text))
             .child(
                 h_flex()
                     .h(px(30.0))
@@ -1965,8 +2074,16 @@ impl Shell {
                     .child(self.activity_chart(t)),
             );
 
-        // 内容卡：README 预览 + 分隔 + 同步面板
+        // 内容卡：README 预览 + 分隔 + 同步面板。
+        // README 数据来自本地仓库根目录（标题 + 首段简介，core 提炼好）；
+        // 没扫完 / 没有 README 时给骨架条占位。
         let name = self.title(path);
+        let readme = self.profile.readme.clone();
+        let readme_title = readme
+            .as_ref()
+            .map(|r| r.title.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| name.clone());
         let content_card = h_flex()
             .w_full()
             .flex_1()
@@ -1977,7 +2094,6 @@ impl Shell {
             .border_color(t.colors.border)
             .overflow_hidden()
             .child(
-                // README 预览：真实 README 抓取接入前用骨架条占位
                 v_flex()
                     .flex_1()
                     .min_h_0()
@@ -1997,21 +2113,34 @@ impl Shell {
                             .text_size(px(16.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(t.colors.foreground)
-                            .child(name),
+                            .child(readme_title),
                     )
-                    .child(
-                        div()
+                    .children(match &readme {
+                        Some(r) if !r.intro.is_empty() => vec![div()
                             .w_full()
                             .text_size(px(13.0))
                             .line_height(px(22.0))
                             .text_color(tier3(t))
-                            .child(
-                                "仓库说明尚未抓取。同步面板接入后会自动拉取 README、技术栈与活跃度数据。",
-                            ),
-                    )
-                    .child(skeleton_bar(None, t))
-                    .child(skeleton_bar(None, t))
-                    .child(skeleton_bar(Some(px(420.0)), t))
+                            .child(r.intro.clone())],
+                        Some(_) => vec![div()
+                            .w_full()
+                            .text_size(px(13.0))
+                            .line_height(px(22.0))
+                            .text_color(tier3(t))
+                            .child("这份仓库的 README 没有可展示的简介段落。")],
+                        None => {
+                            if self.profile.scanning {
+                                vec![skeleton_bar(None, t), skeleton_bar(Some(px(420.0)), t)]
+                            } else {
+                                vec![div()
+                                    .w_full()
+                                    .text_size(px(13.0))
+                                    .line_height(px(22.0))
+                                    .text_color(tier3(t))
+                                    .child("仓库根目录没有找到 README 文件。")]
+                            }
+                        }
+                    })
                     .child(
                         div()
                             .pt(px(4.0))
@@ -2037,35 +2166,78 @@ impl Shell {
             .child(self.profile_status_bar(t))
     }
 
-    /// 活跃度迷你柱图：数据源未接入，先画静态占位柱
+    /// 活跃度迷你柱图：最近 8 个有提交的日子的提交数。
+    /// 没提交的日子不补 0 柱——柱子数量本身就说明「这 30 天里几天在干活」；
+    /// 扫描中 / 空仓库画一根矮的轨道色柱，别让 chip 里空一块。
     fn activity_chart(&self, t: &Theme) -> Div {
-        let heights = [6.0, 10.0, 8.0, 14.0, 12.0, 16.0, 9.0, 13.0];
+        const BARS: usize = 8;
+        let counts: Vec<u32> = self
+            .profile
+            .activity
+            .iter()
+            // 后端按时间倒序（新的在前），迷你图也习惯新的在右：反转一下
+            .rev()
+            .take(BARS)
+            .map(|d| d.count)
+            .collect();
+        let max = counts.iter().copied().max().unwrap_or(0).max(1) as f32;
+        let n = counts.len();
         h_flex()
             .w(px(64.0))
             .h(px(16.0))
             .items_end()
             .gap(px(2.0))
-            .children(heights.map(|h| {
+            .children((0..BARS).map(|i| {
+                let h = match counts.get(i) {
+                    Some(&c) => 6.0 + (c as f32 / max) * 10.0,
+                    None => 6.0,
+                };
                 div()
                     .flex_1()
                     .h(px(h))
                     .rounded(px(1.0))
-                    .bg(t.colors.accent)
+                    .bg(if i < n { t.colors.accent } else { track(t) })
             }))
     }
 
-    /// 语言构成条：静态占位（accent / success / track）
+    /// 语言构成条：按字节占比分段，取前 6 色，循环取规范板的 chart 色板。
     fn lang_bar(&self, t: &Theme) -> Div {
-        h_flex()
+        let palette = [
+            t.colors.chart_1,
+            t.colors.chart_2,
+            orange(t),
+            t.colors.chart_4,
+            t.colors.chart_5,
+            edge(t),
+        ];
+        let langs = &self.profile.langs;
+        if langs.is_empty() {
+            // 扫描中 / 空仓库：一根轨道色条，占位即可
+            return h_flex()
+                .w_full()
+                .h(px(8.0))
+                .rounded(px(4.0))
+                .overflow_hidden()
+                .bg(track(t))
+                .child(div().h_full().rounded(px(4.0)).bg(track(t)));
+        }
+        let mut bar = h_flex()
             .w_full()
             .h(px(8.0))
             .rounded(px(4.0))
             .overflow_hidden()
             .gap(px(2.0))
-            .bg(track(t))
-            .child(div().h_full().rounded(px(4.0)).bg(t.colors.accent).flex_grow(63.0))
-            .child(div().h_full().rounded(px(4.0)).bg(t.colors.success).flex_grow(32.0))
-            .child(div().h_full().rounded(px(4.0)).bg(edge(t)).flex_grow(5.0))
+            .bg(track(t));
+        for (i, l) in langs.iter().enumerate() {
+            bar = bar.child(
+                div()
+                    .h_full()
+                    .rounded(px(4.0))
+                    .bg(palette[i % palette.len()])
+                    .flex_grow(l.percent.max(0.5)),
+            );
+        }
+        bar
     }
 
     /// 拉取同步面板（380 宽）：实时进度、日志与最终状态（透明拉取的核心展示区）
