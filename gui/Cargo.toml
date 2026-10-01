@@ -2,7 +2,7 @@
 name = "qingbird-gui"
 version = "0.1.0"
 edition = "2021"
-description = "青鸟 Git · guise 版界面（guise/gpui 原生渲染）"
+description = "青鸟 Git · GPUI Kit 版界面（gpui-pre 0.3.7 原生渲染）"
 
 [[bin]]
 name = "qingbird-git"
@@ -10,5 +10,5 @@ path = "src/main.rs"
 
 [dependencies]
 qingbird-core = { path = "../crates/core" }
-guise-ui = "1.9"
-gpui = "0.2.2"
+gpui-kit = "0.7"
+serde_json = "1"

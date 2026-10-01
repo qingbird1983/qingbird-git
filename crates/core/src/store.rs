@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,7 +13,22 @@ pub struct PinnedCmd {
     pub cmd: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+/// 一键运行的上次结果。
+///
+/// 按**槽位**记（`test` / `build` / `dev` / `install` / `pinned:N`），不按命令文本记：
+/// 用户改了命令不该把上次结果一起清掉——那是他想对照的历史，不是过期数据。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CmdRunRecord {
+    /// 上次运行结束的时间戳（秒）
+    pub at: u64,
+    /// 退出码为 0
+    pub ok: bool,
+    pub code: i32,
+    /// 输出了多少行（界面上「已输出 214 行」那个数字）
+    pub lines: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RepoEntry {
     pub path: String,
     pub name: String,
@@ -33,9 +49,12 @@ pub struct RepoEntry {
     /// 一键运行：安装依赖命令；空串表示未设置（面板用自动识别结果预填，不落盘）
     #[serde(default)]
     pub install_cmd: String,
-    /// 钉在操作区的自定义命令按钮（最多若干个，见 commands::MAX_PINNED_CMDS）
+    /// 钉在操作区的自定义命令按钮（最多若干个，见 run_cmd::MAX_PINNED_CMDS）
     #[serde(default)]
     pub pinned_cmds: Vec<PinnedCmd>,
+    /// 一键运行的上次结果，按槽位记（键见 run_cmd::Slot）
+    #[serde(default)]
+    pub cmd_runs: HashMap<String, CmdRunRecord>,
     /// 定时自动同步间隔（分钟），0 = 关闭或处于"每天定时"模式；只有用户明确开启的仓库才参与调度
     #[serde(default)]
     pub auto_sync_mins: u32,
@@ -54,6 +73,10 @@ pub struct RepoEntry {
     /// 用户置顶：排在列表最前（其余按 last_used 自动靠前）
     #[serde(default)]
     pub pinned: bool,
+    /// 第三方仓库（别人的项目：关注简介/技术栈/活跃度/透明拉取）；
+    /// false = 我自己的仓库（关注快捷命令/磁盘清理）。侧栏分组与页面路由都看它
+    #[serde(default)]
+    pub is_third_party: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -121,6 +144,17 @@ pub fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// 切换仓库的「我的 / 第三方」归属并落盘。
+/// 旧配置文件没有这个字段：serde default 会补成 false（我的），不会丢数据。
+pub fn set_third_party(path: &str, val: bool) -> Result<(), String> {
+    let mut cfg = load();
+    let Some(e) = cfg.repos.iter_mut().find(|e| e.path == path) else {
+        return Err("仓库不存在".into());
+    };
+    e.is_third_party = val;
+    save(&cfg)
 }
 
 /// 解析 "HH:MM" 时间字符串，合法返回 (小时, 分钟)，非法返回 None

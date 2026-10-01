@@ -4,6 +4,11 @@
 
 Windows 桌面工具：本地 Git 仓库一键同步（Tauri 2 + React + TypeScript）。
 
+**迁移中**：界面正在从 Tauri 2 + React 整体换成 Rust 原生（GPUI）。`src/` + `src-tauri/` 是旧实现，
+只作为平移来源，**不再加新功能**；新代码只进 `crates/`（纯业务）与 `gui/`（界面）。
+迁移完成后 `src-tauri` 整体退役。新旧两套共用同一份配置文件
+（`%APPDATA%/com.qingbird.git/config.json`），所以切换时仓库列表与命令设置不会丢。
+
 主要目标：
 
 - 本地仓库管理：添加过的仓库持久化记忆，下次启动自动加载
@@ -35,13 +40,49 @@ Windows 桌面工具：本地 Git 仓库一键同步（Tauri 2 + React + TypeScr
 - `src/activity.test.mjs` 提交活跃度柱状图的数据规则（补齐窗口/本地时区日期键/柱高比例）
 - `src/commands.test.mjs` ⌘K 命令面板的模糊匹配（完全/前缀/子序列三档、多词 AND、稳定排序）
 - `src/hotkeys.test.mjs` 全局快捷键判定（输入框让位、无选中仓库不触发、修饰键判定、非仓库视图禁用三键）
-- `src/overview.test.mjs` 总览页的数据规则（分档优先级、待处理排序、环的扇区百分比）
+- `src/overview.test.mjs` 总览页的数据规则（分档优先级、待处理排序、环的扇区百分比、一键批量的选行与汇总文案）
 
 代码检查：`pnpm build`（含 tsc 类型检查）
 
 构建项目：`pnpm tauri build`
 
 Rust 快速检查：`cd src-tauri && cargo check`
+
+新 GUI（gpui-kit）侧命令：
+
+- 全量检查：`cargo check --workspace`
+- 后端单测：`cargo test -p qingbird-core`（业务逻辑的测试都在这，迁移期的回归靠它）
+- 出 exe：`cargo build --workspace` → `target/debug/qingbird-git.exe`
+  （2026-10-01 起 spike-guise 已删除，编译缓存挪到根 `target/`，走默认 target-dir；
+  `.cargo/config.toml` 已删除）
+- **GUI 只能由用户双击 exe 验收**：从 agent shell 直接拉起的 GUI 进程会随命令结束被回收
+
+## 新 GUI 的地基与坑（gpui-kit）
+
+- 依赖只有 `gpui-kit = "0.7"`（内部固定 `gpui = gpui-pre =0.3.7`）。组件走
+  `gpui_kit::component::*`，布局用 `gpui_kit::base::{h_flex, v_flex}`。
+  2026-10-01 从 `guise-ui 1.9` + `gpui 0.2.2` 换过来（guise 残留已全部清理，
+  分支同步改名 `redesign/gpui`）——guise 组件面太薄，gpui-kit 有
+  75+ 组件、Table/VirtualList/Input 齐全、且上游 CI 覆盖 Windows。
+- **UI 开发前先读基座自带的规范**（本地 `F:\AI data\work\gpui-component\skills\`）：
+  `gpui-kit/SKILL.md`（Coding Guides：conventions / recipes）与
+  `gpui-kit-design-guides/SKILL.md`（Design Guides）。禁止凭训练数据猜 API。
+- 启动三步不能少：`gpui_kit::init(cx)`（组件初始化，必须最先）→ 应用主题 → `gpui_kit::open_window`。
+  `open_window` 内部会用 `Root` 包一层，Dialog/Sheet/通知/菜单这些浮层靠它才能用。
+- 主题唯一真源是 `gui/theme.json`（iTerm2 风格的点号 token），改配色只动这一个文件。
+  应用方式：`serde_json` 解析成 `ThemeSet` → `Theme::update(cx, |t| t.apply_config(&cfg))`。
+  规范板的 token 名与渲染稿对不上：画布是 `#FAFAF9`、卡片是 `#FFFFFF`（以渲染稿为准）。
+- `Theme` 的 120 个色 token 里**没有 `warning`**（只有 `button_warning`），
+  「落后/分叉」的橙色借用 `chart_3`（已在 theme.json 定成 #DD5B00）。
+- `overflow_y_scroll` / `on_click` / `id` 只在 `Stateful<E>` 上：滚动容器与可点行都要先 `.id(...)`。
+- **托盘框架不带**（gpui-pre 0.3.7 全量搜索无 tray API），要自己挂 `tray-icon`；
+  系统通知用 gpui-kit 的（`window.push_notification(.. .system())`），
+  但未打包的 exe 必须先 `cx.set_app_identity`，否则发不出去。
+- **中文字体要显式注册** TTF：Windows 家族名是本地化的，写英文名会「查不到」；
+  且默认等宽字体 Consolas 不含汉字，代码区中文会掉字重。设计上要用 Noto Sans SC + Sarasa Gothic SC。
+- 编译坑：本机 WorkBuddy 宿主会拦截新编译 exe 创建命名管道（OS error 231），
+  带 build script 的依赖在进程内编不出来。绕行办法是用计划任务脱离进程树构建
+  （`Register-ScheduledTask` + `Start-ScheduledTask`，输出重定向到日志文件），或保证依赖无 build script。
 
 ## 架构要点
 
@@ -82,7 +123,9 @@ Rust 快速检查：`cd src-tauri && cargo check`
   `hotkeys.ts` 全局快捷键判定（DOM 相关的焦点判定由调用方查好当参数传进来）、
   `overview.ts` 总览页的数据整形（`bucketOf` 是全站仓库分档的唯一口径：
   侧栏徽标、⌘K 状态点、同步环、总览分布环都从这里取色与取文案，
-  分叉不再单独探测——`ahead>0 && behind>0` 就是，与后端 `ForkInfo` 一致）；
+  分叉不再单独探测——`ahead>0 && behind>0` 就是，与后端 `ForkInfo` 一致；
+  一键批量的选行与收尾文案也在这里：`batchPlan` 只收同类动作的行、
+  没有对应行返回 null 让按钮不出现，`batchSummary` 只在非零时才报跳过与失败）；
   `src/repoCmds.ts` 一键运行命令的保存/预填纯逻辑（配 `pnpm test:web` 回归测试）
   - 这类模块里**不要**写返回 `?? []` 的帮手函数：每次渲染新建数组，拿它当 `useEffect` 依赖会让 effect 每轮重跑。
     需要默认值时由调用方声明模块级的空数组常量（见 `RepoPanel` 的 `EMPTY_PINNED`）
@@ -121,6 +164,13 @@ Rust 快速检查：`cd src-tauri && cargo check`
 - 跨仓库操作一律走 store 的按路径版本（`pullFor` / `pushFor`）：
   总览页点某一行不用先把仓库切过来。`pull` / `push` 只是委托给它们，
   别在组件里为总览再写一份拉取逻辑。这两个 action 的日志一律记到**目标仓库**名下
+- **跨仓库批量也是前端串行循环 `pullFor` / `pushFor`，不新增后端 command**：
+  代理回退、分叉识别、脏工作区判定都已经在那两条路径里，再写一份 `pull_many`
+  只会让两边行为漂移。`runBatch` 的约定：遇脏工作区**跳过并记日志、继续下一个**
+  （不自动 stash——那是替用户做决定），跑完一句汇总记 `_app` 全局日志
+  （批次横跨多个仓库，记到"当前选中"名下会让人以为只动了一个）；
+  停止标记 `batchStop` 放在 store 模块级而非 state 里——每跑完一项就整体覆写 `batch`，
+  state 里的 `stopped` 会被下一次 set 抹掉
 - 样式：`src/App.css` 只留文件头与 `@import`，实体在 `src/styles/*.css`；
   **`@import` 顺序即级联顺序**，新增样式文件要插在正确位置
   （`inspector.css` 放最后：工作区新结构要能覆盖 `panel.css`；
