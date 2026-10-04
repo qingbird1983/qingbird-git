@@ -40,16 +40,7 @@ const BIG_FILE_MIN: u64 = 10 * 1024 * 1024;
 /// "最大的文件"最多列几条，够用户定位膨胀来源即可
 const BIG_FILE_KEEP: usize = 10;
 
-#[derive(Serialize, Clone)]
-pub struct DirSize {
-    pub name: String,
-    pub path: String,
-    pub size: u64,
-    /// 属于白名单内的可清理缓存目录
-    pub is_cache: bool,
-}
-
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct BigFile {
     /// 相对仓库根目录的路径（分隔符统一成 `/`），展示用
     pub name: String,
@@ -72,7 +63,7 @@ pub struct SpaceReport {
     /// 仓库文件夹总占用（字节）
     pub total: u64,
     /// 一级子目录 / 文件按大小排序
-    pub dirs: Vec<DirSize>,
+    pub dirs: Vec<DirEntry>,
     /// 最大的若干个工作区文件（不含 `.git` 与缓存目录）
     pub largest: Vec<BigFile>,
     /// 存在但没被 git 忽略的缓存目录
@@ -152,7 +143,7 @@ fn walk_size(p: &Path, collect: bool, root_display: &str, big: &mut Vec<BigFile>
 
 /// 存在但没被 git 忽略的缓存目录（已经忽略的不用再提示）。
 /// 每个候选都查一次"是否已被跟踪"——写 `.gitignore` 对已跟踪文件是无效的
-fn ignore_suggestions(repo: &str, dirs: &[DirSize]) -> Vec<IgnoreSuggestion> {
+fn ignore_suggestions(repo: &str, dirs: &[DirEntry]) -> Vec<IgnoreSuggestion> {
     dirs.iter()
         .filter(|d| d.is_cache && d.size > 0)
         .filter(|d| !git_ok(repo, &["check-ignore", "-q", "--", &d.name]))
@@ -171,7 +162,7 @@ pub fn scan_repo_space(path: &str) -> Result<SpaceReport, String> {
     }
     let root_v = verbatim_path(root);
     let root_display = display_path(root);
-    let mut dirs: Vec<DirSize> = Vec::new();
+    let mut dirs: Vec<DirEntry> = Vec::new();
     let mut total = 0u64;
     let mut big: Vec<BigFile> = Vec::new();
     // `.git` 的体积走 dirs 展示，不该出现在"最大的文件"里抢位置
@@ -200,9 +191,14 @@ pub fn scan_repo_space(path: &str) -> Result<SpaceReport, String> {
                 0
             };
             total += size;
-            dirs.push(DirSize {
+            dirs.push(DirEntry {
+                // 根目录下的项，rel 就是它自己的名字
+                rel: name.clone(),
+                is_dir: ft.is_dir(),
                 path: root.join(&name).to_string_lossy().to_string(),
                 is_cache: ft.is_dir() && CACHE_DIRS.contains(&name.as_str()),
+                // 数一层就够，判"空目录"用；再往下数没有意义
+                child_count: if ft.is_dir() { child_count(&e.path()) } else { 0 },
                 name,
                 size,
             });
@@ -227,6 +223,131 @@ pub fn scan_repo_space(path: &str) -> Result<SpaceReport, String> {
         largest: big,
         ignorable,
     })
+}
+
+/// 树的一行：仓库里的一个文件或文件夹
+///
+/// `rel` 既是展示用的相对路径，**也是树节点的 id**——界面上展开一棵子树
+/// 靠的就是它，不用另建一张 id → 路径的表
+/// 仓库里的一个文件或文件夹。**根目录那一层与往下每一层都是这一个类型**
+///
+/// 早先分成 `DirSize`（一级）与 `DirEntry`（树）两个，两个类型字段重叠、
+/// 改一处忘了另一处就会对不上；合成一个之后根层直接喂给树，少一次转换
+///
+/// `rel` 既是展示用的相对路径，**也是树节点的 id**——界面上展开一棵子树
+/// 靠的就是它，不用另建一张 id → 路径的表
+#[derive(Serialize, Clone, Debug)]
+pub struct DirEntry {
+    /// 相对仓库根，分隔符统一 `/`；根目录下的项就是它自己的名字
+    pub rel: String,
+    pub name: String,
+    /// 绝对路径（去掉 `\\?\` 前缀），「在文件管理器中查看」要用
+    pub path: String,
+    pub is_dir: bool,
+    /// 文件 = 自身字节数；文件夹 = **递归总量**
+    pub size: u64,
+    /// 文件夹里直接有几项。0 = 空目录，界面上据此决定画不画展开箭头
+    pub child_count: u32,
+    /// 在白名单里且是文件夹 → 界面上标「可清理」
+    pub is_cache: bool,
+}
+
+/// 只数一层：判"是不是空目录"用
+fn child_count(p: &Path) -> u32 {
+    std::fs::read_dir(p).map(|rd| rd.flatten().count() as u32).unwrap_or(0)
+}
+
+/// 把相对路径拆成安全的 `PathBuf`
+///
+/// **不许往上跳、不许绝对路径、不许盘符**。`rel` 来自界面的树节点 id，
+/// 而界面上那棵树又是磁盘列出来的——今天安全不等于明天安全，这里再挡一道。
+fn safe_rel(rel: &str) -> Result<std::path::PathBuf, String> {
+    let mut out = std::path::PathBuf::new();
+    for seg in rel.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => return Err("路径不能往上跳".into()),
+            s => {
+                if s.contains('\\') || s.contains(':') {
+                    return Err("路径里有非法字符".into());
+                }
+                out.push(s);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// 列一层子项，**不递归下钻**（文件夹的 `size` 是递归算的，那是一次 walk）。
+///
+/// 根目录那一层直接由 `scan_repo_space` 的 `dirs` 给出，不走这里——
+/// 那一层的体积扫描刚做完，再走一遍等于把整个仓库重数一次。
+/// 本函数是给"展开某一层"用的：大仓库点开一层通常只涉及几个目录
+pub fn list_dir(repo: &str, rel: &str) -> Result<Vec<DirEntry>, String> {
+    let root = Path::new(repo);
+    if !root.is_dir() {
+        return Err("仓库文件夹不存在".into());
+    }
+    let sub = safe_rel(rel)?;
+    let dir = if sub.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(&sub)
+    };
+    if !dir.is_dir() {
+        return Err("这个文件夹已经不在了".into());
+    }
+
+    let mut out: Vec<DirEntry> = Vec::new();
+    let Ok(rd) = std::fs::read_dir(verbatim_path(&dir)) else {
+        return Err("读不了这个文件夹".into());
+    };
+    for e in rd.flatten() {
+        let Ok(ft) = e.file_type() else { continue };
+        let name = e.file_name().to_string_lossy().to_string();
+        // 符号链接 / junction 不跟进：跟进去可能绕成环，也可能跑出仓库
+        if ft.is_symlink() {
+            continue;
+        }
+        let rel_child = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
+        let (is_dir, size) = if ft.is_dir() {
+            let mut sink = Vec::new();
+            (true, walk_size(&e.path(), false, "", &mut sink))
+        } else if ft.is_file() {
+            (false, e.metadata().map(|m| m.len()).unwrap_or(0))
+        } else {
+            continue;
+        };
+        out.push(DirEntry {
+            rel: rel_child,
+            is_cache: is_dir && CACHE_DIRS.contains(&name.as_str()),
+            child_count: if is_dir { child_count(&e.path()) } else { 0 },
+            name,
+            path: display_path(&e.path()),
+            is_dir,
+            size,
+        });
+    }
+    sort_entries(&mut out);
+    Ok(out)
+}
+
+/// 树里一层的顺序：**目录在前、再按名称（大小写不敏感）**，与资源管理器一致。
+///
+/// **必须是这一个函数，不能在两处各写一遍。** 根层是白捡 `scan_repo_space`
+/// 的 `dirs`（那一层按体积降序，因为它是"谁最占地方"那个榜），子层才走
+/// `list_dir`。两边各排各的，同一棵树里就会出现"根层按大小、子层按名字"。
+/// 根层要名称序就在 `tree_reset` 里调它一下，不必重扫。
+pub fn sort_entries(entries: &mut [DirEntry]) {
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
 }
 
 /// 把缓存目录追加进仓库的 `.gitignore`，返回真正写入的条目。
@@ -291,14 +412,84 @@ pub fn delete_cache_dir(path: &str, name: &str) -> Result<u64, String> {
         return Err("目标不是文件夹".into());
     }
     let size = dir_size(&dir_v);
-    std::fs::remove_dir_all(&dir_v).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            "删除失败：目录被占用（可能有编译 / 开发进程正在使用），请先关闭相关程序".to_string()
-        } else {
-            format!("删除失败：{e}")
-        }
-    })?;
+    std::fs::remove_dir_all(&dir_v).map_err(|e| explain_delete_error(&e))?;
     Ok(size)
+}
+
+/// 把删除失败翻译成一句人话。
+///
+/// ⚠️ **不能只判 `ErrorKind::PermissionDenied`**：Windows 上"另一个程序正在用
+/// 这个文件"是 `ERROR_SHARING_VIOLATION`(32)，Rust 把它归成 `Uncategorized`，
+/// 不落到 `PermissionDenied` 那个臂里——于是最常见的那一种占用恰恰落进
+/// 兜底分支，用户看到的是 `(os error 32)` 这种等于没说的东西。
+/// 所以按 `raw_os_error()` 显式认这两个号。
+fn explain_delete_error(e: &std::io::Error) -> String {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_DIR_NOT_EMPTY: i32 = 145;
+    let raw = e.raw_os_error();
+    if e.kind() == std::io::ErrorKind::PermissionDenied || raw == Some(ERROR_ACCESS_DENIED) {
+        return "删除失败：没有权限（目录只读，或当前账户不是管理员）".into();
+    }
+    if raw == Some(ERROR_SHARING_VIOLATION) {
+        return "删除失败：目录被占用（可能有编译 / 开发进程正在使用），请先关闭相关程序".into();
+    }
+    if raw == Some(ERROR_DIR_NOT_EMPTY) {
+        return "删除失败：目录里还有删不掉的内容（通常也是被某个进程占用）".into();
+    }
+    format!("删除失败：{e}")
+}
+
+/// 一次清掉多个构建缓存目录的结果
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct CleanOutcome {
+    /// 成功删掉的名字（按传入顺序）
+    pub removed: Vec<String>,
+    /// 成功删掉的总量
+    pub freed: u64,
+    /// 没删成的：`(目录名, 原因)`
+    pub failed: Vec<(String, String)>,
+}
+
+impl CleanOutcome {
+    /// 一句话结论，给日志与状态条用。**用 `human_bytes` 不用 `human_size`**：
+    /// 一次只清掉 `dist` 时释放量就几百 KB，`human_size` 会写成「释放 0 MB」
+    pub fn summary(&self) -> String {
+        if self.failed.is_empty() {
+            return format!(
+                "已清掉 {} 个目录，释放 {}",
+                self.removed.len(),
+                human_bytes(self.freed)
+            );
+        }
+        format!(
+            "已清掉 {} 个目录，释放 {}；{} 个没删成：{}",
+            self.removed.len(),
+            human_bytes(self.freed),
+            self.failed.len(),
+            self.failed
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join("、")
+        )
+    }
+}
+
+/// 一次删掉若干个构建缓存目录。**逐项独立**：`target` 被编译进程占用而删不掉，
+/// 不该让同一批里的 `node_modules` 也留着——用户点了"全清"就是要全清
+pub fn delete_cache_dirs(path: &str, names: &[String]) -> CleanOutcome {
+    let mut out = CleanOutcome::default();
+    for n in names {
+        match delete_cache_dir(path, n) {
+            Ok(bytes) => {
+                out.removed.push(n.clone());
+                out.freed += bytes;
+            }
+            Err(e) => out.failed.push((n.clone(), e)),
+        }
+    }
+    out
 }
 
 /// 只算大小、不收集大文件（删除前统计释放量用）
@@ -315,6 +506,27 @@ pub fn human_size(bytes: u64) -> String {
         return format!("{:.0} MB", mb);
     }
     format!("{:.1} GB", mb / 1024.0)
+}
+
+/// 字节数 → 带单位，**小文件也读得出差别**
+///
+/// `human_size` 一律折到 MB，4 KB 的文件会显示成「0 MB」——而目录树那一列
+/// 满屏都是几 KB 的源码文件，全是 "0 MB" 等于没给信息。两档并存：
+/// 大数字用 `human_size`（粒度粗一点更好读），清单用这个
+pub fn human_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * KB;
+    let b = bytes as f64;
+    if b < KB {
+        return format!("{bytes} B");
+    }
+    if b < MB {
+        return format!("{:.0} KB", b / KB);
+    }
+    if b < MB * 1024.0 {
+        return format!("{:.1} MB", b / MB);
+    }
+    format!("{:.1} GB", b / (MB * 1024.0))
 }
 
 #[cfg(test)]
@@ -523,6 +735,212 @@ mod tests {
             gi.starts_with("*.log\n#"),
             "缺换行时不能和上一行粘在一起：{gi}"
         );
+    }
+
+    /// 一键清理：**逐项独立**。`target` 删不掉（被占用）不能连坐掉
+    /// `node_modules`——用户点的是"全清"，不是"全成或全废"
+    #[test]
+    fn delete_cache_dirs_keeps_going_after_one_fails() {
+        let t = temp("cleanall");
+        sparse(&t.root.join("target").join("big.bin"), 5_000);
+        sparse(&t.root.join("node_modules").join("dep.js"), 2_000);
+        sparse(&t.root.join("dist").join("b.js"), 1_000);
+        // 不存在 → 报"目录不存在"，但不影响另外两项
+        let p = t.root.to_string_lossy().to_string();
+        let names = vec![
+            "target".to_string(),
+            "nope".to_string(),
+            "node_modules".to_string(),
+            "dist".to_string(),
+        ];
+        let out = delete_cache_dirs(&p, &names);
+        assert_eq!(out.removed, vec!["target", "node_modules", "dist"]);
+        assert_eq!(out.freed, 8_000, "只累加成功的那几项");
+        assert_eq!(out.failed.len(), 1);
+        assert_eq!(out.failed[0].0, "nope");
+        assert!(!t.root.join("target").exists());
+        assert!(!t.root.join("node_modules").exists());
+        // 白名单外的名字走 delete_cache_dir 那道闸
+        let out2 = delete_cache_dirs(&p, &["src".to_string()]);
+        assert!(out2.removed.is_empty() && out2.freed == 0);
+        assert!(out2.failed[0].1.contains("白名单"));
+    }
+
+    #[test]
+    fn clean_outcome_summary_spells_out_both_halves() {
+        let ok = CleanOutcome {
+            removed: vec!["target".into(), "dist".into()],
+            freed: 1024 * 1024 * 900,
+            failed: vec![],
+        };
+        // 走 `human_bytes` 之后 MB 档是 `{:.1}`，所以是 "900.0 MB" 而不是
+        // `human_size` 那个 "900 MB"——清单与结论用同一个函数才不会出现
+        // 同一页上两种粒度
+        assert_eq!(ok.summary(), "已清掉 2 个目录，释放 900.0 MB");
+        let mixed = CleanOutcome {
+            removed: vec!["dist".into()],
+            // 几百 KB 的量：`human_size` 在这里会写成「释放 0 MB」，
+            // 而用户刚点了删除，看到 0 会以为什么都没删掉
+            freed: 440 * 1024,
+            failed: vec![("target".into(), "目录被占用".into())],
+        };
+        let s = mixed.summary();
+        assert!(s.contains("释放 440 KB"), "{}", s);
+        assert!(s.contains("1 个没删成") && s.contains("target"), "{}", s);
+        assert!(s.starts_with("已清掉 1 个目录"), "{}", s);
+    }
+
+    /// Windows 上"被别的进程占用"是 `ERROR_SHARING_VIOLATION`(32)，Rust 归成
+    /// `Uncategorized`——**不显式认这个号，最常见的那种占用就只剩一句
+    /// `(os error 32)`**
+    #[test]
+    fn a_locked_directory_says_so_in_words() {
+        let e = std::io::Error::from_raw_os_error(32);
+        assert_ne!(e.kind(), std::io::ErrorKind::PermissionDenied, "前提");
+        let msg = explain_delete_error(&e);
+        assert!(msg.contains("被占用"), "{}", msg);
+        assert!(!msg.contains("os error"), "别把 errno 甩给用户：{}", msg);
+
+        let denied = explain_delete_error(&std::io::Error::from_raw_os_error(5));
+        assert!(denied.contains("权限"), "{}", denied);
+
+        let other = explain_delete_error(&std::io::Error::from_raw_os_error(9999));
+        assert!(other.contains("删除失败"), "{}", other);
+    }
+
+    /// 根层是白捡 `scan_repo_space` 的 `dirs`（按体积降序），子层走 `list_dir`
+    /// （名称序）。两边各排各的，同一棵树里就会"根层按大小、子层按名字"，
+    /// 所以 `tree_reset` 必须再排一次——而**排序规则只能有这一个出处**
+    #[test]
+    fn sort_entries_is_the_one_place_the_level_order_is_decided() {
+        let mk = |name: &str, is_dir: bool, size: u64| DirEntry {
+            rel: name.to_string(),
+            name: name.to_string(),
+            path: String::new(),
+            is_dir,
+            size,
+            child_count: 0,
+            is_cache: false,
+        };
+        let mut v = vec![
+            mk("small_dir", true, 1),
+            mk("Zebra.rs", false, 999),
+            mk("Big", true, 500),
+            mk("apple.rs", false, 1),
+        ];
+        sort_entries(&mut v);
+        let names: Vec<&str> = v.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Big", "small_dir", "apple.rs", "Zebra.rs"],
+            "目录在前；同类按名称序。**大小写不敏感**——apple 排在 Zebra 前，\
+             按 ASCII 码排的话 'Z'(0x5A) 在 'a'(0x61) 前面就该反过来了。\
+             体积再大也不参与排序，「谁最占地方」由构成条回答"
+        );
+    }
+
+    /// 树的一层：目录在前、名称序；体积递归；缓存目录带标记；空目录 child_count = 0
+    #[test]
+    fn list_dir_sorts_dirs_first_and_marks_cache_dirs() {
+        let t = temp("tree");
+        sparse(&t.root.join("zeta.rs"), 10);
+        sparse(&t.root.join("alpha.rs"), 20);
+        sparse(&t.root.join("beta").join("inner.bin"), BIG_FILE_MIN);
+        sparse(&t.root.join("node_modules").join("dep.js"), BIG_FILE_MIN * 2);
+        std::fs::create_dir_all(t.root.join("empty")).unwrap();
+        let p = t.root.to_string_lossy().to_string();
+
+        let got = list_dir(&p, "").unwrap();
+        let names: Vec<&str> = got.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["beta", "empty", "node_modules", "alpha.rs", "zeta.rs"],
+            "目录在前，同类按名称序（大小写不敏感）"
+        );
+        let by = |n: &str| got.iter().find(|e| e.name == n).unwrap();
+        assert!(by("beta").is_dir);
+        assert_eq!(by("beta").size, BIG_FILE_MIN, "文件夹的体积是递归总量");
+        assert_eq!(by("beta").child_count, 1);
+        assert_eq!(by("empty").child_count, 0, "空目录要能判出来，界面上据此不画箭头");
+        assert!(by("node_modules").is_cache, "白名单里的要标可清理");
+        assert!(!by("beta").is_cache);
+        assert!(!by("alpha.rs").is_dir && !by("alpha.rs").is_cache, "文件不是目录，也不该被标可清理");
+        assert_eq!(by("alpha.rs").size, 20);
+        assert_eq!(by("beta").rel, "beta", "rel 是相对根的路径，也是树节点 id");
+        assert_eq!(by("beta").path, display_path(&t.root.join("beta")));
+
+        // 再列一层：rel 决定去哪
+        let deeper = list_dir(&p, "beta").unwrap();
+        assert_eq!(deeper.len(), 1);
+        assert_eq!(deeper[0].rel, "beta/inner.bin", "子项的 rel 带上父级");
+        assert!(Path::new(&deeper[0].path).is_file());
+    }
+
+    /// 白名单之外的同名目录、以及 `.git` 本身，都**不是**可清理项
+    #[test]
+    fn only_whitelisted_dirs_are_marked_cache() {
+        let t = temp("cache-mark");
+        sparse(&t.root.join(".git").join("HEAD"), 5);
+        sparse(&t.root.join("build").join("out.bin"), 5);
+        sparse(&t.root.join("src").join("build.rs"), 5);
+        let p = t.root.to_string_lossy().to_string();
+        let got = list_dir(&p, "").unwrap();
+        let cache: Vec<&str> = got.iter().filter(|e| e.is_cache).map(|e| e.name.as_str()).collect();
+        assert_eq!(cache, vec!["build"], "只有白名单里的目录名算数");
+        // 同名的**文件**也不该被当成缓存目录
+        sparse(&t.root.join("target"), 5);
+        let got = list_dir(&p, "").unwrap();
+        assert!(
+            !got.iter().any(|e| e.name == "target" && e.is_cache),
+            "白名单只管目录：同名文件不算"
+        );
+    }
+
+    /// `rel` 是界面上来的，**不许它往上跳或指到绝对路径**
+    #[test]
+    fn list_dir_refuses_to_escape_the_repo() {
+        let t = temp("escape");
+        std::fs::create_dir_all(t.root.join("ok")).unwrap();
+        let p = t.root.to_string_lossy().to_string();
+        for bad in ["..", "../..", "ok/../..", "C:/Windows", r"..\..", r"ok\..\.."] {
+            let e = list_dir(&p, bad).unwrap_err();
+            assert!(e.contains("不能往上跳") || e.contains("非法字符"), "{bad} 该被拒：{e}");
+        }
+        // 正常的一层还是能列
+        assert!(list_dir(&p, "ok").is_ok());
+        // 不存在的目录要说清楚，而不是空列表
+        assert!(list_dir(&p, "nope").is_err());
+    }
+
+    /// 根目录那一层由 `scan_repo_space` 直接给出：**child_count 也要填**
+    #[test]
+    fn scan_report_carries_child_count_for_the_tree_root() {
+        let t = temp("rootcount");
+        sparse(&t.root.join("src").join("main.rs"), 5);
+        std::fs::create_dir_all(t.root.join("empty")).unwrap();
+        let rep = scan(&t);
+        let src = rep.dirs.iter().find(|d| d.name == "src").unwrap();
+        assert_eq!(src.child_count, 1);
+        assert_eq!(rep.dirs.iter().find(|d| d.name == "empty").unwrap().child_count, 0);
+        // 根目录下的文件 child_count 恒为 0
+        sparse(&t.root.join("README.md"), 5);
+        let rep = scan(&t);
+        assert_eq!(rep.dirs.iter().find(|d| d.name == "README.md").unwrap().child_count, 0);
+    }
+
+    /// 文件级体积：三档边界都要卡对，**满屏 0 MB 等于没给信息**
+    #[test]
+    fn human_bytes_keeps_small_files_readable() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1 KB");
+        assert_eq!(human_bytes(1536), "2 KB", "1536/1024 = 1.5，四舍五入到 2");
+        assert_eq!(human_bytes(4 * 1024), "4 KB", "4 KB 绝不能显示成 0 MB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(human_bytes(1536 * 1024 * 1024), "1.5 GB");
+        // 同一批数走粗粒度那档：小文件全是 0 MB —— 这就是为什么要有两档
+        assert_eq!(human_size(4 * 1024), "0 MB");
     }
 
     /// 清理缓存：只认白名单，且真的把目录删掉、报出释放量

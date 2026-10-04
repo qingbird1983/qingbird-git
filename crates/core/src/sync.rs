@@ -381,6 +381,19 @@ fn do_push(path: &str) -> OpResult {
 
 /// 一键提交并推送：add -A → commit（自动带 Git 身份）→ push
 pub fn commit_push(path: &str, message: &str) -> OpResult {
+    commit_push_with(path, message, false)
+}
+
+/// 同 [`commit_push`]，但 `pull_first` 为真时在 commit 之后、push 之前插一次
+/// `--ff-only` 拉取。
+///
+/// **这个选项解决的是一条死胡同**：本地落后云端时，`push` 一定被拒
+/// （non-fast-forward），用户得自己发现"要先拉"、切到仓库、手动拉一次、
+/// 再回来点推送。把它并进一次操作里，那条死路就没有了。
+///
+/// 拉取**必须带 `--ff-only`**：这里只解决"接上远端的提交"，
+/// 一旦需要改写本地历史，那是变基向导的活，得由用户显式点进去。
+pub fn commit_push_with(path: &str, message: &str, pull_first: bool) -> OpResult {
     if !valid_repo(path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
@@ -427,7 +440,19 @@ pub fn commit_push(path: &str, message: &str) -> OpResult {
         return OpResult::err(message, combined(&commit));
     }
 
-    let mut result = do_push(path);
+    let mut result = if pull_first {
+        // 借用 do_push 之前先放掉自己这把锁：do_push 不自己加锁，
+        // 而 do_pull 内部会走 run_net_op（那是另一把网络锁）
+        drop(_guard);
+        let pulled = do_pull(path, true, None);
+        if !pulled.ok {
+            // 拉取失败就别硬推了：推上去一定被拒，不如把拉取的真实原因交出去
+            return pulled;
+        }
+        do_push(path)
+    } else {
+        do_push(path)
+    };
     result.output = format!("{}{}", combined(&commit), result.output);
     if result.ok {
         result.message = format!("已提交并推送：「{msg}」");

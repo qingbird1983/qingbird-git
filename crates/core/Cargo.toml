@@ -8,6 +8,11 @@ description = "qingbird-git 纯逻辑后端：git 子进程封装 / 代理探测
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 winreg = "0.55"
+# scheduler.rs 判「每天定时」到没到点，要的是**本地时区**的日期与时刻。
+# 不自己算时区偏移：夏令时切换那天手算的偏移会整段偏一小时，
+# 而这里错一小时的后果是"该跑的那天没跑"。0.4.45 本来就在
+# 依赖树里（gpui-pre 拉进来的，已编译过），加进来零新增编译成本。
+chrono = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

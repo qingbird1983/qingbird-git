@@ -216,6 +216,33 @@ pub fn remote_url(repo_path: &str) -> String {
         .to_string()
 }
 
+/// 把 origin 远端地址转成浏览器能打开的仓库主页地址：
+/// `git@host:path` 与 `ssh://` 形式转 https，http(s) 形式去掉 `.git` 后缀；
+/// 认不出来的形式返回 None（让调用方给"没有可识别的远端地址"，不要瞎拼一个地址）
+///
+/// 这段原先只在 Tauri 版的 shell.rs 里，两套界面各写一份的话迟早漂移
+/// （比如 Gitee 改域名格式，只有其中一边知道）。纯解析，不碰系统，放 core。
+pub fn browse_url_from_remote(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    if url.is_empty() {
+        return None;
+    }
+    let strip_git = |s: &str| s.strip_suffix(".git").unwrap_or(s).to_string();
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        return Some(format!("https://{host}/{}", strip_git(path)));
+    }
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let rest = rest.split_once('@').map(|(_, r)| r).unwrap_or(rest);
+        let (host, path) = rest.split_once('/')?;
+        return Some(format!("https://{host}/{}", strip_git(path)));
+    }
+    if url.starts_with("https://") || url.starts_with("http://") {
+        return Some(strip_git(url));
+    }
+    None
+}
+
 /// 提交时使用的 Git 身份：**交错好的 `-c` 项**，可直接接在子命令前面
 /// （`git -c user.name=.. -c user.email=.. commit`）。设置里未填则返回空，
 /// 交给全局 / 仓库配置。
@@ -595,5 +622,51 @@ mod tests {
         let empty = store::AppConfig::default();
         let (c, ssh) = build_net_auth(&empty, "https://example.com/u/r.git");
         assert!(c.is_empty() && ssh.is_none());
+    }
+}
+#[cfg(test)]
+mod browse_tests {
+    use super::browse_url_from_remote;
+
+    #[test]
+    fn scp_style_ssh_becomes_https() {
+        assert_eq!(
+            browse_url_from_remote("git@github.com:user/repo.git"),
+            Some("https://github.com/user/repo".into())
+        );
+        assert_eq!(
+            browse_url_from_remote("git@gitee.com:group/sub/proj.git"),
+            Some("https://gitee.com/group/sub/proj".into())
+        );
+    }
+
+    #[test]
+    fn ssh_url_becomes_https_and_drops_the_user_part() {
+        assert_eq!(
+            browse_url_from_remote("ssh://git@github.com/user/repo.git"),
+            Some("https://github.com/user/repo".into())
+        );
+    }
+
+    #[test]
+    fn http_urls_only_lose_the_git_suffix() {
+        assert_eq!(
+            browse_url_from_remote("https://github.com/user/repo.git"),
+            Some("https://github.com/user/repo".into())
+        );
+        // 已经是主页地址就原样返回，不要再剥一次
+        assert_eq!(
+            browse_url_from_remote("http://gitee.com/a/b/"),
+            Some("http://gitee.com/a/b".into())
+        );
+    }
+
+    #[test]
+    fn unrecognised_forms_return_none_instead_of_a_guessed_url() {
+        // 拼一个假的地址比不给更糟：用户点开是 404，还以为仓库没了
+        assert_eq!(browse_url_from_remote(""), None);
+        assert_eq!(browse_url_from_remote("   "), None);
+        assert_eq!(browse_url_from_remote("D:/some/local/path"), None);
+        assert_eq!(browse_url_from_remote("github.com/user/repo"), None);
     }
 }

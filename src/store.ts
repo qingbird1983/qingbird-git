@@ -6,6 +6,7 @@ import { autoSyncLabel } from "./lib/autoSync";
 import { sortRepos } from "./lib/repos";
 import { loadSidebarWidth, saveSidebarWidth } from "./lib/sidebar";
 import { applyThemeClass, normalizeTheme, type ThemeMode } from "./lib/theme";
+import { batchSummary, type BatchAction, type BatchResult } from "./lib/overview";
 import type { RepoCmds } from "./repoCmds";
 import type { PinnedCmd } from "./lib/pinnedCmds";
 
@@ -33,6 +34,13 @@ export interface AutoToast {
 
 let proxyToastTimer: ReturnType<typeof setTimeout> | null = null;
 let autoToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 批量的停止标记放在模块级，不进 store：
+ * 批次每跑完一项就把整个 batch 覆写一遍，state 里的 stopped 会被下一次 set 抹掉，
+ * 只有独立于 state 的标记才不会被自己覆盖掉。
+ */
+let batchStop = false;
 
 /**
  * 把后端返回的分叉信息落进 store。
@@ -158,7 +166,13 @@ interface AppState {
   undoRebase: () => Promise<void>;
   push: () => Promise<void>;
   /** 推送指定仓库，与 pullFor 同理 */
-  pushFor: (path: string) => Promise<void>;
+  pushFor: (path: string) => Promise<"ok" | "fail">;
+  /** 批量处理进行中；null 表示当前没有批次在跑 */
+  batch: BatchResult | null;
+  /** 一键批量：串行跑一批仓库的拉取/推送，遇脏工作区跳过并记日志，不打断整批 */
+  runBatch: (action: BatchAction, paths: string[]) => Promise<void>;
+  /** 停止当前批次：置停止标记并取消正在跑的那个 git 子进程 */
+  stopBatch: () => Promise<void>;
   commitPush: (message: string) => Promise<boolean>;
   cloneRepo: (url: string, parentDir: string, netMode?: string) => boolean;
   /** 在仓库目录下后台运行本地命令，输出逐行写入该仓库的日志窗口 */
@@ -509,7 +523,7 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   pushFor: async (path) => {
-    if (!path || get().busy || get().cloning) return;
+    if (!path || get().busy || get().cloning) return "fail";
     get().setBusy("正在推送…");
     try {
       const r = await api.push(path);
@@ -524,11 +538,60 @@ export const useApp = create<AppState>((set, get) => ({
       set(forkPatch(path, r));
       // 变基结果一旦推上去就发布了，再回退只会制造新的分叉
       if (r.ok) set(clearBackup(path));
+      return r.ok ? "ok" : "fail";
     } catch (e) {
       get().log(String(e), "error", path);
+      return "fail";
     } finally {
       get().setBusy(null);
     }
+  },
+
+  batch: null,
+
+  runBatch: async (action, paths) => {
+    if (get().busy || get().cloning || get().batch || paths.length === 0) return;
+    const nameOf = (path: string) => {
+      const r = get().repos.find((x) => x.path === path);
+      return r ? r.alias || r.name : path;
+    };
+    batchStop = false;
+    const result: BatchResult = { action, total: paths.length, done: 0, ok: 0, skipped: 0, failed: 0, stopped: false };
+    set({ batch: { ...result } });
+    try {
+      for (const path of paths) {
+        if (batchStop) break;
+        // 串行：每一步都等上一个跑完再排下一个。busy 从头到尾非空——
+        // pullFor/pushFor 是在同一个调用栈里"设 busy → await"→"清 busy"，
+        // 两项之间那点同步代码不产生让出点，所以别的入口插不进来，
+        // 不需要再给批处理单开一个互斥令牌。后端 OP_LOCK 本来也只允许一个网络操作。
+        const r = action === "pull" ? await get().pullFor(path, false) : await get().pushFor(path);
+        result.done += 1;
+        if (r === "ok") result.ok += 1;
+        else if (r === "dirty") {
+          // 脏工作区不自动 stash：批次里替他暂存等于替他做决定
+          result.skipped += 1;
+          get().log(`「${nameOf(path)}」有未提交改动，本批跳过；切到该仓库确认后再拉`, "error", path);
+        } else result.failed += 1;
+        // 整体覆写 batch 会把 stopBatch 刚记下的 stopped 抹掉，从 state 里带过来
+        set((s) => (s.batch ? { batch: { ...result, stopped: s.batch.stopped } } : {}));
+      }
+    } catch (e) {
+      batchStop = true;
+      get().log(`批量处理中断：${String(e)}`, "error", "_app");
+    } finally {
+      result.stopped = batchStop;
+      set({ batch: null });
+      // 汇总记全局日志：批次横跨多个仓库，记到"当前选中"名下会让人以为只动了一个
+      get().log(batchSummary(result), result.failed > 0 || result.stopped ? "error" : "success", "_app");
+    }
+  },
+
+  stopBatch: async () => {
+    if (!get().batch) return;
+    batchStop = true;
+    set((s) => (s.batch ? { batch: { ...s.batch, stopped: true } } : {}));
+    await get().cancelOp();
   },
 
   cloneRepo: (url, parentDir, netMode) => {

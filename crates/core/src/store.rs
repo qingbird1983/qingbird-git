@@ -105,10 +105,44 @@ pub struct Settings {
     /// （主窗口可见且聚焦时 notify 会自行静默，不会打扰正在看界面的人）。
     #[serde(default = "default_true")]
     pub notify_auto_sync: bool,
+    /// 仓库侧栏宽度（px）。GPUI 界面用；范围 200–360 由界面夹住后再存。
+    /// 与 Tauri 版共用同一份 config.json，所以这里必须给**专用**默认值：
+    /// 裸 `#[serde(default)]` 取的是 `f32::default()`（0.0）而不是 `Settings::default()`，
+    /// 旧配置读出来会是 0，界面得再兜一层才不至于把侧栏夹成最窄
+    #[serde(default = "default_sidebar_w")]
+    pub sidebar_w: f32,
+    /// 仓库侧栏是否折叠。进总览页不算折叠（那屏没有侧栏），
+    /// 只有用户自己收起或 `Ctrl B` 才改这个值
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
+    /// 右侧检视列宽（px）。与 `sidebar_w` 同理：专用 serde 默认值 + 范围由
+    /// core 夹住，界面只管传。**默认给 320**（就是原先写死在 `tokens::INSPECTOR_W`
+    /// 的那个数），只是把它从"界面常量"升级成"用户能拖、且存得住"的值
+    #[serde(default = "default_inspector_w")]
+    pub inspector_w: f32,
+    /// 检视列是否展开。**只由用户自己收起 / `Ctrl I` 改**，
+    /// 与 `sidebar_collapsed` 同一口径：切页不该顺手改它
+    ///
+    /// **默认 false**：2026-10-05 起右栏退出常显模式（用户口径："启动默认
+    /// 不显示，只有点击展开按钮才展开"）。它现在正文是「开发中」占位，
+    /// 一条常驻的 320px 空列只会让主区白白少三分之一
+    #[serde(default)]
+    pub inspector_open: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// 侧栏宽度的 serde 缺省值。见 `Settings::sidebar_w` 的注释：
+/// 走独立函数而不是 `Settings::default()`，否则反序列化路径与新建路径会给出不同的宽度
+fn default_sidebar_w() -> f32 {
+    DEFAULT_SIDEBAR_W
+}
+
+/// 检视列宽的 serde 缺省值，理由与 `default_sidebar_w` 相同
+fn default_inspector_w() -> f32 {
+    DEFAULT_INSPECTOR_W
 }
 
 /// 手写而非 derive：`notify_auto_sync` 默认 true，derive 出来的默认值会是 false，
@@ -124,9 +158,29 @@ impl Default for Settings {
             gitee_token: String::new(),
             ssh_key_path: String::new(),
             notify_auto_sync: true,
+            sidebar_w: DEFAULT_SIDEBAR_W,
+            sidebar_collapsed: false,
+            inspector_w: DEFAULT_INSPECTOR_W,
+            inspector_open: false,
         }
     }
 }
+
+/// 侧栏默认宽。旧配置里没有 `sidebar_w`，读出来是 0.0，
+/// 界面看到非正值会回落到这个值，所以默认值必须写在 core 而不是只写在界面常量里
+pub const DEFAULT_SIDEBAR_W: f32 = 240.0;
+/// 侧栏宽度下限 / 上限（界面与本函数共用，存进去的永远是夹过的值）
+pub const SIDEBAR_W_RANGE: (f32, f32) = (200.0, 360.0);
+
+/// 检视列默认宽。原来这个数写死在界面 `tokens::INSPECTOR_W`，
+/// 有了落盘字段之后它就是"没有存过值时用哪个"，仍写在 core
+pub const DEFAULT_INSPECTOR_W: f32 = 320.0;
+/// 检视列宽下限 / 上限。
+///
+/// 上限 560 的理由是主区还要剩得下内容：窗口下限 1080 − 轨 44 − 侧栏 200
+/// = 836px 主区，抽屉 560 就只剩 276px，那已经是"没法看东西"了。
+/// 下限 240 装得下最窄的一行变更文件名
+pub const INSPECTOR_W_RANGE: (f32, f32) = (240.0, 560.0);
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct AppConfig {
@@ -154,6 +208,102 @@ pub fn set_third_party(path: &str, val: bool) -> Result<(), String> {
         return Err("仓库不存在".into());
     };
     e.is_third_party = val;
+    save(&cfg)
+}
+
+/// 侧栏宽度夹到合法范围。0 与负数（老配置没有这个字段）回落到默认宽度，
+/// 而不是夹到下限——把"没设过"当成"用户想要最窄"会让老用户第一次开新版就看到一条缝
+pub fn clamp_sidebar_w(w: f32) -> f32 {
+    if !w.is_finite() || w <= 0.0 {
+        return DEFAULT_SIDEBAR_W;
+    }
+    w.clamp(SIDEBAR_W_RANGE.0, SIDEBAR_W_RANGE.1)
+}
+
+/// 落盘侧栏版式（宽度 + 折叠态）。
+/// 宽度在这里夹一次再存，而不是存界面里的原始值：配置文件会被别的工具读，
+/// 存进去一个 900px 的侧栏只会把那个工具的版面算歪
+pub fn set_sidebar_layout(w: f32, collapsed: bool) -> Result<(), String> {
+    let mut cfg = load();
+    cfg.settings.sidebar_w = clamp_sidebar_w(w);
+    cfg.settings.sidebar_collapsed = collapsed;
+    save(&cfg)
+}
+
+/// 检视列宽度夹到合法范围。**与 `clamp_sidebar_w` 同一套判据**：
+/// 非有限值与 0 回落默认（老配置没这个字段），其余夹进 `INSPECTOR_W_RANGE`
+pub fn clamp_inspector_w(w: f32) -> f32 {
+    if !w.is_finite() || w <= 0.0 {
+        return DEFAULT_INSPECTOR_W;
+    }
+    w.clamp(INSPECTOR_W_RANGE.0, INSPECTOR_W_RANGE.1)
+}
+
+/// 落盘检视列版式（宽度 + 展开态）。与 `set_sidebar_layout` 一对
+pub fn set_inspector_layout(w: f32, open: bool) -> Result<(), String> {
+    let mut cfg = load();
+    cfg.settings.inspector_w = clamp_inspector_w(w);
+    cfg.settings.inspector_open = open;
+    save(&cfg)
+}
+
+/// 定时自动同步的间隔档位。界面只在这三档里选，**不给自由输入**：
+/// 间隔能填出 `0`（等于关）或 3 分钟（每 20 秒派生一次 git，用户会以为程序坏了）。
+/// 范围下限 5 分钟也是同一个道理——比这更密的轮询对 git 没有意义，只有负担
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum AutoSync {
+    /// 不定时
+    Off,
+    /// 每 N 分钟
+    Every(u32),
+    /// 每天某个时刻（`"HH:MM"`，本地时区）
+    Daily(String),
+}
+
+/// 定时同步间隔的合法值域（分钟）
+pub const AUTO_SYNC_MINS_RANGE: (u32, u32) = (5, 24 * 60);
+
+/// 把界面选的那一档规范化成要落盘的两个字段 `(auto_sync_mins, daily_time)`。
+///
+/// **纯函数**：这层规范化值得有单测，因为它挡的是"配置被写坏"——
+/// 一旦 `daily_time` 里存进 `9点` 这种值，后台调度器就再也匹配不上时间点，
+/// 而界面自己看不出哪里错了。
+///
+/// 规范化规则：
+/// * `Off` → `(0, "")`
+/// * `Every(n)` → 夹进 [`AUTO_SYNC_MINS_RANGE`]；夹到下限而不是 0，
+///   因为"要 3 分钟"和"不要定时"是两件事，不能互相顶替
+/// * `Daily(t)` → 合法时间点给规范化后的 `"HH:MM"`，非法当关闭处理。
+///   界面在时间非法时会禁用保存按钮，所以这条回落只防外部写入
+pub fn normalize_auto_sync(m: &AutoSync) -> (u32, String) {
+    match m {
+        AutoSync::Off => (0, String::new()),
+        AutoSync::Every(n) => (
+            (*n).clamp(AUTO_SYNC_MINS_RANGE.0, AUTO_SYNC_MINS_RANGE.1),
+            String::new(),
+        ),
+        AutoSync::Daily(t) => match parse_hhmm(t) {
+            Some((h, m)) => (0, format!("{h:02}:{m:02}")),
+            None => (0, String::new()),
+        },
+    }
+}
+
+/// 落盘某仓库的定时同步设置。
+/// `auto_pull` 只在定时档位下才有意义，但它总是落盘——用户关掉定时之后
+/// 回头再开时，检测到更新就自动拉取这个选择应该还在
+pub fn set_auto_sync(path: &str, mode: &AutoSync, auto_pull: bool) -> Result<(), String> {
+    let (mins, daily) = normalize_auto_sync(mode);
+    let mut cfg = load();
+    let Some(e) = cfg.repos.iter_mut().find(|e| e.path == path) else {
+        return Err("仓库不存在".into());
+    };
+    e.auto_sync_mins = mins;
+    e.daily_time = daily;
+    e.auto_pull = auto_pull;
+    // 档位变了就得重新计时：拿上一轮的时间戳去比新的间隔，
+    // 会在改完设置的瞬间就先跑一轮
+    e.last_auto_check = 0;
     save(&cfg)
 }
 
@@ -190,4 +340,198 @@ pub fn save(cfg: &AppConfig) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 这里只测纯逻辑。`set_sidebar_layout` 会写 %APPDATA% 下真实的 config.json，
+    // 拿它做单测等于每次跑测试都改掉用户自己的配置——那种测试不许写。
+
+    #[test]
+    fn clamp_keeps_width_inside_the_design_range() {
+        assert_eq!(clamp_sidebar_w(240.0), 240.0);
+        assert_eq!(clamp_sidebar_w(200.0), 200.0);
+        assert_eq!(clamp_sidebar_w(360.0), 360.0);
+        assert_eq!(clamp_sidebar_w(120.0), 200.0);
+        assert_eq!(clamp_sidebar_w(900.0), 360.0);
+    }
+
+    #[test]
+    fn clamp_treats_a_missing_width_as_default_not_as_narrowest() {
+        // 旧配置没有这个字段，serde 给 0.0。夹到下限 200 会让老用户
+        // 第一次打开新版就看到一条比平时窄一半的侧栏
+        assert_eq!(clamp_sidebar_w(0.0), DEFAULT_SIDEBAR_W);
+        assert_eq!(clamp_sidebar_w(-50.0), DEFAULT_SIDEBAR_W);
+        assert_eq!(clamp_sidebar_w(f32::NAN), DEFAULT_SIDEBAR_W);
+        assert_eq!(clamp_sidebar_w(f32::INFINITY), DEFAULT_SIDEBAR_W);
+    }
+
+    #[test]
+    fn default_settings_carry_a_usable_sidebar_layout() {
+        let s = Settings::default();
+        assert_eq!(s.sidebar_w, DEFAULT_SIDEBAR_W);
+        assert!(!s.sidebar_collapsed);
+        // notify_auto_sync 默认 true 是手写 Default 的原因，别在加字段时改回 derive
+        assert!(s.notify_auto_sync);
+    }
+
+    #[test]
+    fn old_config_without_sidebar_fields_still_loads() {
+        // 这份 JSON 是加侧栏字段之前写出来的形状
+        let old = r#"{
+            "repos": [],
+            "settings": { "theme": "light", "notify_auto_sync": false },
+            "last_good_proxy": null
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(old).expect("旧配置应能解析");
+        assert_eq!(cfg.settings.theme, "light");
+        assert!(!cfg.settings.notify_auto_sync);
+        assert_eq!(cfg.settings.sidebar_w, DEFAULT_SIDEBAR_W);
+        assert!(!cfg.settings.sidebar_collapsed);
+    }
+
+    #[test]
+    fn sidebar_layout_round_trips_through_json() {
+        let mut cfg = AppConfig::default();
+        cfg.settings.sidebar_w = 288.0;
+        cfg.settings.sidebar_collapsed = true;
+        let json = serde_json::to_string(&cfg).expect("序列化");
+        let back: AppConfig = serde_json::from_str(&json).expect("反序列化");
+        assert_eq!(back.settings.sidebar_w, 288.0);
+        assert!(back.settings.sidebar_collapsed);
+    }
+
+    /// 检视列的夹取与侧栏**必须同一套判据**：非有限值与 0 回落默认，
+    /// 其余夹进范围。两边行为不一致时，界面读一个值、落盘另一个值，
+    /// 表现是"拖完松手宽度又跳回去"
+    #[test]
+    fn inspector_clamp_matches_the_sidebar_contract() {
+        assert_eq!(clamp_inspector_w(320.0), 320.0);
+        assert_eq!(clamp_inspector_w(240.0), INSPECTOR_W_RANGE.0);
+        assert_eq!(clamp_inspector_w(560.0), INSPECTOR_W_RANGE.1);
+        assert_eq!(clamp_inspector_w(120.0), INSPECTOR_W_RANGE.0);
+        assert_eq!(clamp_inspector_w(900.0), INSPECTOR_W_RANGE.1);
+        assert_eq!(clamp_inspector_w(0.0), DEFAULT_INSPECTOR_W);
+        assert_eq!(clamp_inspector_w(-50.0), DEFAULT_INSPECTOR_W);
+        assert_eq!(clamp_inspector_w(f32::NAN), DEFAULT_INSPECTOR_W);
+        assert_eq!(clamp_inspector_w(f32::INFINITY), DEFAULT_INSPECTOR_W);
+    }
+
+    /// 检视列默认**收起**、但宽度可用。2026-10-05 改的：右栏正文此时是
+    /// 「开发中」占位，一条常驻的 320px 空列只会让主区白白少三分之一
+    /// （用户口径："右栏退出常显模式，启动默认不显示"）。
+    /// 展开入口一直都在——同步段右上角那颗 `inspector_reopen`
+    #[test]
+    fn inspector_defaults_to_collapsed_with_a_usable_width() {
+        let s = Settings::default();
+        assert_eq!(s.inspector_w, DEFAULT_INSPECTOR_W);
+        assert!(!s.inspector_open);
+    }
+
+    /// 旧配置（加检视字段之前写出来的）必须仍能解析，且补上的是默认值。
+    ///
+    /// ⚠️ `inspector_open` 走**裸 `#[serde(default)]`**（= false），
+    /// 与 `sidebar_w` 那种"用专用函数补成默认值"的做法相反——这里要的就是
+    /// 「没这个字段的老配置 = 右栏收起」。用 `default_true` 的话，老用户
+    /// 装上新版仍会被弹出一条 320px 空列，而那一列此刻什么也没有
+    #[test]
+    fn old_config_without_inspector_fields_still_loads() {
+        let old = r#"{
+            "repos": [],
+            "settings": { "theme": "light", "sidebar_w": 288.0 },
+            "last_good_proxy": null
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(old).expect("旧配置应能解析");
+        assert_eq!(cfg.settings.sidebar_w, 288.0);
+        assert_eq!(cfg.settings.inspector_w, DEFAULT_INSPECTOR_W);
+        assert!(!cfg.settings.inspector_open);
+    }
+
+    #[test]
+    fn inspector_layout_round_trips_through_json() {
+        let mut cfg = AppConfig::default();
+        cfg.settings.inspector_w = 420.0;
+        cfg.settings.inspector_open = false;
+        let json = serde_json::to_string(&cfg).expect("序列化");
+        let back: AppConfig = serde_json::from_str(&json).expect("反序列化");
+        assert_eq!(back.settings.inspector_w, 420.0);
+        assert!(!back.settings.inspector_open);
+    }
+
+    /// 上限 560 是有约束的：窗口下限 1080 − 轨 44 − 侧栏下限 200 = 836px 主区，
+    /// 再减去上限 560 只剩 276px。这个测试把那条算式钉住，
+    /// 免得以后有人把上限调到 700 还以为"更灵活"
+    #[test]
+    fn inspector_max_still_leaves_the_main_area_usable() {
+        let main = WIN_MIN_W_CONST - NAV_W_CONST - SIDEBAR_W_RANGE.0;
+        assert!(
+            main - INSPECTOR_W_RANGE.1 >= 240.0,
+            "抽屉拉到上限后主区只剩 {:.0}px，低于 240 就没法看内容了（主区上限算式被改坏了）",
+            main - INSPECTOR_W_RANGE.1
+        );
+    }
+
+    /// 版面常数：与界面 `tokens.rs` 同源，这里只留算式用得到的两个
+    const WIN_MIN_W_CONST: f32 = 1080.0;
+    const NAV_W_CONST: f32 = 44.0;
+
+    #[test]
+    fn off_clears_both_timer_fields() {
+        // 两个字段必须一起清：只清一个的话，调度器会拿着上次的
+        // daily_time 继续每天跑，用户明明已经关了
+        assert_eq!(normalize_auto_sync(&AutoSync::Off), (0, String::new()));
+    }
+
+    #[test]
+    fn interval_clamps_instead_of_falling_back_to_off() {
+        // 3 分钟：夹到下限，而不是当成"不要定时"。
+        // 两者在界面上是两个不同的档位，混掉就是用户设了却没生效
+        assert_eq!(normalize_auto_sync(&AutoSync::Every(3)).0, 5);
+        assert_eq!(normalize_auto_sync(&AutoSync::Every(0)).0, 5);
+        assert_eq!(normalize_auto_sync(&AutoSync::Every(30)), (30, String::new()));
+        // 上限：一天跑 1440 次没有意义
+        assert_eq!(normalize_auto_sync(&AutoSync::Every(9999)).0, 1440);
+    }
+
+    #[test]
+    fn daily_time_is_normalized_to_zero_padded_hh_mm() {
+        // 存进去 "9:5" 的话，后台调度要自己补零才能匹配
+        assert_eq!(
+            normalize_auto_sync(&AutoSync::Daily("9:5".into())).1,
+            "09:05"
+        );
+        assert_eq!(
+            normalize_auto_sync(&AutoSync::Daily(" 22 : 30 ".into())).1,
+            "22:30"
+        );
+    }
+
+    #[test]
+    fn an_unparsable_daily_time_turns_the_timer_off() {
+        // 非法时间当关闭处理：留一个匹配不上的 daily_time 在配置里，
+        // 调度器每分钟都比一次、永远不匹配，用户看不出哪里出了问题
+        assert_eq!(
+            normalize_auto_sync(&AutoSync::Daily("9点".into())),
+            (0, String::new())
+        );
+        assert_eq!(
+            normalize_auto_sync(&AutoSync::Daily("24:00".into())),
+            (0, String::new())
+        );
+        assert_eq!(
+            normalize_auto_sync(&AutoSync::Daily(String::new())),
+            (0, String::new())
+        );
+    }
+
+    #[test]
+    fn daily_mode_never_leaves_a_stale_interval_behind() {
+        // 从"每 15 分钟"切到"每天 09:00"：auto_sync_mins 必须让位，
+        // 否则调度器两个条件都满足，行为取决于实现细节
+        let (mins, daily) = normalize_auto_sync(&AutoSync::Daily("09:00".into()));
+        assert_eq!(mins, 0);
+        assert_eq!(daily, "09:00");
+    }
 }

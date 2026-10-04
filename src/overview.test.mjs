@@ -3,10 +3,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  BATCH_LABEL,
   BUCKET_LABEL,
   bucketOf,
   buildRows,
   buildTodo,
+  batchPlan,
+  batchSummary,
   countBuckets,
   overviewSummary,
   ringGradient,
@@ -142,3 +145,87 @@ test("每一档都有中文标签（图例直接用它，别在组件里再写�
     assert.ok(BUCKET_LABEL[k]?.length, `${k} 缺标签`);
   }
 });
+
+/* ---------- 一键批量 ---------- */
+
+/** 造一份待处理：落后两个、待推一个、分叉一个、失联一个 */
+function todoFixture() {
+  return buildTodo(
+    buildRows(
+      [repo("F:/a/behind9"), repo("F:/a/behind1"), repo("F:/a/ahead"), repo("F:/a/fork"), repo("F:/a/gone")],
+      {
+        "F:/a/behind9": st({ behind: 9 }),
+        "F:/a/behind1": st({ behind: 1 }),
+        "F:/a/ahead": st({ ahead: 4 }),
+        "F:/a/fork": st({ behind: 2, ahead: 1 }),
+        "F:/a/gone": st({ is_repo: false }),
+      },
+    ),
+  );
+}
+
+test("批量只收同类动作的行：分叉与失联两边都不进队列", () => {
+  const todo = todoFixture();
+  assert.deepEqual(
+    batchPlan(todo, "pull").rows.map((r) => r.path),
+    ["F:/a/behind9", "F:/a/behind1"],
+  );
+  assert.deepEqual(
+    batchPlan(todo, "push").rows.map((r) => r.path),
+    ["F:/a/ahead"],
+  );
+  for (const p of batchPlan(todo, "pull").rows) {
+    assert.notEqual(p.bucket, "fork", "分叉不能被一键改写历史");
+    assert.notEqual(p.bucket, "missing", "失联仓库目录都不在了");
+  }
+});
+
+test("队列顺序沿用待处理排序，不再排一套", () => {
+  const todo = todoFixture();
+  const pulls = batchPlan(todo, "pull").rows.map((r) => r.path);
+  assert.deepEqual(pulls, todo.filter((r) => r.action === "pull").map((r) => r.path));
+  assert.deepEqual(pulls, ["F:/a/behind9", "F:/a/behind1"], "落后多的先来（待处理里就这个序）");
+});
+
+test("没有同类行时不出计划：按钮不出现，而不是摆一个点了没反应的钮", () => {
+  const onlyAhead = buildTodo(buildRows([repo("F:/a/ahead")], { "F:/a/ahead": st({ ahead: 1 }) }));
+  assert.equal(batchPlan(onlyAhead, "pull"), null);
+  assert.equal(batchPlan(onlyAhead, "push").rows.length, 1);
+  assert.equal(batchPlan([], "pull"), null, "待办为空也不给计划");
+  assert.equal(batchPlan([], "push"), null);
+});
+
+test("按钮文案带上数量，用户点之前就知道会动几个仓库", () => {
+  assert.equal(batchPlan(todoFixture(), "pull").label, `全部${BATCH_LABEL.pull} 2`);
+  assert.equal(batchPlan(todoFixture(), "push").label, `全部${BATCH_LABEL.push} 1`);
+});
+
+test("汇总：一切正常就只报成功数，不写「跳过 0 个」这种废话", () => {
+  const r = { action: "pull", total: 3, done: 3, ok: 3, skipped: 0, failed: 0, stopped: false };
+  assert.equal(batchSummary(r), "批量拉取完成：3 个成功");
+});
+
+test("汇总：跳过与失败才出现，且顺序固定在成功之后", () => {
+  const r = { action: "pull", total: 4, done: 4, ok: 2, skipped: 1, failed: 1, stopped: false };
+  assert.equal(
+    batchSummary(r),
+    "批量拉取完成：2 个成功 · 1 个跳过（工作区有改动，需切到该仓库确认后再拉） · 1 个失败，原因见各自日志",
+  );
+});
+
+test("汇总：跳过的原因跟着动作走——推送没有暂存这回事", () => {
+  const base = { total: 1, done: 1, ok: 0, skipped: 1, failed: 0, stopped: false };
+  assert.match(batchSummary({ ...base, action: "pull" }), /确认后再拉/);
+  assert.equal(batchSummary({ ...base, action: "push" }), "批量推送完成：0 个成功 · 1 个跳过（已跳过）");
+});
+
+test("汇总：中途停止时说清跑到哪、还剩几个没动", () => {
+  const r = { action: "pull", total: 5, done: 2, ok: 2, skipped: 0, failed: 1, stopped: true };
+  assert.equal(batchSummary(r), "批量拉取已停止：2/5 个已处理，剩下 3 个没动");
+});
+
+test("汇总：停在最后一个上算跑完了，别报「剩下 0 个没动」", () => {
+  const r = { action: "push", total: 2, done: 2, ok: 2, skipped: 0, failed: 0, stopped: true };
+  assert.equal(batchSummary(r), "批量推送完成：2 个成功");
+});
+

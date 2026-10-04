@@ -24,6 +24,43 @@ pub fn valid_repo(path: &str) -> bool {
     std::path::Path::new(path).join(".git").exists()
 }
 
+/// 从 git URL 解析仓库名（用于克隆时决定目标目录名）。
+///
+/// 兼容三类写法：`https://host/owner/repo.git`、`ssh://git@host/owner/repo.git`、
+/// 以及 ssh 短格式 `git@host:owner/repo.git`。末尾斜杠与 `.git` 后缀都去掉。
+///
+/// **返回 `None` 而不是"尽力给一个"**：这个名字会直接成为磁盘上的目录名，
+/// 白名单之外的字符（`/ \ : * ? " < > |` 等）一律拒绝——让 `clone` 自己
+/// 去撞 Windows 的文件名规则，错误信息对用户没有意义。
+pub fn repo_name_from_url(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    let tail = match url.rfind(':').filter(|_| url.contains('@')) {
+        // ssh 短格式 user@host:owner/repo.git
+        Some(pos) => &url[pos + 1..],
+        None => {
+            // https:// / ssh:// 之外也可能是裸的 host/owner/repo
+            let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+            // host/owner 是一**页**，owner/repo 才是一个仓库。少于此就说明
+            // 用户只贴了主页地址——拿它当目录名会克隆出一个叫 `github.com`
+            // 的目录，错误信息对用户毫无意义，不如当场说"解析不出仓库名"
+            if rest.split('/').count() < 3 {
+                return None;
+            }
+            rest.rsplit('/').next()?
+        }
+    };
+    // `rsplit('/')` 兜一遍：短格式里 owner/repo 两段都要能取到 repo
+    let tail = tail.rsplit('/').next().unwrap_or(tail);
+    let name = tail.strip_suffix(".git").unwrap_or(tail);
+    let valid = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-. ".contains(c));
+    valid.then(|| name.to_string())
+}
+
 /// 从路径尾部取仓库名；取不到就整条路径当名字
 pub fn repo_name(path: &str) -> String {
     std::path::Path::new(path)
@@ -55,6 +92,9 @@ pub fn read_status(repo_path: &str) -> RepoStatus {
     );
     st.has_upstream = upstream.success;
     if upstream.success {
+        // 上游的全名就是这条命令的 stdout，界面上要显示"跟踪分支"——
+        // 只留一个 success 就把它扔了，等于让界面再问 git 一遍
+        st.upstream = upstream.stdout.trim().to_string();
         let counts = run_local(
             repo_path,
             &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
@@ -89,6 +129,85 @@ pub fn changed_files(repo_path: &str) -> u32 {
         .lines()
         .filter(|l| !l.trim().is_empty())
         .count() as u32
+}
+
+/// 一条未提交变更。给提交对话框的「变更摘要」用。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangeEntry {
+    /// git 的两字母状态码，如 `M ` / `??` / `A ` / `R `。原样留着，
+    /// 界面上按字符分色比让 core 翻译一遍更不容易失真
+    pub status: String,
+    /// 路径。已暂存的给相对仓库根的路径，未跟踪的同理
+    pub path: String,
+    /// 原始状态码的第二个字符非空格 = 在暂存区里
+    pub staged: bool,
+    /// 状态码里含 `?` = 未跟踪（还没进过版本控制）
+    pub untracked: bool,
+}
+
+/// 列出未提交变更。给提交对话框用——`changed_files` 只给个数，
+/// 但"我要提交什么"这件事得让人看见文件名才敢按确定。
+///
+/// 排序交给界面（它要知道按哪种顺序讲），这里只给 git 的原始顺序。
+pub fn changed_entries(repo_path: &str) -> Vec<ChangeEntry> {
+    if !valid_repo(repo_path) {
+        return Vec::new();
+    }
+    parse_porcelain(&run_local(repo_path, &["status", "--porcelain"]).stdout)
+}
+
+/// 解析 `git status --porcelain` 的输出。
+///
+/// 每行固定是 `XY <path>`：两个状态字符、一个空格、然后路径。
+/// **纯函数**，不碰 git——解析规则（两字符状态、空格分隔、重命名箭头）
+/// 跟 git 子进程一点关系没有，混在跑命令的函数里就只能靠真仓库测。
+pub fn parse_porcelain(stdout: &str) -> Vec<ChangeEntry> {
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        // 长度至少 4：`XY` + 空格 + 至少一个字符
+        if line.len() < 4 {
+            continue;
+        }
+        let b = line.as_bytes();
+        if b[2] != b' ' {
+            continue; // 形状不对的行（理论上不该有）直接跳过
+        }
+        let status = line[..2].to_string();
+        let path = line[3..].trim().to_string();
+        if path.is_empty() {
+            continue;
+        }
+        // 重命名时 git 给 `old -> new`，展示只要新的那个
+        let path = match path.rsplit_once(" -> ") {
+            Some((_, new)) => new.to_string(),
+            None => path,
+        };
+        out.push(ChangeEntry {
+            untracked: status.contains('?'),
+            // `XY` 里 **X 是暂存区、Y 是工作区**。搞反了会把"我 add 过"
+            // 报成"我改了但没 add"，而提交对话框的摘要正是靠这一列分组。
+            // `?`（未跟踪）要单独排除：它压根不在索引里，X 位那个 `?`
+            // 只是 git 表示"没见过这个文件"，不是"在暂存区里"
+            staged: b[0] != b' ' && b[0] != b'?',
+            status,
+            path,
+        });
+    }
+    out
+}
+
+/// 最近一次提交的标题（`git log -1 --pretty=%s`）。
+/// 提交对话框拿它**预填**提交说明——用户多半是在改上一件事，
+/// 从空开始想措辞比接着上一句改难得多。空仓库 / 不是仓库时给空串。
+pub fn last_commit_subject(repo_path: &str) -> String {
+    if !valid_repo(repo_path) {
+        return String::new();
+    }
+    let out = run_local(repo_path, &["log", "-1", "--pretty=format:%s"]);
+    if !out.success {
+        return String::new();
+    }
+    out.stdout.trim().to_string()
 }
 
 // ---------- 仓库增删改查 ----------
@@ -307,6 +426,39 @@ pub fn commit_activity(repo_path: &str, days: u32) -> Vec<ActivityDay> {
     bucket_days(&out.stdout)
 }
 
+/// 多个仓库的提交活动合并成一条时间线。给总览页的柱状图用。
+///
+/// 与 `commit_activity` 的分工：单个仓库的图是「这个项目我干了多少活」，
+/// 合并之后是「这阵子我一共干了多少活」——总览要回答的是后者。
+/// **不补空白天**：哪天空着就在图上留空，调用方自己补齐更省事。
+pub fn commit_activity_all(repo_paths: &[String], days: u32) -> Vec<ActivityDay> {
+    let srcs: Vec<Vec<ActivityDay>> = repo_paths
+        .iter()
+        .map(|p| commit_activity(p, days))
+        .collect();
+    merge_activity(srcs)
+}
+
+/// 把若干条「日期 → 计数」合并成一条，按日期倒序（新的在前）。
+///
+/// 拆成独立纯函数是为了能单测：合并规则（同名相加、去重、排序）跟 git 一点关系没有，
+/// 混在跑 git 的那个函数里就只能靠真仓库测。日期串固定 `YYYY-MM-DD`，
+/// 字典序等于时间序，直接排就行，不用引日期库。
+fn merge_activity(srcs: Vec<Vec<ActivityDay>>) -> Vec<ActivityDay> {
+    let mut acc: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for src in srcs {
+        for d in src {
+            *acc.entry(d.date).or_insert(0) += d.count;
+        }
+    }
+    let mut out: Vec<ActivityDay> = acc
+        .into_iter()
+        .map(|(date, count)| ActivityDay { date, count })
+        .collect();
+    out.sort_by(|a, b| b.date.cmp(&a.date));
+    out
+}
+
 /// 把 `git log` 的逐行日期分桶成「日期 → 计数」，按日期倒序（新的在前）。
 /// git log 默认按时间倒序输出，这里保持同样顺序，省一次排序。
 fn bucket_days(log_out: &str) -> Vec<ActivityDay> {
@@ -435,107 +587,350 @@ pub fn repo_languages(repo_path: &str) -> Vec<LangStat> {
     stats
 }
 
-/// README 预览：档案页内容卡只展示标题 + 首段简介，不需要整篇渲染。
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ReadmePreview {
-    /// 第一个 `# 一级标题`，去掉行内强调符后的小标题
-    pub title: String,
-    /// 首段正文（连续非空行，已截断到 300 字符）
-    pub intro: String,
+/// GitHub Linguist 给每种语言的显示色（`popular.yml` 里的 `#rrggbb`），
+/// 返回不带 `#` 的 6 位大写 hex。
+///
+/// **为什么放在 core 而不是界面**：色值是一份**数据**（GitHub 的事实），
+/// 不是设计档位。放界面就得在 `gui` 里再抄一份表，而两份表迟早会有一处
+/// 抄错颜色——用户看到"TypeScript 是绿的"只会觉得是这软件配色乱，
+/// 不会想到该去改哪一处。
+///
+/// **只覆盖 `lang_of_ext` 认得的那批语言**，与它一一对应：
+/// 这张表多列了不参与统计的语言，那会在界面上变成永远走不到的死分支。
+/// 认不出来的（含合并项「其他」）返回 `None`，由界面回落到主题色板
+pub fn lang_color(lang: &str) -> Option<u32> {
+    Some(match lang {
+        "Rust" => 0xDEA584,
+        "TypeScript" => 0x3178C6,
+        "JavaScript" => 0xF1E05A,
+        "Python" => 0x3572A5,
+        "Go" => 0x00ADD8,
+        "Java" => 0xB07219,
+        "Kotlin" => 0xA97BFF,
+        "Swift" => 0xF05138,
+        "Ruby" => 0x701516,
+        "PHP" => 0x4F5D95,
+        "C" => 0x555555,
+        "C++" => 0xF34B7D,
+        "C#" => 0x178600,
+        "Objective-C" => 0x438EFF,
+        "Scala" => 0xC22D40,
+        "Dart" => 0x00B4AB,
+        "Lua" => 0x000080,
+        "HTML" => 0xE34C26,
+        "Vue" => 0x41B883,
+        "Svelte" => 0xFF3E00,
+        "CSS" => 0x563D7C,
+        "SCSS" => 0xC6538C,
+        "Less" => 0x1D365D,
+        "Shell" => 0x89E051,
+        "PowerShell" => 0x012456,
+        "SQL" => 0xE38C00,
+        "Zig" => 0xEC915C,
+        "Solidity" => 0xAA6746,
+        _ => return None,
+    })
 }
 
-/// 读仓库根目录的 README 并提炼「标题 + 首段简介」。
-/// 找不到 README / 不是仓库时返回 None，调用方渲染占位。
-pub fn read_readme(repo_path: &str) -> Option<ReadmePreview> {
+/// 拆一个根目录文件名：判断它是不是说明文档、作者有没有在名字里写明语言。
+///
+/// **大小写不敏感**（`README.md` 与 `readme.md` 是同一个）——大小写归一在这一层
+/// 做，不摊给三个调用方各记一次。
+///
+/// 返回 `(排序档, 语言)`：
+///
+/// * 排序档越小越优先。**没有语言后缀的排在带后缀的前面**——
+///   `README.md` 是默认那一份，`README_zh.md` 只在它不存在时才顶上
+///   （用户明确说了要中/英切换，但没说"默认打开中文"）。
+/// * 语言是**作者写下来的**：`Some(true)` 中文 / `Some(false)` 英文；
+///   `None` 是没写，要靠正文判。
+///
+/// 认得的写法：`README.md` `readme` `README.txt` `README_zh.md` `README_CN.md`
+/// `README-en.md` `README.zh-CN.md` `README_中文.md`。**不认得的语言后缀
+/// 一律不算说明文档**——`README_api.md` 那种是 API 片段，不是给人读的整篇
+fn readme_parts(name: &str) -> Option<(u8, Option<bool>)> {
+    let lower = name.to_lowercase();
+    let rest = lower.strip_prefix("readme")?;
+    // 先摘扩展名，剩下的中段才是语言后缀
+    let (mid, ext_rank) = match rest.rfind('.') {
+        Some(i) => match &rest[i..] {
+            ".md" | ".markdown" => (&rest[..i], 0u8),
+            "" => (&rest[..i], 1),
+            ".txt" => (&rest[..i], 2),
+            _ => return None,
+        },
+        None => (rest, 1),
+    };
+    let tag = mid.trim_start_matches(['_', '-', '.', ' ']);
+    let lang = if tag.is_empty() {
+        None
+    } else {
+        // `zh-CN` / `zh_CN` 取第一段
+        let t = tag.split(['-', '_', '.']).next().unwrap_or("");
+        if matches!(t, "zh" | "cn" | "chs" | "cht" | "zhtw" | "中文") {
+            Some(true)
+        } else if matches!(t, "en" | "eng" | "english") {
+            Some(false)
+        } else {
+            return None;
+        }
+    };
+    Some((ext_rank + if lang.is_some() { 4 } else { 0 }, lang))
+}
+
+/// 正文中段判是不是中文。**只看开头 4000 字**——README 的头几行就是标题与
+/// 摘要，那几行足够定性，整篇扫一遍是白花 IO。
+///
+/// 判据是汉字与拉丁字母的比例：中文 README 的汉字量和字母量同一量级，
+/// 英文那份几乎为零。**阈值取 1:3 是有意放宽**——判错的后果只是
+/// 「切换键两边其实是同一种语言」，而判得太严会让真正双语的仓库**没有**
+/// 切换入口，那才是把用户要的功能弄没了。
+///
+/// ⚠️ **不把假名算进来**：日文文档会被判成"英文"而不是"中文"。这是个
+/// 二选一模型（只有中 / 英两档），没有第三档给日文；但标成"中文"是**摆在
+/// 界面上的错话**，标成"英文"顶多是在有切换键时不够准
+fn text_is_zh(text: &str) -> bool {
+    let head: String = text.chars().take(4000).collect();
+    let cjk = head
+        .chars()
+        .filter(|c| matches!(*c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF))
+        .count();
+    let latin = head.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    cjk * 3 >= latin
+}
+
+/// 这个文件名算不算一份说明文档（`README.md` / `README_zh.md` / …）。
+///
+/// 界面上判断"这条链接是**切到另一份文档**、还是打开别的文件"要用它。
+/// **命名规则只有 core 这一处**——界面自己再写一遍 `starts_with("readme")`
+/// 的话，改了这边那边就会把一个真文档当成普通文件弹给系统
+pub fn is_readme_name(name: &str) -> bool {
+    readme_parts(name).is_some()
+}
+
+/// 一份说明文档候选
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReadmeCand {
+    name: String,
+    /// 判出来的语言
+    zh: bool,
+    /// 作者在**文件名**里写明了语言（`README_zh.md`）。比读正文猜可靠，
+    /// 所以同一语言有多份时它排前面
+    explicit: bool,
+    rank: u8,
+}
+
+/// 扫仓库根目录，把能当说明文档的文件列出来，**默认那一份排在最前**
+///
+/// 判语言分两步：先看文件名后缀；没有后缀的（`README.md` 本身到底是中文还是
+/// 英文，只有读一遍才知道）再读开头 4000 字判一次。**只读没有后缀的那几份**，
+/// 带后缀的靠文件名就够了，不必为了判语言去读它
+fn readme_cands(repo_path: &str) -> Vec<ReadmeCand> {
+    let Ok(rd) = std::fs::read_dir(repo_path) else {
+        return Vec::new();
+    };
+    let mut cands: Vec<ReadmeCand> = Vec::new();
+    for entry in rd.flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some((rank, lang)) = readme_parts(&name) else {
+            continue;
+        };
+        let (zh, explicit) = match lang {
+            Some(zh) => (zh, true),
+            None => {
+                let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                (text_is_zh(&text), false)
+            }
+        };
+        cands.push(ReadmeCand {
+            name,
+            zh,
+            explicit,
+            rank,
+        });
+    }
+    cands.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.name.cmp(&b.name)));
+    cands
+}
+
+/// 在仓库根目录找 README：不区分大小写，.md 优先于无后缀 / .txt，
+/// **没有语言后缀的优先于带后缀的**（`README.md` 是默认那一份）
+fn find_readme(repo_path: &str) -> Option<std::path::PathBuf> {
+    let cands = readme_cands(repo_path);
+    let first = cands.first()?;
+    Some(std::path::Path::new(repo_path).join(&first.name))
+}
+
+/// 「另一语言那份说明文档」。界面上「中文 / English」两颗键就是从这里来的。
+///
+/// **参数是当前正在显示的那一份**，不是"主文档"——用户切到英文之后再点一次
+/// 就要切回来，所以判据必须是"此刻屏幕上这份是哪种语言"。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadmeAlt {
+    /// 另一个语言那份的文件名（根目录下）
+    pub file: String,
+    /// 那一份是中文（`true`）还是英文（`false`）
+    pub zh: bool,
+}
+
+pub fn readme_alt(repo_path: &str, current: &str) -> Option<ReadmeAlt> {
+    if !valid_repo(repo_path) {
+        return None;
+    }
+    let cands = readme_cands(repo_path);
+    // 当前这份是哪种语言。
+    //
+    // ⚠️ **必须从候选表里查，不能"文件名没写后缀就当英文"**：`README.md`
+    // 绝大多数中文项目是**中文正文 + 无后缀**，当成英文的话另一档算错、
+    // 直接返回 None，切换入口整个消失（2026-10-05 单测抓到的）。
+    // 候选表里那份的语言已经按正文判过了，直接取
+    let cur_zh = cands
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case(current))
+        .map(|c| c.zh)
+        .or_else(|| readme_parts(current).and_then(|(_, lang)| lang))
+        .unwrap_or(false);
+    // 另一档里挑一份：**作者写明语言后缀的优先**（他明确表达过意图，
+    // 比我们从正文猜的可靠），其次才是排序档
+    let other = cands
+        .into_iter()
+        .filter(|c| c.zh != cur_zh && !c.name.eq_ignore_ascii_case(current))
+        .min_by_key(|c| (!c.explicit, c.rank, c.name.clone()));
+    other.map(|c| ReadmeAlt {
+        file: c.name,
+        zh: c.zh,
+    })
+}
+
+/// README 原文的上限。`TextView::markdown` 要把整篇解析成布局，
+/// 一份十万字的 README 会在打开页签的那一帧卡住界面。
+/// 超了截断并在末尾留一句，界面照实告诉用户"没显示完"
+pub const README_MAX_CHARS: usize = 120_000;
+
+/// 按上限截一段原文，超了就在末尾留一句说明
+fn clamp_readme(text: String) -> Option<String> {
+    if text.chars().count() <= README_MAX_CHARS {
+        return Some(text);
+    }
+    let mut out: String = text.chars().take(README_MAX_CHARS).collect();
+    out.push_str("\n\n…… README 太长，已截断 …………\n");
+    Some(out)
+}
+
+/// 读仓库根目录的 README **原文**（给「说明」页签整篇渲染用）。
+///
+/// 与 `read_readme` 的区别是这一个不做提炼：那边给概览卡一个标题 + 首段，
+/// 这边要整篇 markdown。找不到 / 不是仓库时返回 None，调用方渲染可操作空态
+pub fn read_readme_text(repo_path: &str) -> Option<String> {
     if !valid_repo(repo_path) {
         return None;
     }
     let file = find_readme(repo_path)?;
-    let text = std::fs::read_to_string(&file).ok()?;
-    Some(parse_readme(&text))
+    clamp_readme(std::fs::read_to_string(&file).ok()?)
 }
 
-/// 在仓库根目录找 README：不区分大小写，.md 优先于无后缀 / .txt。
-fn find_readme(repo_path: &str) -> Option<std::path::PathBuf> {
-    let mut best: Option<(u8, std::path::PathBuf)> = None;
-    for entry in std::fs::read_dir(repo_path).ok()? {
-        let Ok(entry) = entry else { continue };
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let lower = name.to_lowercase();
-        let rank = if let Some(rest) = lower.strip_prefix("readme") {
-            match rest {
-                ".md" | ".markdown" => 0u8,
-                "" => 1,
-                ".txt" => 2,
-                _ => continue,
-            }
-        } else {
-            continue;
-        };
-        if best.as_ref().is_none_or(|(r, _)| rank < *r) {
-            best = Some((rank, entry.path()));
-        }
+/// 读**指定**那一份说明文档（`readme_alt` 给的文件名）。
+///
+/// 名字由 `readme_alt` 从根目录扫出来，不是用户输入，所以不防穿越——
+/// 但仍要确认它在根目录里、且确实是个说明文档名：调一次 `readme_parts`
+/// 就够，代价可忽略，防的是"哪天有人把路径拼进去"那种改坏
+pub fn read_readme_named(repo_path: &str, name: &str) -> Option<String> {
+    if !valid_repo(repo_path) {
+        return None;
     }
-    best.map(|(_, p)| p)
+    if readme_parts(name).is_none() {
+        return None;
+    }
+    clamp_readme(std::fs::read_to_string(std::path::Path::new(repo_path).join(name)).ok()?)
 }
 
-/// README 首屏提炼规则：第一个 `# 标题`；首段 = 第一个「正文样子的行」
-/// 开始的连续段落。标题行 / badge / 图片 / HTML / 表格分隔都不算正文。
-fn parse_readme(text: &str) -> ReadmePreview {
-    let clean = |s: &str| -> String {
-        // 去掉行内强调：**粗体**、*斜体*、`代码`——简介里留这些记号只会显得乱
-        s.replace("**", "")
-            .replace("`", "")
-            .trim()
-            .trim_end_matches('*')
-            .trim()
-            .to_string()
-    };
-    let mut out = ReadmePreview::default();
-    for line in text.lines() {
-        let l = line.trim();
-        // 还没拿到标题时先认领第一个 `# 一级标题`；没有标题的 README
-        // 不该因此吞掉正文——首段照样从第一行正文找
-        if out.title.is_empty() {
-            if let Some(h) = l.strip_prefix("# ").map(clean).filter(|s| !s.is_empty()) {
-                out.title = h;
-                continue;
-            }
-        }
-        // 标题之后就找首段：跳过空行、小标题、badge/图片/HTML/表格等结构行
-        if l.is_empty() {
-            if !out.intro.is_empty() {
-                break; // 段落结束
-            }
-            continue;
-        }
-        let structural = l.starts_with('#')
-            || l.starts_with('[')
-            || l.starts_with('!')
-            || l.starts_with('<')
-            || l.starts_with('|')
-            || l.starts_with('-')
-            || l.starts_with('>');
-        if structural {
-            continue;
-        }
-        out.intro.push_str(&clean(l));
-        if out.intro.chars().count() >= 300 {
-            break;
-        }
+/// 实际读到的是仓库根目录下的哪个 README 文件名（`README.md` 之类）。
+/// 界面上说"这份仓库的说明文档叫 README.md"比什么都不说要可信
+pub fn readme_file_name(repo_path: &str) -> Option<String> {
+    if !valid_repo(repo_path) {
+        return None;
     }
-    // 截断到 300 字符（按字符不按字节，中文不吃亏）
-    if out.intro.chars().count() > 300 {
-        out.intro = out.intro.chars().take(300).collect();
-    }
-    out
+    find_readme(repo_path).map(|p| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::RepoEntry;
+
+    /// `lang_of_ext` 的每一条臂各取一个能命中它的扩展名。
+    ///
+    /// **它同时是「语言色表不许漏项」的守门样本**：`lang_color` 对这里任何
+    /// 一个语言返回 `None`，这条测试就红。加新语言时把它的扩展名也补进来——
+    /// 漏补的后果是那一段没有固定色、退回主题色板循环，
+    /// 而那在界面上看着只是"颜色换了"，没人会知道是漏了
+    const LANG_SAMPLES: [(&str, &str); 28] = [
+        ("rs", "Rust"),
+        ("ts", "TypeScript"),
+        ("js", "JavaScript"),
+        ("py", "Python"),
+        ("go", "Go"),
+        ("java", "Java"),
+        ("kt", "Kotlin"),
+        ("swift", "Swift"),
+        ("rb", "Ruby"),
+        ("php", "PHP"),
+        ("c", "C"),
+        ("cpp", "C++"),
+        ("cs", "C#"),
+        ("m", "Objective-C"),
+        ("scala", "Scala"),
+        ("dart", "Dart"),
+        ("lua", "Lua"),
+        ("html", "HTML"),
+        ("vue", "Vue"),
+        ("svelte", "Svelte"),
+        ("css", "CSS"),
+        ("scss", "SCSS"),
+        ("less", "Less"),
+        ("sh", "Shell"),
+        ("ps1", "PowerShell"),
+        ("sql", "SQL"),
+        ("zig", "Zig"),
+        ("sol", "Solidity"),
+    ];
+
+    #[test]
+    fn every_counted_language_has_a_github_color() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (ext, want) in LANG_SAMPLES {
+            let got = lang_of_ext(ext).unwrap_or_else(|| panic!("{ext} 不该被跳过"));
+            assert_eq!(got, want, "扩展名 {ext} 认出的语言名变了，语言色表要一起改");
+            let c = lang_color(got)
+                .unwrap_or_else(|| panic!("{} 缺 GitHub 色，会退回主题色板", got));
+            assert!(
+                (0x000000..=0xFFFFFF).contains(&c),
+                "{} 的色值 {c:#x} 不是 6 位 hex",
+                got
+            );
+            assert!(seen.insert(got), "{} 在样本里出现了两次", got);
+        }
+        // 色值两两不同：抄错一行时它会撞上另一行，测试当场抓住
+        let colors: std::collections::BTreeSet<_> =
+            LANG_SAMPLES.iter().map(|(_, l)| lang_color(l).unwrap()).collect();
+        assert_eq!(colors.len(), LANG_SAMPLES.len(), "色表里有两条撞成了同一个色");
+    }
+
+    #[test]
+    fn the_merged_bucket_has_no_fixed_color() {
+        // 「其他」是 `repo_languages` 合并出来的，里面混着好几种语言，
+        // 给它一个固定色等于让用户以为"那块是某一种语言"
+        assert_eq!(lang_color("其他"), None);
+        assert_eq!(lang_color("Fortran"), None);
+        assert_eq!(lang_color(""), None);
+    }
 
     /// 造一个带全部字段的条目：字段一多，写字面量漏字段就会编译不过——
     /// 这正是加新字段时想要的提醒，而不是靠 `..Default::default()` 把漏掉的静默吃掉
@@ -584,11 +979,95 @@ mod tests {
     }
 
     #[test]
-    fn new_entry_defaults_do_not_bite() {
-        // 加字段后老配置仍要能读出来：全空值 = 未设置，不是崩溃
+    fn new_entry_defaults_do_not_bite() {        // 加字段后老配置仍要能读出来：全空值 = 未设置，不是崩溃
         let e = full_entry();
         assert!(e.cmd_runs.is_empty());
         assert!(e.pinned_cmds.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod porcelain_tests {
+    use super::*;
+
+    #[test]
+    fn porcelain_splits_status_and_path() {
+        let got = parse_porcelain("M  src/main.rs\n?? target/\nA  new.txt\n");
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].status, "M ");
+        assert_eq!(got[0].path, "src/main.rs");
+        assert!(got[0].staged, "第二字符非空格 = 已暂存");
+        assert!(!got[0].untracked);
+        assert!(got[1].untracked, "?? 是未跟踪");
+        assert!(!got[1].staged);
+        assert_eq!(got[2].path, "new.txt");
+    }
+
+    /// `XY` 两列的分工：**X 是暂存区、Y 是工作区**。
+    /// 搞反了会把"我 add 过"报成"我改了但没 add"
+    #[test]
+    fn staged_flag_comes_from_the_index_column() {
+        // 已 add 过、之后又改了 → `AM`：X=A 在暂存区，Y=M 在工作区
+        let got = parse_porcelain("AM build.rs\n");
+        assert!(got[0].staged, "X 列非空格 = 进了暂存区");
+        // 删了但没 add → ` D`：X 是空格，说明没进暂存区
+        let got = parse_porcelain(" D gone.txt\n");
+        assert!(!got[0].staged, "X 列是空格 = 只在工作区改了");
+    }
+
+    /// 重命名时 git 给 `旧 -> 新`，展示只要新的那个
+    #[test]
+    fn renames_keep_only_the_new_path() {
+        let got = parse_porcelain("R  old/a.rs -> new/b.rs\n");
+        assert_eq!(got[0].path, "new/b.rs");
+    }
+
+    /// 空输出与形状不对的行都不能变成一条假变更
+    #[test]
+    fn malformed_lines_are_skipped() {
+        assert!(parse_porcelain("").is_empty());
+        let got = parse_porcelain("\nXX\nM  ok.rs\n"); // "XX" 太短，第二行形状不对
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, "ok.rs");
+    }
+
+    /// 端到端：真仓库里改一个文件、add 一个，`changed_files` 与明细条数必须一致。
+    /// 验的是"两处读的是同一份 git 输出"，解析规则上面已经纯函数验过了
+    #[test]
+    fn entries_of_a_real_repo_match_the_count() {
+        let repo = test_repo();
+        let root = repo.0.clone();
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        std::fs::write(root.join("b.txt"), "y").unwrap();
+        sh(&root, &["add", "b.txt"]);
+
+        let count = changed_files(root.to_str().unwrap());
+        let entries = changed_entries(root.to_str().unwrap());
+        assert_eq!(count as usize, entries.len());
+        let staged = entries.iter().filter(|e| e.staged).count();
+        assert_eq!(staged, 1, "只有 b.txt 进了暂存区");
+        let untracked = entries.iter().filter(|e| e.untracked).count();
+        assert_eq!(untracked, 1, "a.txt 还没被 git 知道");
+
+        sh(&root, &["add", "."]);
+        sh(&root, &["commit", "-q", "-m", "第一条提交"]);
+        assert_eq!(
+            last_commit_subject(root.to_str().unwrap()),
+            "第一条提交",
+            "提交标题要给提交对话框预填用"
+        );
+
+        drop(repo);
+    }
+
+    /// 空仓库（还没有任何提交）不该 panic，标题给空串
+    #[test]
+    fn subject_of_a_fresh_repo_is_empty() {
+        let repo = test_repo();
+        let root = repo.0.clone();
+        assert_eq!(last_commit_subject(root.to_str().unwrap()), "");
+        assert!(changed_entries(root.to_str().unwrap()).is_empty());
+        drop(repo);
     }
 }
 
@@ -779,6 +1258,66 @@ mod activity_tests {
 
         drop(repo);
     }
+
+    /// 合并规则：同名相加、去重、**按日期倒序**。
+    /// 纯函数，不碰 git，所以不必持 `GIT_TEST_LOCK`
+    #[test]
+    fn merging_sums_same_days_and_sorts_newest_first() {
+        let a = vec![
+            ActivityDay { date: "2026-10-02".into(), count: 3 },
+            ActivityDay { date: "2026-10-01".into(), count: 1 },
+        ];
+        let b = vec![
+            ActivityDay { date: "2026-10-02".into(), count: 4 },
+            ActivityDay { date: "2026-09-30".into(), count: 2 },
+        ];
+        let merged = merge_activity(vec![a, b]);
+        assert_eq!(merged.len(), 3, "同一天只能出一条");
+        assert_eq!(merged[0].date, "2026-10-02");
+        assert_eq!(merged[0].count, 7, "3 + 4 要相加");
+        assert_eq!(merged[1].date, "2026-10-01");
+        assert_eq!(merged[2].date, "2026-09-30", "较旧的天要排在后面");
+    }
+
+    /// 空输入与全空输入都给空数组——图上没柱子，别给一条 count=0 的假数据
+    #[test]
+    fn merging_nothing_yields_nothing() {
+        assert!(merge_activity(vec![]).is_empty());
+        assert!(merge_activity(vec![Vec::new(), Vec::new()]).is_empty());
+    }
+
+    /// 端到端：两个真仓库的提交数应该相加。验的是「每个仓库都跑到」，
+    /// 不是合并规则（那条上面已经纯函数验过了）
+    #[test]
+    fn activity_of_several_repos_is_summed() {
+        let repo = test_repo();
+        let root = repo.0.clone();
+        let a = root.join("a");
+        let b = root.join("b");
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).unwrap();
+            sh(d, &["init", "-q", "--initial-branch=main"]);
+            sh(d, &["config", "user.email", "t@example.com"]);
+            sh(d, &["config", "user.name", "t"]);
+            sh(d, &["config", "commit.gpgsign", "false"]);
+            std::fs::write(d.join("f.txt"), "x").unwrap();
+            sh(d, &["add", "."]);
+            sh(d, &["commit", "-q", "-m", "one"]);
+        }
+        let paths = vec![
+            a.to_string_lossy().to_string(),
+            b.to_string_lossy().to_string(),
+        ];
+        let one = commit_activity(&paths[0], 30);
+        let both = commit_activity_all(&paths, 30);
+        assert!(!one.is_empty(), "刚提交的当天应该有记录");
+        assert_eq!(
+            both.iter().map(|d| d.count).sum::<u32>(),
+            one.iter().map(|d| d.count).sum::<u32>() * 2
+        );
+
+        drop(repo);
+    }
 }
 
 #[cfg(test)]
@@ -821,54 +1360,216 @@ mod lang_tests {
 mod readme_tests {
     use super::*;
 
+
+
+    /// 「说明」页签要的是整篇原文：标题层级、表格、代码块都得原样进去，
+    /// 所以这里既不提炼也不截短（只有超长上限那一条）
     #[test]
-    fn parse_extracts_title_and_first_paragraph() {
-        let md = "<!-- 注释 -->\n\
-                  [![badge](https://x)](https://y)\n\
-                  ![logo](https://x.png)\n\
-                  \n\
-                  # Element Plus\n\
-                  \n\
-                  ## 特性\n\
-                  \n\
-                  **基于 Vue 3** 的桌面端组件库，面向设计与开发。\n\
-                  第二行同属一段。\n\
-                  \n\
-                  支持 色模式。\n";
-        let got = parse_readme(md);
-        assert_eq!(got.title, "Element Plus");
+    fn readme_text_returns_whole_file_and_its_name() {
+        let root = std::env::temp_dir().join(format!("qbg-readme-text-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // 不是仓库：两项都是 None，界面上给可操作空态而不是一片空白
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(read_readme_text(root.to_str().unwrap()).is_none());
+        assert!(readme_file_name(root.to_str().unwrap()).is_none());
+
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        // 只有 readme.txt：兜底也要认，界面照实说读到的是哪个文件
+        std::fs::write(root.join("readme.txt"), "旧的 txt\n").unwrap();
         assert_eq!(
-            got.intro,
-            "基于 Vue 3 的桌面端组件库，面向设计与开发。第二行同属一段。"
+            readme_file_name(root.to_str().unwrap()).as_deref(),
+            Some("readme.txt")
+        );
+        assert_eq!(
+            read_readme_text(root.to_str().unwrap()).as_deref(),
+            Some("旧的 txt\n")
+        );
+
+        // README.md 优先于 readme.txt，且大小写不敏感
+        let md = "# 标题\n\n| 列 |\n|---|---|\n| a |\n";
+        std::fs::write(root.join("README.md"), md).unwrap();
+        assert_eq!(
+            readme_file_name(root.to_str().unwrap()).as_deref(),
+            Some("README.md")
+        );
+        assert_eq!(read_readme_text(root.to_str().unwrap()).as_deref(), Some(md));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 超长 README 必须截断并**在文末说清楚截断了**。整篇丢给渲染器会在
+    /// 打开页签的那一帧卡住界面，而静默截断等于骗用户
+    #[test]
+    fn readme_text_truncates_and_says_so() {
+        let root = std::env::temp_dir().join(format!("qbg-readme-long-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let long: String = "字".repeat(README_MAX_CHARS + 500);
+        std::fs::write(root.join("README.md"), &long).unwrap();
+
+        let got = read_readme_text(root.to_str().unwrap()).unwrap();
+        assert!(got.starts_with("字".repeat(100).as_str()), "开头必须是原文");
+        assert!(got.contains("已截断"), "截断了必须在文末留一句");
+        assert!(
+            got.chars().count() <= README_MAX_CHARS + 200,
+            "截断后长度应贴近上限，而不是把全文端上去"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `readme_parts` 是整套中英切换的入口，名字解析错一处，
+    /// 后面「认不出说明文档」「切错语言」两类毛病都会从它冒出来
+    #[test]
+    fn readme_name_parsing_covers_the_conventions() {
+        // 不带后缀：默认那一份，语言留给正文判
+        assert_eq!(readme_parts("readme.md"), Some((0, None)));
+        assert_eq!(readme_parts("README.markdown"), Some((0, None)));
+        assert_eq!(readme_parts("readme"), Some((1, None)));
+        assert_eq!(readme_parts("readme.txt"), Some((2, None)));
+        // 带语言后缀：分词都在语言上，且排序档一律大于无后缀的
+        for n in ["readme_zh.md", "README_CN.md", "readme-en.md", "README_中文.md"] {
+            let (rank, lang) = readme_parts(&n.to_lowercase()).unwrap_or_else(|| panic!("{n}"));
+            assert!(lang.is_some(), "{n} 应认出语言");
+            assert!(rank >= 4, "{n} 带后缀，必须排在 README.md 之后");
+        }
+        assert_eq!(readme_parts("readme_zh.md"), Some((4, Some(true))));
+        assert_eq!(readme_parts("readme_en.md"), Some((4, Some(false))));
+        // 地区后缀只取第一段
+        assert_eq!(readme_parts("readme.zh-cn.md"), Some((4, Some(true))));
+        // 不是说明文档：贡献指南、许可、API 片段都不该被当正文
+        for n in ["contributing.md", "readme_api.md", "readme.rstx", "licence"] {
+            assert_eq!(readme_parts(n), None, "{n} 不该被算成说明文档");
+        }
+        // 界面判"这条链接是切文档还是开文件"靠的是同一个口径
+        assert!(is_readme_name("README_zh.md"));
+        assert!(!is_readme_name("CONTRIBUTING.md"));
+    }
+
+    /// 中英双份：`README.md` 是中文、`README_en.md` 是英文，默认读前者，
+    /// 切换给后者。**切过去之后再问一次要切回中文**——判据必须是"屏幕上
+    /// 这份是什么语言"，不是"主文档是什么语言"
+    #[test]
+    fn readme_alt_switches_between_a_bilingual_pair() {
+        let root = std::env::temp_dir().join(format!("qbg-readme-2lang-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let p = root.to_str().unwrap();
+        let zh = "# 青鸟\n\n这是中文说明。\n";
+        let en = "# Qingbird\n\nEnglish docs.\n";
+        std::fs::write(root.join("README.md"), zh).unwrap();
+        std::fs::write(root.join("README_en.md"), en).unwrap();
+
+        // 默认那一份是 README.md（无后缀的优先）
+        assert_eq!(readme_file_name(p).as_deref(), Some("README.md"));
+        assert_eq!(read_readme_text(p).as_deref(), Some(zh));
+
+        let a = readme_alt(p, "README.md").expect("有第二份就该给切换");
+        assert_eq!(a.file, "README_en.md");
+        assert!(!a.zh, "README_en.md 是英文");
+        assert_eq!(read_readme_named(p, &a.file).as_deref(), Some(en));
+
+        // 切到英文之后再问：要给回中文那一份
+        let back = readme_alt(p, "README_en.md").expect("切过去就该能切回来");
+        assert_eq!(back.file, "README.md");
+        assert!(back.zh, "README.md 正文是中文");
+    }
+
+    /// 只有一份就没有切换键——`readme_alt` 返回 None，界面上那颗键不出现。
+    /// 同时验一下**没写语言后缀的那份靠正文判**：README.md 是中文、另一份是
+    /// 带 `_en` 后缀的英文，切换方向要判对
+    #[test]
+    fn readme_alt_is_none_for_a_single_file() {
+        let root = std::env::temp_dir().join(format!("qbg-readme-1lang-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let p = root.to_str().unwrap();
+        std::fs::write(root.join("README.md"), "# Title\n\nOnly English here.\n").unwrap();
+        assert_eq!(readme_alt(p, "README.md"), None);
+
+        // 反过来：README.md 写成中文，另一份带 _en 后缀
+        std::fs::write(root.join("README.md"), "# 标题\n\n只有中文。\n").unwrap();
+        std::fs::write(root.join("README_en.md"), "# Title\n\nEnglish.\n").unwrap();
+        let a = readme_alt(p, "README.md").expect("正文是中文就该切到英文那一份");
+        assert_eq!(a.file, "README_en.md");
+        assert!(!a.zh);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `read_readme_named` 只放行"确实是个说明文档名"的输入。
+    /// 它不是对外的用户输入，但**规则要在这里钉死**：哪天有人把任意路径
+    /// 拼进来，这条就是拦住它的最后一道
+    #[test]
+    fn readme_named_refuses_anything_but_a_readme() {
+        let root = std::env::temp_dir().join(format!("qbg-readme-named-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let p = root.to_str().unwrap();
+        std::fs::write(root.join("README.md"), "# ok\n").unwrap();
+        std::fs::write(root.join("secret.txt"), "不该被读到\n").unwrap();
+
+        assert!(read_readme_named(p, "README.md").is_some());
+        assert!(read_readme_named(p, "secret.txt").is_none());
+        assert!(read_readme_named(p, "..\\..\\Windows\\win.ini").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 克隆时要拿 URL 里的最后一段当目录名，三类写法都得认
+    #[test]
+    fn repo_name_from_url_handles_three_forms() {
+        assert_eq!(
+            repo_name_from_url("https://github.com/user/hello-world.git"),
+            Some("hello-world".into())
+        );
+        assert_eq!(
+            repo_name_from_url("https://gitee.com/user/hello-world"),
+            Some("hello-world".into())
+        );
+        assert_eq!(
+            repo_name_from_url("git@github.com:user/repo.git"),
+            Some("repo".into())
+        );
+        assert_eq!(
+            repo_name_from_url("ssh://git@github.com/user/repo.git"),
+            Some("repo".into())
         );
     }
 
+    /// 解析不出来 / 名字里带 Windows 非法字符时一律 None：
+    /// 这个字符串会直接变成磁盘目录名，宁可让 clone 去报错
     #[test]
-    fn parse_survives_bad_input() {
-        assert_eq!(parse_readme(""), ReadmePreview::default());
-        // 没有标题也能出首段
-        let got = parse_readme("直接开始的简介\n");
-        assert_eq!(got.title, "");
-        assert_eq!(got.intro, "直接开始的简介");
+    fn repo_name_from_url_rejects_unusable_names() {
+        // 两边空白 + 结尾斜杠都裁掉
+        assert_eq!(
+            repo_name_from_url("  https://github.com/a/b.git  "),
+            Some("b".into())
+        );
+        assert_eq!(
+            repo_name_from_url("https://github.com/a/b/"),
+            Some("b".into())
+        );
+        // 裸地址（没有 scheme）同样认
+        assert_eq!(repo_name_from_url("github.com/a/b"), Some("b".into()));
+        // **主页地址不是仓库地址**。旧 Tauri 版对 `.../user/` 返回
+        // `Some("user")`，那样会克隆出一个叫 `user` 的目录再报
+        // "Repository not found"；少一段直接说"解析不出仓库名"更有用
+        assert_eq!(repo_name_from_url("https://github.com/user/"), None);
+        assert_eq!(repo_name_from_url("https://github.com/"), None);
+        assert_eq!(repo_name_from_url("github.com/user"), None);
+        assert_eq!(repo_name_from_url("github.com"), None);
+        // 空串与纯空白
+        assert_eq!(repo_name_from_url(""), None);
+        assert_eq!(repo_name_from_url("   "), None);
+        // `.git` 剥完就空了
+        assert_eq!(repo_name_from_url("https://github.com/a/.git"), None);
+        // Windows 文件名非法字符
+        assert_eq!(repo_name_from_url("https://h/a/b:c"), None);
+        assert_eq!(repo_name_from_url("https://h/a/b*c"), None);
+        assert_eq!(repo_name_from_url("https://h/a/b|c"), None);
+        // 路径穿越：`.` 与 `..` 的字符都"合法"，但它们会让目标目录
+        // 指到父目录去，必须单独挡掉
+        assert_eq!(repo_name_from_url("https://h/a/.."), None);
+        assert_eq!(repo_name_from_url("https://h/a/."), None);
     }
 
-    #[test]
-    fn readme_lookup_prefers_md_and_ignores_case() {
-        let root = std::env::temp_dir().join(format!("qbg-readme-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        // 不是仓库：直接 None
-        assert!(read_readme(root.to_str().unwrap()).is_none());
-
-        std::fs::create_dir_all(root.join(".git")).unwrap();
-        std::fs::write(root.join("readme.txt"), "旧的 txt\n").unwrap();
-        assert!(read_readme(root.to_str().unwrap()).is_some(), "txt 兜底也能读");
-        std::fs::write(root.join("README.md"), "# 标题\n\n正文\n").unwrap();
-        let got = read_readme(root.to_str().unwrap()).unwrap();
-        assert_eq!(got.title, "标题");
-        assert_eq!(got.intro, "正文");
-        let _ = std::fs::remove_dir_all(&root);
-    }
 }
 
 #[cfg(test)]

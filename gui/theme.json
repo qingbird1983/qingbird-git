@@ -90,6 +90,8 @@
         "input.border": "#E5E3DF",
         "title_bar.background": "#FFFFFF",
         "title_bar.border": "#E5E3DF",
+        "status_bar.background": "#FFFFFF",
+        "status_bar.border": "#E5E3DF",
         "window.border": "#E5E3DF",
         "overlay": "#1A1A1A33",
 

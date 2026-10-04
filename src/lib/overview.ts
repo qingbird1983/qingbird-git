@@ -159,3 +159,63 @@ export function overviewSummary(rows: OverviewRow[]): OverviewSummary {
     commits: rows.reduce((a, r) => a + r.behind + r.ahead, 0),
   };
 }
+
+/* ---------- 一键批量 ----------
+   阶段 4 路线图里的「待处理支持一键逐个执行」。前端串行循环跑现有
+   pullFor / pushFor 就行，不需要新的后端 command：代理回退、分叉识别、
+   脏工作区判定都已经在那两条路径里，再写一份只会让两边行为漂移。 */
+
+/** 批量支持的动作，与行内动作同一套词，不另起名字 */
+export type BatchAction = "pull" | "push";
+
+export const BATCH_LABEL: Record<BatchAction, string> = { pull: "拉取", push: "推送" };
+
+export interface BatchPlan {
+  action: BatchAction;
+  /** 队列顺序沿用待处理的排序，不另排一套 */
+  rows: OverviewRow[];
+  /** 按钮文案，形如「全部拉取 3」 */
+  label: string;
+}
+
+/**
+ * 挑出能一键跑完的队列。只收行内动作与批次一致的行：
+ * 分叉与失联是「查看」——把它们顺手做了等于替用户改写历史或去动一个不存在的目录。
+ * 没有对应行时返回 null，按钮干脆不出现，别摆一个点了没反应的钮。
+ */
+export function batchPlan(todo: OverviewRow[], action: BatchAction): BatchPlan | null {
+  const rows = todo.filter((r) => r.action === action);
+  if (rows.length === 0) return null;
+  return { action, rows, label: `全部${BATCH_LABEL[action]} ${rows.length}` };
+}
+
+export interface BatchResult {
+  action: BatchAction;
+  total: number;
+  /** 已尝试过的个数（含跳过的） */
+  done: number;
+  ok: number;
+  skipped: number;
+  failed: number;
+  /** 用户中途按了停止：正在跑的那个子进程已被 cancelBusyOp 打断 */
+  stopped: boolean;
+}
+
+/** 只有拉取会跳过（脏工作区）；推送没这条路，计数恒为 0 */
+const SKIP_HINT: Record<BatchAction, string> = {
+  pull: "工作区有改动，需切到该仓库确认后再拉",
+  push: "已跳过",
+};
+
+/** 跑完（或被打断）的一句话结论，写进全局日志 */
+export function batchSummary(r: BatchResult): string {
+  const name = `批量${BATCH_LABEL[r.action]}`;
+  // 停在最后一个上时当跑完了，别报"已停止、剩下 0 个没动"
+  if (r.stopped && r.done < r.total) {
+    return `${name}已停止：${r.done}/${r.total} 个已处理，剩下 ${r.total - r.done} 个没动`;
+  }
+  const parts = [`${r.ok} 个成功`];
+  if (r.skipped > 0) parts.push(`${r.skipped} 个跳过（${SKIP_HINT[r.action]}）`);
+  if (r.failed > 0) parts.push(`${r.failed} 个失败，原因见各自日志`);
+  return `${name}完成：${parts.join(" · ")}`;
+}

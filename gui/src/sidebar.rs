@@ -1,0 +1,633 @@
+//! 仓库侧栏：两组树（我的 / 第三方）+ 过滤 + 底部两个动作。
+//!
+//! 宽度与折叠不在这里管——外面是官方 `resizable_panel`（见 shell.rs 与路线表 D12）。
+//! 这里只管"有哪些仓库、每一行长什么样、右键能干什么"。
+
+// 图标只认这一套：assets 里是完整 lucide，外加品牌 Bird。
+// 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
+// 混在同一屏里一眼就能看出不一致。
+use gpui_kit::assets::IconName as AssetIcon;
+use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::Input;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::separator::Separator;
+use gpui_kit::component::sidebar::{SidebarItem as _, SidebarMenuItem};
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::{Icon, Selectable as _, Sizable, Size, Theme, WindowExt};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    div, percentage, px, AnyElement, App, ClipboardItem, Context, Div, Entity, FontWeight, Hsla,
+    InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window,
+};
+use qingbird_core::net;
+use qingbird_core::store::RepoEntry;
+use qingbird_core::types::RepoStatus;
+
+use crate::os;
+use crate::state::*;
+use crate::tokens::*;
+use crate::widgets::*;
+
+// ================= 侧栏骨架 =================
+
+impl Shell {
+    /// 侧栏三段：头（标题 + 筛选）/ 身（一组树，可滚动）/ 脚（两个动作）。
+    ///
+    /// **只画当前 `side_focus` 那一组**（用户要求：分组已经由导航轨两颗键表达，
+    /// 侧栏里再列一遍「我的 / 第三方」是同一件事说两遍）。导航轨答"我在看哪一组"，
+    /// 侧栏答"这一组里有哪些仓库"，两层各管一件事。
+    ///
+    /// 行是**平铺**的，不用 `SidebarMenu` 包一层：那层只是个 `v_flex`，
+    /// 但它会把行藏进子容器里，滚动容器的直接子元素就变成了那个菜单，
+    /// `ScrollHandle::bounds_for_item` 换算不出行号，定位滚动就废了。
+    pub(crate) fn sidebar(&self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let filter = self.filter_text(cx);
+        let mut tree = v_flex()
+            .flex_1()
+            .min_h_0()
+            .id("sidebar-tree")
+            .track_scroll(&self.tree_scroll)
+            .overflow_y_scroll()
+            .px(px(GAP))
+            .py(px(GAP_TIGHT))
+            .gap(px(GAP_DENSE));
+
+        // 索引与实际渲染顺序严格一一对应：定位滚动靠它把仓库路径换算成行号。
+        // **行号从 1 起**——第 0 行是分组标题自己（`apply_reveal` 那边同一条约定）
+        let rows: Vec<&RepoEntry> = self
+            .repos
+            .iter()
+            .filter(|r| r.is_third_party == self.side_focus.is_third())
+            .filter(|r| matches_filter(r, &self.status_of(&r.path), &filter))
+            .collect();
+        tree = tree.child(self.group_header(rows.len(), t, window, cx));
+        let mut ix = 1usize;
+        if self.group_open[self.side_focus.ix()] {
+            for r in rows {
+                tree = tree.child(self.repo_row(r, ix, t, window, cx));
+                ix += 1;
+            }
+        }
+
+        // **当前这一组**一个仓库都没有时不画树：树的容器是 flex_1，空着它会把空态
+        // 挤到下面去，让人以为"下面还有东西没加载出来"。
+        //
+        // ⚠️ 判据是**当前组为空**，不是 `self.repos.is_empty()`：侧栏只画
+        // `side_focus` 那一组，所以"第三方有 5 个仓库、我的仓库一个都没有"是
+        // 一个真实会遇到的空态。用总数判会画出一棵空树加一个折叠箭头，
+        // 界面上什么都不说——用户以为侧栏坏了。
+        if self
+            .repos
+            .iter()
+            .all(|r| r.is_third_party != self.side_focus.is_third())
+        {
+            // 另一组有没有东西决定空态给不给"换一组看看"
+            let other_has_repos = self
+                .repos
+                .iter()
+                .any(|r| r.is_third_party == self.side_focus.is_third());
+            return v_flex()
+                .w_full()
+                .h_full()
+                .min_w_0()
+                .bg(t.colors.popover)
+                .child(self.sidebar_header(t, cx))
+                .child(no_repos(self.side_focus, other_has_repos, t))
+                .child(Separator::horizontal().color(t.colors.border))
+                .child(self.sidebar_footer(t, cx));
+        }
+
+        v_flex()
+            .w_full()
+            .h_full()
+            .min_w_0()
+            .bg(t.colors.popover)
+            .child(self.sidebar_header(t, cx))
+            .child(tree)
+            .child(Separator::horizontal().color(t.colors.border))
+            .child(self.sidebar_footer(t, cx))
+    }
+
+    /// 侧栏头：标题 + 仓库数 + 筛选开关。筛选框默认收起（D8）
+    ///
+    /// 筛选框是**另起一行**的：塞进标题那一行会被 40px 的固定行高横向挤扁，
+    /// 而官方 `Input::small()` 本身就有 24px 高，挤不出能用的输入区。
+    ///
+    /// ⚠️ **计数只数当前这一组**（`self.repos.len()` 早先是总数）。
+    /// 侧栏只画 `side_focus` 那一组，标题上却报"全部 12 个"，用户数一数
+    /// 列表里只有 3 行——那一下的不信任比少写一个数字贵得多。
+    fn sidebar_header(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
+        let mine = self
+            .repos
+            .iter()
+            .filter(|r| r.is_third_party == self.side_focus.is_third())
+            .count();
+        let title = h_flex()
+            .w_full()
+            .h(px(40.0))
+            .flex_shrink_0()
+            .px(px(GAP_LG))
+            .gap(px(GAP))
+            .items_center()
+            .child(
+                div()
+                    .text_size(px(FS_SEC))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(tier3(t))
+                    .child("仓库"),
+            )
+            .child(
+                div()
+                    .text_size(px(FS_SEC))
+                    .text_color(tier4(t))
+                    .child(format!("{mine}")),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("side-filter-toggle")
+                    .icon(icon_sm(AssetIcon::ListFilter).text_color(tier3(t)))
+                    .custom(ghost_variant(cx))
+                    .selected(self.filter_open)
+                    // 与导航轨三颗切屏键**同一个**选中面（D60）：它俩是同类
+                    // —— 都是 ghost 图标按钮的选中态。官方 ghost 选中的底走
+                    // `button.active.background`，theme.json 没配、落基座兜底的
+                    // 深灰，两处一起换成 `selected_mask`。理由见 tokens.rs。
+                    .when(self.filter_open, |this| this.bg(selected_mask(t)))
+                    .with_size(Size::Small)
+                    .tooltip("筛选仓库")
+                    .accessibility_label("筛选仓库")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.filter_open = !this.filter_open;
+                        cx.notify();
+                    })),
+            );
+
+        v_flex()
+            .w_full()
+            .flex_shrink_0()
+            .child(title)
+            .when(self.filter_open, |head| {
+                // cleanable：官方自带的小叉，别自己再画一个清空按钮
+                head.child(
+                    div().w_full().px(px(GAP_LG)).pb(px(GAP_TIGHT)).child(
+                        Input::new(&self.side_filter)
+                            .prefix(icon_sm(AssetIcon::Search).text_color(tier4(t)))
+                            .cleanable(true)
+                            .small()
+                            .w_full(),
+                    ),
+                )
+            })
+    }
+
+    /// 侧栏脚：添加仓库 / 克隆仓库。两个都保留，不合并成一个带开关的对话框
+    fn sidebar_footer(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .px(px(GAP_LG))
+            .py(px(GAP_LG))
+            .gap(px(GAP))
+            .child(
+                Button::new("side-add")
+                    .flex_1()
+                    .icon(icon_sm(AssetIcon::Plus).text_color(tier3(t)))
+                    .label("添加仓库")
+                    .with_size(Size::Small)
+                    .tooltip("把本地已有目录加进来")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_add_dlg(window, cx))),
+            )
+            .child(
+                Button::new("side-clone")
+                    .flex_1()
+                    .icon(icon_sm(AssetIcon::Download).text_color(tier3(t)))
+                    .label("克隆仓库")
+                    .with_size(Size::Small)
+                    .tooltip("从远端地址克隆一个新仓库到本地")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_clone_dlg(window, cx))),
+            )
+    }
+}
+
+// ================= 分组标题 =================
+
+impl Shell {
+    /// 分组标题。**不带子项** —— 子项的展开态一旦交给 `SidebarMenuItem` 的内部
+    /// `use_keyed_state`，导航按钮与总览点行就没法从外面把某一组打开了。
+    /// 所以标题只切换 `group_open`，行由我们自己按开合态铺开。
+    ///
+    /// 标题上的名字就是 `self.side_focus`（**只画当前那一组**），没有 `group`
+    /// 参数可传——传进来就意味着"某一组"的语义还在这一层，
+    /// 而那一层已经由导航轨管了。
+    fn group_header(
+        &self,
+        n: usize,
+        t: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let group = self.side_focus;
+        let open = self.group_open[group.ix()];
+        let (label, icon) = group.label_and_icon();
+        // `suffix` 要 'static 闭包，捕不了 `&Theme`。颜色在外面取好（Hsla 是 Copy），
+        // 只把值抓进去——这是这类槽位的通用做法
+        let caret_color = tier4(t);
+        let row = SidebarMenuItem::new(format!("{label} · {n}"))
+            .icon(icon_sm(icon).text_color(tier3(t)))
+            // 分组标题不承担选中语义：只给展开/收起，不给 .active()
+            // （`SidebarMenuItem` 没有整行样式入口，只有 `label_style` 能改文字；
+            //  行高那些是官方 28px 档，不在这里另开一档）
+            .label_style(
+                gpui_kit::StyleRefinement::default()
+                    .text_size(px(FS_META))
+                    .font_weight(FontWeight::MEDIUM),
+            )
+            .suffix(move |_, _| {
+                icon_sm(AssetIcon::ChevronRight)
+                    .text_color(caret_color)
+                    .rotate(percentage(if open { 90.0 } else { 0.0 } / 360.0))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.group_open[group.ix()] = !this.group_open[group.ix()];
+                cx.notify();
+            }));
+        row.render(format!("side-group-{}", group.ix()), window, cx)
+            .into_any_element()
+    }
+}
+
+// ================= 仓库行 =================
+
+impl Shell {
+    /// 一行仓库：状态图标 / 名称 / 右侧徽标。
+    /// 三列分别落在 `SidebarMenuItem` 的 `icon` / `label` / `suffix` 三个官方槽位上
+    fn repo_row(
+        &self,
+        r: &RepoEntry,
+        ix: usize,
+        t: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let path = r.path.clone();
+        let status = self.status_of(&path);
+        let changed = self.view(&path).map(|v| v.changed).unwrap_or(0);
+        let b = bucket_of(&status);
+        let selected = self.selected.as_deref() == Some(path.as_str());
+        let me = cx.entity();
+        let third = r.is_third_party;
+        let lg = self.logs.get(&path).unwrap_or(&LOG_EMPTY);
+        // 徽标只占一个位置，优先级从高到低：正在跑 > 上次失败 > 走代理 > 分档。
+        // 分档信息并没有因此丢失——左侧那个字形已经带着同一份 `bucket_of`
+        // 的结果了（D13），而 240px 的行塞不下第二枚胶囊
+        let badge = if lg.running {
+            Badge::Spinner { color: tier3(t) }
+        } else if matches!(lg.verdict, Some((false, _))) {
+            Badge::Pill {
+                text: "失败".into(),
+                fg: t.colors.danger,
+                bg: red_bg(t),
+            }
+        } else if lg.used_proxy.is_some() {
+            Badge::Pill {
+                text: "走代理".into(),
+                fg: orange_text(t),
+                bg: orange_bg(t),
+            }
+        } else {
+            bucket_badge(&status, changed, third, t)
+        };
+
+        let item = SidebarMenuItem::new(self.title(&path))
+            .icon(icon_sm(bucket_icon(b)).text_color(dot_color(b, t)))
+            .active(selected)
+            .suffix(move |_, _| {
+                // `suffix` 是 `Fn` 不是 `FnOnce`，所以每帧重新 clone 一份再匹配。
+                // 徽标是 Clone 的小枚举，比把 &Theme 抓进闭包干净
+                match badge.clone() {
+                    Badge::None => div().into_any_element(),
+                    Badge::Pill { text, fg, bg } => pill(&text, fg, bg).into_any_element(),
+                    Badge::Spinner { color } => Spinner::new()
+                        .color(color)
+                        .with_size(Size::XSmall)
+                        .into_any_element(),
+                }
+            })
+            .on_click({
+                let me = me.clone();
+                let path = path.clone();
+                move |_, window, cx| {
+                    me.update(cx, |this, cx| {
+                        this.side_focus = if third { Group::Third } else { Group::Mine };
+                        this.reveal_repo(path.clone(), window, cx);
+                    });
+                }
+            })
+            .context_menu({
+                let me = me.clone();
+                move |menu, _, cx| repo_context_menu(menu, &path, &me, cx)
+            });
+        item.render(format!("side-repo-{ix}"), window, cx)
+            .into_any_element()
+    }
+}
+
+// ================= 右键菜单 =================
+
+/// 两类仓库各一套菜单。动词、启用态、结果必须与仓库头、⌘K 三处一致。
+///
+/// 全部走 `Entity<Shell>` 回写，不用 `cx.listener`：`context_menu` 的闭包里
+/// 拿不到 `Context<Self>`，而 `&mut Window` 也不能被 `'static` 闭包捕获。
+fn repo_context_menu(menu: PopupMenu, path: &str, me: &Entity<Shell>, cx: &mut App) -> PopupMenu {
+    let path = path.to_string();
+    let third = me
+        .read(cx)
+        .entry(&path)
+        .map(|e| e.is_third_party)
+        .unwrap_or(false);
+    let remote = net::remote_url(&path);
+    let has_remote = !remote.trim().is_empty();
+    let web_url = net::browse_url_from_remote(&remote);
+
+    let mut menu = menu
+        .item(PopupMenuItem::new("打开").on_click({
+            let me = me.clone();
+            let path = path.clone();
+            move |_, window, cx| {
+                me.update(cx, |this, cx| this.reveal_repo(path.clone(), window, cx));
+            }
+        }))
+        // 「提交并推送…」只出现在我的仓库，第三方出现即为越界。
+        // 阶段 4 时这个按钮是置灰的空壳（那时提交对话框还没做），
+        // 阶段 8 做完对话框之后忘了接回来——设计 3.6 把它记成"已接"，
+        // 实际入口是断的。这里补上，并把对话框开在**右键的那一行**上
+        .when(!third, |menu| {
+            menu.item(
+                PopupMenuItem::new("提交并推送…")
+                    .icon(Icon::new(AssetIcon::GitMerge))
+                    .on_click({
+                        let me = me.clone();
+                        let path = path.clone();
+                        move |_, window, cx| {
+                            me.update(cx, |this, cx| {
+                                this.open_commit_dlg(Some(path.clone()), window, cx)
+                            });
+                        }
+                    }),
+            )
+        })
+        .item(PopupMenuItem::separator())
+        .item(
+            PopupMenuItem::new(if third {
+                "移回我的仓库"
+            } else {
+                "移到第三方仓库"
+            })
+            .icon(Icon::new(AssetIcon::ArrowUpRight))
+            .on_click({
+                let me = me.clone();
+                let path = path.clone();
+                move |_, window, cx| {
+                    me.update(cx, |this, cx| this.set_group(&path, !third, window, cx));
+                }
+            }),
+        )
+        .item(
+            PopupMenuItem::new("打开文件夹")
+                .icon(Icon::new(AssetIcon::FolderOpen))
+                .on_click({
+                    let path = path.clone();
+                    move |_, window, cx| notify_err(os::open_folder(&path), window, cx)
+                }),
+        )
+        .item(
+            PopupMenuItem::new("在终端中打开")
+                .icon(Icon::new(AssetIcon::Terminal))
+                .on_click({
+                    let path = path.clone();
+                    move |_, window, cx| notify_err(os::open_terminal(&path), window, cx)
+                }),
+        )
+        .item(
+            PopupMenuItem::new("复制远程地址")
+                .icon(Icon::new(AssetIcon::Copy))
+                .disabled(!has_remote)
+                .on_click(move |_, window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(remote.clone()));
+                    window.push_notification("已复制远程地址", cx);
+                }),
+        );
+
+    // 「在云端打开」只对第三方有意义：我的仓库我已经在本地干活了
+    if third {
+        menu = menu.item(
+            PopupMenuItem::new("在云端打开")
+                .icon(Icon::new(AssetIcon::ExternalLink))
+                .disabled(web_url.is_none())
+                .on_click(
+                    move |_, window, cx| match web_url.as_deref().map(os::open_url) {
+                        Some(Ok(())) => {}
+                        Some(Err(e)) => window.push_notification(e, cx),
+                        None => window.push_notification("该仓库没有可识别的远端地址", cx),
+                    },
+                ),
+        );
+    }
+
+    menu.item(PopupMenuItem::separator())
+        .item(
+            PopupMenuItem::new("重命名…")
+                .icon(Icon::new(AssetIcon::Pencil))
+                .on_click({
+                    let me = me.clone();
+                    let path = path.clone();
+                    move |_, window, cx| {
+                        me.update(cx, |this, cx| {
+                            this.open_rename_dlg(path.clone(), window, cx)
+                        })
+                    }
+                }),
+        )
+        .item(
+            PopupMenuItem::new("编辑…")
+                .icon(Icon::new(AssetIcon::SquarePen))
+                .on_click({
+                    let me = me.clone();
+                    let path = path.clone();
+                    move |_, window, cx| {
+                        me.update(cx, |this, cx| this.open_edit_dlg(path.clone(), window, cx))
+                    }
+                }),
+        )
+        .item(PopupMenuItem::separator())
+        .item(
+            PopupMenuItem::new("移除")
+                .icon(Icon::new(AssetIcon::Trash))
+                .on_click({
+                    let me = me.clone();
+                    let path = path.clone();
+                    move |_, window, cx| {
+                        me.update(cx, |this, cx| this.remove_repo_undoable(&path, window, cx))
+                    }
+                }),
+        )
+}
+
+// ================= 小块 =================
+
+/// 过滤：按显示名 / 仓库名 / 分支做不区分大小写的包含匹配。
+/// 空串 = 不过滤（最常见的情况，不必走一遍字符串处理）
+///
+/// `pub(crate)`：`actions.rs::apply_reveal` 要用同一条规则算行号，
+/// 那边看不到"这一行被过滤掉了"，就会滚到一个不存在的行上
+pub(crate) fn matches_filter(r: &RepoEntry, status: &RepoStatus, q: &str) -> bool {
+    if q.is_empty() {
+        return true;
+    }
+    format!("{} {} {}", r.name, r.alias, status.branch)
+        .to_lowercase()
+        .contains(q)
+}
+
+/// 每一档的图标。**形状也带信息**，不只靠颜色区分——五档全靠色相的话，
+/// 色觉障碍下"落后"与"已分叉"会长得一模一样
+pub(crate) fn bucket_icon(b: Bucket) -> AssetIcon {
+    match b {
+        Bucket::Synced => AssetIcon::Check,
+        Bucket::Dirty => AssetIcon::CircleDot,
+        Bucket::Ahead => AssetIcon::ArrowUp,
+        Bucket::Behind => AssetIcon::ArrowDown,
+        Bucket::Forked => AssetIcon::GitMerge,
+        Bucket::Unknown => AssetIcon::Circle,
+    }
+}
+
+/// 仓库行右侧那一格。**三种形态而不是五种**——
+/// 240px 的行里只塞得下一枚胶囊，形状不同时语义才分得开：
+/// 胶囊 = 静态结论，转圈 = 正在进行，空 = 这一档不需要动手
+#[derive(Clone)]
+enum Badge {
+    None,
+    Pill { text: String, fg: Hsla, bg: Hsla },
+    Spinner { color: Hsla },
+}
+
+/// 空闲时的分档徽标。**只放"现在需要动手"的数字**：
+/// 干净的列表比满屏胶囊好读——胶囊一多，每一颗都不显眼了
+fn bucket_badge(status: &RepoStatus, changed: u32, third: bool, t: &Theme) -> Badge {
+    let (kind, fg, bg) = badge_tone(bucket_of(status), changed, third, t);
+    match kind {
+        BadgeKind::None => Badge::None,
+        BadgeKind::Behind => Badge::Pill {
+            text: if third {
+                "可更新".into()
+            } else {
+                "落后".into()
+            },
+            fg,
+            bg,
+        },
+        BadgeKind::Forked => Badge::Pill {
+            text: "已分叉".into(),
+            fg,
+            bg,
+        },
+        BadgeKind::Ahead => Badge::Pill {
+            text: format!("待推送 {}", status.ahead),
+            fg,
+            bg,
+        },
+        BadgeKind::Dirty => Badge::Pill {
+            text: format!("未提交 {changed}"),
+            fg,
+            bg,
+        },
+    }
+}
+
+/// 分档徽标落在哪一档。**全站唯一一处**写这个判定。
+///
+/// 文案由调用方拼而不是这里给：侧栏那一格只有 200px，要带数字（"待推送 3"），
+/// 总览表格的「状态」列旁边就有独立的数字列，再带一遍就是重复信息。
+/// 但"哪一档、什么颜色"必须只有一份——以前两边各写一遍映射，
+/// 结果总览写「落后 N」侧栏写「落后」，同一仓库两屏两种说法，
+/// 一眼就让人怀疑其中一屏的数据不对
+pub(crate) fn badge_tone(
+    b: Bucket,
+    changed: u32,
+    third: bool,
+    t: &Theme,
+) -> (BadgeKind, Hsla, Hsla) {
+    let tone = |kind: BadgeKind, fg: Hsla, bg: Hsla| (kind, fg, bg);
+    match b {
+        Bucket::Behind => {
+            // 「可更新」与「落后」同色，只是文案按归属分——第三方不是我的项目，
+            // 说它"落后"像在挑刺
+            let _ = third;
+            tone(BadgeKind::Behind, orange(t), orange_bg(t))
+        }
+        // 分叉是红（Q7）：徽标、状态点、同步环、分叉条四处必须同一色，
+        // 同一屏里出现"环是红的、条是橙的"会让人以为那是两件事
+        Bucket::Forked => tone(BadgeKind::Forked, t.colors.danger, red_bg(t)),
+        Bucket::Ahead => tone(BadgeKind::Ahead, t.colors.accent, blue_bg(t)),
+        // 未提交与上面几档可重叠，是独立维度，所以放在后面兜底
+        _ if changed > 0 => tone(BadgeKind::Dirty, t.colors.accent, blue_bg(t)),
+        _ => tone(BadgeKind::None, t.colors.accent, blue_bg(t)),
+    }
+}
+
+/// 分档徽标的档位。单独一个类型而不是直接给字符串：
+/// 逼调用方自己拼文案，文案密度才可能按版面调整
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum BadgeKind {
+    None,
+    Behind,
+    Forked,
+    Ahead,
+    Dirty,
+}
+
+/// **当前这一组**没有仓库时的占位。
+///
+/// 收 `group` 是因为侧栏只画 `side_focus` 那一组：空态必须说清是**哪一组**空，
+/// 否则停在「第三方仓库」而它恰好是空的时，一句"还没有仓库"会让人以为自己
+/// 刚加的仓库不见了。`other_has_repos` 决定要不要给"换一组看看"那句——
+/// 两边都空时说这句是空话，指点一个空地方不如不说
+fn no_repos(group: Group, other_has_repos: bool, t: &Theme) -> Div {
+    let (label, _) = group.label_and_icon();
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .items_center()
+        .justify_center()
+        .px(px(GAP_LG))
+        .gap(px(GAP_TIGHT))
+        .child(
+            div()
+                .text_size(px(FS_SEC))
+                .text_color(tier3(t))
+                .child(format!("{label}里还没有仓库")),
+        )
+        .child(
+            div()
+                .text_size(px(FS_META))
+                .text_color(tier4(t))
+                .child("用下面的「添加仓库」加一个"),
+        )
+        .when(other_has_repos, |col| {
+            col.child(
+                div()
+                    .text_size(px(FS_META))
+                    .text_color(tier4(t))
+                    .child("也可以从左边导航轨切到另一组"),
+            )
+        })
+}
+
+/// 失败提示统一走通知，不弹模态
+fn notify_err(r: Result<(), String>, window: &mut Window, cx: &mut App) {
+    if let Err(e) = r {
+        window.push_notification(e, cx);
+    }
+}

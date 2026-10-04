@@ -1,0 +1,905 @@
+//! 界面状态与纯逻辑：仓库视图、操作类别、对话框状态、分档口径。
+//!
+//! `bucket_of` 是全站唯一的仓库分档口径——侧栏徽标、总览、同步环、
+//! ⌘K 状态点都从这儿取。别在别处另写一套判断。
+
+// 图标只认这一套：assets 里是完整 lucide，外加品牌 Bird。
+// 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
+// 混在同一屏里一眼就能看出不一致。
+use gpui_kit::component::command::CommandState;
+use gpui_kit::component::input::InputState;
+use gpui_kit::component::list::ListState;
+use gpui_kit::component::resizable::ResizableState;
+use gpui_kit::component::table::TableState;
+use gpui_kit::component::text::TextViewState;
+use gpui_kit::component::Theme;
+use gpui_kit::{AnyWindowHandle, Entity, FocusHandle, Hsla, ScrollHandle, SharedString, Task};
+use qingbird_core::history::{CommitDetail, CommitPatch, CommitSummary};
+use qingbird_core::repos::{self, ActivityDay, ChangeEntry, LangStat};
+use qingbird_core::run_cmd::{self, Slot};
+use qingbird_core::space;
+use qingbird_core::store::{self, RepoEntry};
+use qingbird_core::types::{ForkInfo, RepoStatus};
+use std::collections::{HashMap, HashSet};
+
+use crate::history_tab::CommitDelegate;
+use crate::palette::PaletteAction;
+use crate::tokens::*;
+
+/// 一个仓库在界面上要显示的东西
+pub(crate) struct RepoView {
+    pub(crate) status: RepoStatus,
+    /// 未提交文件数（仓库头的「未提交 N 文件」）
+    pub(crate) changed: u32,
+    /// 未提交的**条目**（提交对话框的变更摘要、检视抽屉的「变更」页签）。
+    ///
+    /// 与 `changed` 同源：`changed` 就是这个数组的长度，状态扫描也只跑
+    /// 一条 `git status --porcelain`（`changed_files` 跑的是同一条命令，
+    /// 换过去等于白赚一份文件名列表，不多派生任何子进程）
+    pub(crate) changes: Vec<ChangeEntry>,
+    /// 最后一次提交的秒级时间戳，0 = 从没提交过（仓库头那一行）
+    pub(crate) last_commit_ts: u64,
+    /// 自动识别出来的四条命令：仓库没存命令时拿来预填
+    pub(crate) detected: run_cmd::CmdDetect,
+}
+
+impl RepoView {
+    pub(crate) fn blank() -> Self {
+        Self {
+            status: RepoStatus::default(),
+            changed: 0,
+            changes: Vec::new(),
+            last_commit_ts: 0,
+            detected: run_cmd::CmdDetect::default(),
+        }
+    }
+}
+
+/// 输出块里正在跑的操作类别
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Op {
+    Cmd(Slot),
+    Pull,
+    Push,
+    Check,
+    /// 备份并变基到云端；bool = 工作区脏时用户同意先暂存
+    Rebase(bool),
+    /// 硬回退到变基备份分支（界面已二次确认）
+    UndoRebase,
+    /// 提交并推送（含可能夹在中间的 `--ff-only` 拉取）
+    Commit,
+}
+
+/// 一个仓库的日志。
+///
+/// **按仓库路径存**（D7），不是单份全局：切仓库不该把上一个仓库正在跑的输出
+/// 冲掉，操作跑完回来时也不该把结果记到"当前选中"名下——用户在这期间可能
+/// 已经切到别的仓库去了。
+///
+/// `Clone` 是给「上次批量结果」那个对话框用的：它的 `content` 闭包里只有
+/// `&mut App`，拿不到 `&mut Context<Shell>`，只能读一份快照出来渲染
+#[derive(Clone, Default)]
+pub(crate) struct LogState {
+    pub(crate) running: bool,
+    /// 正在跑哪个操作（None = 没在跑）
+    pub(crate) op: Option<Op>,
+    pub(crate) lines: Vec<String>,
+    /// 命令起不来 / 非零退出时的一句话。
+    /// 与 `verdict` 分开：这是"没跑起来"，那是"跑完了但没成功"，语气不一样
+    pub(crate) error: Option<String>,
+    /// 上次跑完的结论 `(成功?, 一句话)`
+    pub(crate) verdict: Option<(bool, String)>,
+    /// 走代理用的地址；None = 直连。值得单列：代理是"连上了但绕了一圈"，
+    /// 混在成功里会让人以为一切正常，排查网络问题时也就没有线索了
+    pub(crate) used_proxy: Option<String>,
+    /// 当前阶段文案（拉取 / 检测会报阶段名）
+    pub(crate) stage: Option<String>,
+    /// 确定态百分比 0–100。**None = 不定态**：跑命令给不出可信百分比，
+    /// 造一个假的只会让人以为快好了，然后越等越焦
+    pub(crate) percent: Option<f32>,
+    /// 上次操作的秒级时间戳，0 = 本会话没跑过
+    pub(crate) ts: u64,
+}
+
+/// 没日志时读的兜底。**放在模块级而不是 `impl` 里的 `static`**：
+/// `impl` 块内不允许 `static` 项，而且模块级常量能直接取地址，
+/// 界面各处 `unwrap_or(&LOG_EMPTY)` 不会每帧造一个临时值。
+///
+/// 为什么需要它：`log()` 读的是「当前选中仓库的那份」，而选中可能为
+/// `None`、也可能这个仓库还没跑过任何操作。没有这个兜底的话，十几处
+/// 读取点都要先判有没有再取值，漏一处就是一次 panic
+pub(crate) static LOG_EMPTY: LogState = LogState {
+    running: false,
+    op: None,
+    lines: Vec::new(),
+    error: None,
+    verdict: None,
+    used_proxy: None,
+    stage: None,
+    percent: None,
+    ts: 0,
+};
+
+/// 磁盘占用卡的状态（只跟随当前选中的仓库）
+
+#[derive(Default)]
+pub(crate) struct SpaceState {
+    pub(crate) report: Option<space::SpaceReport>,
+    pub(crate) scanning: bool,
+    /// 一键清理进行中：按钮转圈、防连点
+    pub(crate) cleaning: bool,
+    /// 上次清理的结果（「已释放 1.6 GB」）
+    pub(crate) note: Option<String>,
+    pub(crate) error: Option<String>,
+
+    // ---- 目录树（2026-10-05 阶段 13）----
+    /// 树的根层。**由 `scan_repo_space` 的 `dirs` 直接喂进来**，不重新扫——
+    /// 那一层的递归体积刚算过，再走一遍等于把整个仓库重数一次
+    pub(crate) tree: Vec<TreeNode>,
+    /// 正在扫的层：行尾画一个转圈
+    pub(crate) tree_loading: HashSet<String>,
+    /// 树扫描代数：切仓库 / 重建根层时作废旧结果。
+    /// 这里**不存任务句柄**：树是"多点一下就多扫一层"，用代数守卫挡过期
+    /// 结果比互相取消好——被取消的那一层下次点还会再要一次
+    pub(crate) tree_seq: u64,
+}
+
+/// 目录树的一个节点
+///
+/// **为什么不用官方 `component::tree`**（2026-10-05 查证，理由写在这里以免
+/// 下一个人再试一遍）：`TreeItem::is_folder()` 是 `!children.is_empty()`
+/// （`gpui-base/src/tree.rs:132-134`），而**懒加载的文件夹在扫之前 children
+/// 必然是空的** → 基座 `toggle_expand` 第一行 `if !entry.is_folder() { return }`
+/// 就把那行挡掉，那个文件夹永远展不开；而且它没有"展开时去加载"的钩子。
+/// 绕过去只能给每个文件夹塞一个假子项，那东西会在扫回来之前闪一下。
+/// 代价是自己画行，少了基座给的键盘走位与虚拟滚动——这一页是**只读浏览**，
+/// 行数由"用户展开了多少层"决定（几十到几百），`v_flex` 扛得住
+pub(crate) struct TreeNode {
+    pub entry: space::DirEntry,
+    /// `None` = 这一层还没扫过；`Some(vec![])` = 扫过，确实是空的
+    pub children: Option<Vec<TreeNode>>,
+    pub expanded: bool,
+}
+
+impl TreeNode {
+    pub(crate) fn new(entry: space::DirEntry) -> Self {
+        Self {
+            entry,
+            children: None,
+            expanded: false,
+        }
+    }
+
+    /// 画不画展开箭头：**是文件夹且非空**。`child_count` 是 core 数出来的一层子项数
+    pub(crate) fn foldable(&self) -> bool {
+        self.entry.is_dir && self.entry.child_count > 0
+    }
+}
+
+/// 档案页（Screen 1）的本地数据：语言统计 / 活跃度 / 最近提交 / README。
+/// 全部是几条本地 git 命令 + 读一个文件，放后台线程扫，界面先画占位。
+#[derive(Default)]
+pub(crate) struct ProfileState {
+    pub(crate) langs: Vec<LangStat>,
+    /// 近 30 天有提交的日子（后端不补空白日）
+    pub(crate) activity: Vec<ActivityDay>,
+    /// README **原文**，给「说明」页签整篇渲染。
+    ///
+    /// 存 `SharedString` 而不是 `String`：官方 `TextView::markdown` 收的是
+    /// `impl Into<SharedString>`，存 `String` 就得在 render 里克隆一份——
+    /// 一份上限 12 万字的 README 每帧克隆一次，光这一处就能吃掉一帧的预算
+    pub(crate) readme_text: Option<SharedString>,
+    /// 实际读到的是哪个文件（`README.md` 之类）。空 = 没有 README
+    pub(crate) readme_file: Option<String>,
+    /// 「另一个语言」那一份说明文档。`None` = 只有一份，界面上那颗切换键不出现。
+    ///
+    /// 判据是 **`readme_file` 这一份**而不是"主文档"——用户切到英文之后
+    /// 再点一次要切回来，靠 core 的 `readme_alt(路径, 当前文件)` 重算
+    pub(crate) readme_alt: Option<qingbird_core::repos::ReadmeAlt>,
+    /// 换文档失败时的一句话（`读不到仓库根目录下的 README_en.md`）。
+    /// 空 = 没事
+    ///
+    /// **为什么落状态而不是弹气泡**：切文档走后台任务（`cx.spawn` 的闭包
+    /// 必须 `'static`，抓不到 `&mut Window`），弹通知那条路在那儿是断的。
+    /// 而"点了没反应"比报错更让人以为功能坏了，所以这句话要摆在表头上
+    pub(crate) readme_error: Option<String>,
+    pub(crate) scanning: bool,
+}
+
+/// 「历史」页签的状态。
+///
+/// **不进 `RepoView`**：历史只在打开那个页签时才扫，一次 `git log` 要派生
+/// 一个子进程；放进每轮都跑的状态扫描里等于让所有仓库在后台无条件付这份代价。
+/// 按仓库路径记一份，切回来时如果路径对得上就直接显示上一次的结果
+#[derive(Default)]
+pub(crate) struct HistoryState {
+    /// 这份数据是哪个仓库的
+    pub(crate) path: String,
+    pub(crate) commits: Vec<CommitSummary>,
+    pub(crate) scanning: bool,
+    /// 正在看的提交（None = Sheet 关着）
+    pub(crate) open: Option<CommitDetail>,
+    /// 正在看的某个文件的 patch。`Some(("", _))` = 刚点开提交还没点文件
+    pub(crate) patch: Option<(String, CommitPatch)>,
+    /// Sheet 里的加载中（文件列表 / patch 各自一次）
+    pub(crate) loading: bool,
+    pub(crate) error: Option<String>,
+    /// 扫描代数：过期结果不许覆盖新结果
+    pub(crate) seq: u64,
+    pub(crate) task: Option<Task<()>>,
+}
+
+/// 总览表格的一行。**扁平化成值类型**而不是存 `(&RepoEntry, &RepoView)`：
+/// 委托是 `'static` 的，拿不到 `Shell` 的借用，而引用会逼着整张表在
+/// 每次 render 里重新构造一遍委托
+#[derive(Clone)]
+pub(crate) struct OvRow {
+    pub(crate) path: String,
+    pub(crate) name: String,
+    pub(crate) third: bool,
+    pub(crate) branch: String,
+    pub(crate) bucket: Bucket,
+    /// 状态文案（已同步 / 可更新 / 已分叉 / 待推送 / 未提交 / 待扫描）
+    pub(crate) status: String,
+    pub(crate) behind: u32,
+    pub(crate) ahead: u32,
+    pub(crate) changed: u32,
+}
+
+/// 导航轨指向的页面
+/// **只有两态**（D2）：第 2、3 个导航按钮的语义是"驱动侧栏"而不是"切到第三种页面"，
+/// 「当前看哪一组」是侧栏的焦点态 `side_focus`，不往 `Page` 上加变体。
+/// 给"第三方仓库"开第三个 `Page` 会让总览/仓库两屏的判据分裂成两套。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Page {
+    /// 仓库工作区（含两类仓库，按归属裁剪内容）
+    Repos,
+    /// 总览：只有统计，没有"当前仓库"这个对象
+    Overview,
+}
+
+/// 侧栏的仓库分组。导航轨第 2、3 个按钮与侧栏两个分组标题共用这套口径。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Group {
+    /// 我的仓库
+    Mine,
+    /// 第三方仓库
+    Third,
+}
+
+impl Group {
+    pub(crate) fn is_third(self) -> bool {
+        matches!(self, Group::Third)
+    }
+
+    /// 在 `Shell::group_open` 里的下标
+    pub(crate) fn ix(self) -> usize {
+        match self {
+            Group::Mine => 0,
+            Group::Third => 1,
+        }
+    }
+
+    /// 这一组在界面上叫什么、配哪个图标。
+    ///
+    /// **只有侧栏组标题一处用**（导航轨那些键的 `label` 是各自的字面量，
+    /// 见 `shell.rs::nav_rail`）。侧栏只画 `side_focus` 那一组，所以这里
+    /// 取的是"当前这一组"的名字——没有"某一组"这个入参。
+    pub(crate) fn label_and_icon(self) -> (&'static str, gpui_kit::assets::IconName) {
+        use gpui_kit::assets::IconName as AssetIcon;
+        match self {
+            Group::Mine => ("我的仓库", AssetIcon::GitBranch),
+            Group::Third => ("第三方仓库", AssetIcon::Users),
+        }
+    }
+}
+
+/// 导航轨三个按钮点下去各自意味着什么。
+/// 前两个按钮的差别不是"切到哪一屏"，而是"侧栏看哪一组"（D2）。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Nav {
+    Overview,
+    Group(Group),
+}
+
+pub(crate) struct Shell {
+    /// 窗口句柄：异步跑完（初始化仓库等）要回来关弹窗
+    pub(crate) win: AnyWindowHandle,
+    /// **壳层根节点自己的焦点句柄。**
+    ///
+    /// 快捷键监听器挂在根 `v_flex` 上，而 Action 派发走的是
+    /// "焦点节点 → 逐级往上冒泡"这条路（`Window::focus_node_id_in_rendered_frame`
+    /// + `dispatch_path`）。**一个焦点都没有时**，派发落到 dispatch tree 的
+    /// **根节点**（`DispatchNodeId(0)`，是 gpui-kit 包的那层 `Root`），
+    /// 路径就只剩它自己——壳层的监听器在更深一层，一次都收不到。
+    /// 而"刚启动、用户还没点过任何东西"正是最需要按 `Ctrl K` 的时刻。
+    ///
+    /// 所以启动时把焦点落在根节点上：之后无论焦点在壳层里的哪个控件
+    /// （冒泡会一路走到根），还是哪个都没聚焦（根节点自己就是派发终点），
+    /// 监听器都收得到。对话框是根节点之外的兄弟，`Esc` 仍然先被它吃掉
+    /// （见路线表 D33），那是对的。
+    pub(crate) focus: FocusHandle,
+    pub(crate) page: Page,
+    /// 侧栏当前聚焦的分组。导航轨第 2、3 个按钮点它，第 4 阶段再补展开与定位。
+    pub(crate) side_focus: Group,
+    /// 侧栏是否折叠。**这是用户自己的选择**，进总览页不改它
+    /// （总览页没有侧栏是"那屏没有侧栏"，不是"用户把侧栏折了"，
+    ///  两者混在一起会让用户下次回仓库页发现侧栏不见了）。
+    /// 阶段 3 起宽度与折叠态都落盘，见 core 的 `store::set_sidebar_layout`。
+    pub(crate) sidebar_collapsed: bool,
+    /// 侧栏当前宽度（px，已夹在 200–360）。拖动结束后由 `on_resize` 写回这里，
+    /// 折叠再展开时恢复的就是它。
+    pub(crate) sidebar_w: f32,
+    /// 「侧栏 / 主区」这条分隔的运行时状态。宽度、拖拽命中区、把手外观都在这里，
+    /// 不要自己再存一份宽度——两份宽度必然有一帧对不上
+    pub(crate) split: Entity<ResizableState>,
+    /// 检视抽屉是否展开（仅仓库页有）
+    pub(crate) inspector_open: bool,
+    /// 检视抽屉当前宽度（px，已夹在 `INSPECTOR_MIN_W..INSPECTOR_MAX_W`）。
+    /// 拖完由 `on_resize` 写回，收起再展开恢复的就是它
+    pub(crate) inspector_w: f32,
+    /// 「主区 / 检视抽屉」这条分隔的运行时状态。**与 `split` 是两个独立分组**：
+    /// 侧栏那组只有仓库页有、且总览页整组不挂，混进同一组会让面板下标
+    /// 随页面变，下标与列的对应关系就不再固定
+    pub(crate) insp_split: Entity<ResizableState>,
+    /// 仓库头地址区刚复制过的是哪一条（`"local"` / `"remote"` / `None`）。
+    ///
+    /// **不为 0 的原因**：复制成功要有个看得见的反馈，而反馈不能是
+    /// `push_notification` 气泡——那正是这一版要取消的东西（用户要求）。
+    /// 按钮自己在复制后短暂换成对号，这一份状态就是那个"短暂"的计时依据
+    pub(crate) copied: Option<&'static str>,
+    /// 「复制」反馈要翻回去的时刻（秒级时间戳）。`copied` 是"现在是复制态"，
+    /// 这一份是"什么时候变回去"——两件事分开存，才不用每帧自己算 elapsed
+    pub(crate) copied_until: u64,
+    /// 地址区当前被鼠标悬停的是哪一行（`"local"` / `"remote"` / `None`）。
+    ///
+    /// **为什么不能靠 gpui 的 `:hover`**：gpui 没有 CSS 那样的伪类，悬停只能靠
+    /// `on_hover` 回调（`div.rs:675`）把状态写回来。而那个闭包是 `'static`、
+    /// 捕不了 `&self`，所以显隐判定只能放在 `Shell` 上。
+    /// 复制键用 `when(hovered, ..)` **真不挂进树**，不是 `opacity(0)`——
+    /// 透明元素照样能点到，那会变成"看不见但能按"的一颗键
+    pub(crate) addr_hover: Option<&'static str>,
+    pub(crate) repos: Vec<RepoEntry>,
+    pub(crate) views: HashMap<String, RepoView>,
+    pub(crate) selected: Option<String>,
+    /// 侧栏过滤框（官方 Input）。过滤规则见 `sidebar.rs::matches_filter`
+    pub(crate) side_filter: Entity<InputState>,
+    /// 过滤框是否展开（D8：默认收起，不常年占侧栏里 32px 高度）
+    pub(crate) filter_open: bool,
+    /// 两个分组各自的展开态：`[我的, 第三方]`。
+    ///
+    /// **不能**用 `SidebarMenuItem` 的子菜单开合：那玩意把开合态存在
+    /// `window.use_keyed_state` 里，外部拿不到，而导航按钮与总览点行
+    /// 都要从外面把某一组打开。所以分组标题不带子项，开合由这里管。
+    pub(crate) group_open: [bool; 2],
+    /// 仓库树的滚动句柄。定位某一行时用 `bounds_for_item` 把它滚进视野
+    pub(crate) tree_scroll: ScrollHandle,
+    // ---------- 「说明」页签 ----------
+    //
+    /// 正文的 `TextViewState`。**自己建而不用 `TextView::markdown(id, text)`
+    /// 那个便捷构造**：README 里的 `#锚点` 链接要跳到对应标题，
+    /// 那条路是 `TextViewState::reveal_range(..)`，只在 state 上有，
+    /// 便捷构造把 state 藏在元素里就够不着了。
+    ///
+    /// 滚动**不用**自己管：`.scrollable(true)` 的 TextView 内部是一个
+    /// `gpui::list`，基座文档明写「`gpui::list` 自己会滚到那一行」
+    pub(crate) readme_state: Entity<TextViewState>,
+    /// 切文档那一次后台读文件的任务句柄。
+    ///
+    /// ⚠️ **`Task` 掉了任务就没了**（gpui 的 `Task` 是取消令牌，drop 即取消），
+    /// 所以 `cx.spawn(..)` 的返回值必须存住。重开一次就先把它换成新的——
+    /// 旧句柄在这里析构，顺带取消上一轮还没回来的那次读
+    pub(crate) readme_task: Option<Task<()>>,
+    /// 待定位的仓库路径：设上之后下一帧滚到那一行并清空。
+    /// 一次性的，别留着当"当前关注行"用
+    pub(crate) reveal: Option<String>,
+    /// 克隆成功后的待定位路径。**与 `reveal` 分开**：`reveal` 是
+    /// "滚到那一行"（`apply_reveal` 消费），这个是"完整走一遍
+    /// `reveal_repo`"（切页 + 展开侧栏 + 选中 + 扫描）。
+    /// 两者都只能在下一次 `render` 里兑现——后台任务里既没有
+    /// `&mut Window`，也不能重入 `Shell::update`
+    pub(crate) pending_reveal: Option<String>,
+    pub(crate) scanning: bool,
+    /// 上次状态扫描完成的秒级时间戳，0 = 本会话还没扫完过。
+    /// 状态条展示"上次扫描 …"，点它重扫。
+    pub(crate) last_scan_ts: u64,
+    /// 状态扫描的任务句柄：存着才能在下一次扫描时丢掉上一次
+    pub(crate) scan: Option<Task<()>>,
+    /// 扫描代数：过期结果不许覆盖新结果
+    pub(crate) seq: u64,
+    /// 每个仓库一份的日志（D7）。键是仓库路径，**别再存第二份全局的**——
+    /// 那样后台任务回来只能写到"当前选中"名下，切个仓库就记错地方了
+    pub(crate) logs: HashMap<String, LogState>,
+    /// 详情页当前页签（概览 / 说明 / 历史 / 空间 / 变更）。
+    /// 跟着仓库走还是全局？**全局**：切页签不是切仓库，用户的注意力
+    /// 应该在"看同一个仓库的另一个角度"上；跟着仓库走的话每换一个仓库
+    /// 都要重新点回「概览」，多仓库用户会疯
+    pub(crate) detail_tab: usize,
+    pub(crate) space: SpaceState,
+    /// 磁盘扫描的代数：切仓库 / 重扫时作废旧结果
+    pub(crate) space_seq: u64,
+    pub(crate) space_task: Option<Task<()>>,
+    pub(crate) profile: ProfileState,
+    pub(crate) profile_seq: u64,
+    pub(crate) profile_task: Option<Task<()>>,
+    /// 「历史」页签的数据。只存一份在这里，页签与检视抽屉都从这儿读
+    pub(crate) history: HistoryState,
+    /// 提交列表（官方 `List`）。委托只带一个回指 `Shell` 的 Entity，
+    /// 条数与内容每帧从 `Shell::history` 取——和总览表格同一个套路
+    pub(crate) history_table: Entity<ListState<CommitDelegate>>,
+    /// 总览页勾选的仓库路径 —— **阶段 6 已删**。
+    /// 批量同步改由 ⌘K 承载（阶段 11），复选框那一套连同它的选中状态一起消失
+    pub(crate) ov_table: Entity<TableState<crate::overview::OvDelegate>>,
+    /// 总览页的仓库行快照。`ov_table` 的委托读它，
+    /// 免得委托里存第二份（两份必然有一帧对不上）
+    pub(crate) ov_rows: Vec<OvRow>,
+    /// 全仓库合并的近 14 天提交数（后端只给有提交的日子）
+    pub(crate) ov_activity: Vec<ActivityDay>,
+    /// 活跃度扫描的代数：过期结果不许覆盖新结果
+    pub(crate) ov_seq: u64,
+    pub(crate) ov_task: Option<Task<()>>,
+    /// 「本会话还没为总览页扫过活跃度」。
+    ///
+    /// 扫描挂在 `Shell::go(Nav::Overview)` 上，但**冷启动就停在总览页**
+    /// （`new()` 里 `page: Page::Overview`），没有那次点击就永远不扫——
+    /// 画出来是一排 0 高度的柱子，读起来像"近两周没人提交"（2026-10-03 实机首轮）。
+    /// 一次性标记由 `render` 消费，点导航轨回来那条路仍走 `go`，两条路不重复扫
+    pub(crate) ov_need_scan: bool,
+    /// 批量同步的进度与结论；None = 本会话还没跑过批量。
+    /// 入口是 ⌘K 的三条固定命令（Q3）。汇总落在 `app_log` 而不是某一个仓库
+    pub(crate) batch: Option<BatchRun>,
+    /// 应用级日志。**只有跨仓库的批次往这里写**——按仓库存的那份在 `logs`，
+    /// 一条都不该混进这个槽
+    pub(crate) app_log: LogState,
+    /// 添加 / 编辑仓库弹窗；None = 弹窗未打开
+    pub(crate) dlg: Option<RepoDialog>,
+    /// 当前选中仓库的分叉信息（ahead>0 且 behind>0 时由状态扫描顺手算出）
+    pub(crate) fork: Option<ForkInfo>,
+    /// 刚做完变基的备份分支名：有这个值界面才提供「撤销变基」，切仓库即失效
+    pub(crate) fork_backup: Option<String>,
+    /// 分叉卡「只看差异」是否展开
+    pub(crate) fork_diff: bool,
+    /// 「撤销变基」处于二次确认状态（会丢弃变基后的新提交，必须确认）
+    pub(crate) fork_confirm: bool,
+    /// 提交并推送对话框；None = 未打开
+    pub(crate) commit_dlg: Option<CommitDialog>,
+    /// 「一键清理构建缓存」的确认对话框；None = 未打开。
+    /// **必须先过这个框**——`target` 删掉意味着整个工程要重新编译几十分钟，
+    /// 这种代价不给一次「你确定」是不能接受的
+    pub(crate) clean_dlg: Option<CleanDialog>,
+    /// 克隆对话框；None = 未打开。**与添加/编辑仓库那个 `dlg` 分开**：
+    /// 那个是"把已经在磁盘上的目录登记进来"，克隆是"先从网络取回来"，
+    /// 两者字段几乎不重叠，挤在一个结构体里只会让两处各自判有没有
+    pub(crate) clone_dlg: Option<CloneDialog>,
+    /// 命令编辑对话框；None = 未打开
+    pub(crate) cmd_dlg: Option<CmdDialog>,
+    /// 设置对话框；None = 未打开。导航轨那颗齿轮与 ⌘K「设置」共用这一个入口
+    pub(crate) settings_dlg: Option<SettingsDialog>,
+    /// 「同步设置」页签正在编辑的档位与开关。**存草稿而不是直接改配置**：
+    /// 这一页有三项，挨个点一下存一次会让"取消"变成假的——用户撤销不了
+    pub(crate) sync_cfg: SyncCfg,
+    /// 命令面板的官方 `CommandState`（查询词、焦点、高亮项都在它身上）。
+    /// **整个应用只建这一个 Entity**：官方 `Command` 每次渲染都会把条目
+    /// 重新装进状态，重建 Entity 等于每帧丢一次查询与选中位置
+    pub(crate) palette: Entity<CommandState>,
+    /// 面板里每一条对应的动作，**下标与 `CommandGroup` 一一对应**。
+    ///
+    /// 官方的 `CommandItem::action` 要一个 `Box<dyn Action>`，而本 crate 的
+    /// Action 全是 `no_json` 的 unit struct（带 payload 的 Action 要
+    /// `serde::Deserialize` + `schemars::JsonSchema`，这条链对这个 GUI 库不划算）。
+    /// 于是不走 Action，改成"渲染时把清单存下来、回车时按下标取"——
+    /// 这也是官方 `on_confirm` 给 `IndexPath` 的用意
+    pub(crate) palette_actions: Vec<Vec<PaletteAction>>,
+    /// 面板是否已打开。连按 `Ctrl K` 不该叠出两层对话框
+    pub(crate) palette_open: bool,
+}
+
+/// 「一键清理构建缓存」确认框的状态
+///
+/// 打开那一刻把要删的目录**逐项快照**下来（名字 + 各自的体积）。
+/// 不存快照而在对话框里读 `report`：对话框开着的时候后台扫描可能正好回来
+/// 一份新的 `report`，那几项就已经不是用户看到的那几项了
+pub(crate) struct CleanDialog {
+    pub(crate) path: String,
+    /// `(目录名, 字节数)`，按体积从大到小——先告诉用户最贵的那项
+    pub(crate) items: Vec<(String, u64)>,
+}
+
+/// 提交并推送对话框的状态
+pub(crate) struct CommitDialog {    pub(crate) path: String,
+    /// 提交信息输入框。**打开时已预填上次提交标题**（`InputState::set_value`）
+    pub(crate) message: Entity<InputState>,
+    /// ☐ 提交后拉取
+    pub(crate) pull_first: bool,
+    /// 打开那一刻的变更摘要。存快照而不是每帧重扫：
+    /// 对话框开着的时候 git 状态不会自己变，重扫只会让列表闪
+    pub(crate) changes: Vec<ChangeEntry>,
+    /// 正在提交（按钮转圈、防连点）
+    pub(crate) running: bool,
+    pub(crate) error: Option<String>,
+}
+
+/// 命令编辑对话框的状态。
+///
+/// 输入框用**一张标签表 + 一个平行数组**配对（`CMD_FIELDS`），
+/// 不写十个具名字段——具名的话「读出来 → 传给 `set_repo_cmds` /
+/// `set_pinned_cmds`」那段要写十遍，漏一处的后果是某个槽位的命令
+/// 悄悄存到别的槽位上
+pub(crate) struct CmdDialog {
+    pub(crate) path: String,
+    /// 长度与 `CMD_FIELDS` 一致
+    pub(crate) inputs: Vec<Entity<InputState>>,
+    pub(crate) error: Option<String>,
+}
+
+/// 命令编辑对话框的字段表。**下标即 `CmdDialog::inputs` 的下标**，
+/// 前四个是固定槽位，后六个是三个钉住命令的「文案 / 命令」成对字段。
+///
+/// 做成表而不是具名字段，是为了"读出来 → 交给 `set_repo_cmds` /
+/// `set_pinned_cmds`"那段只写一遍：七个槽位各写一次下标推导的话，
+/// 少写一个就意味着某个槽位的命令被存进了别的槽位
+pub(crate) const CMD_FIELDS: [&str; 10] = [
+    "测试",
+    "构建",
+    "开发",
+    "安装依赖",
+    "钉住 1 文案",
+    "钉住 1 命令",
+    "钉住 2 文案",
+    "钉住 2 命令",
+    "钉住 3 文案",
+    "钉住 3 命令",
+];
+
+/// 设置对话框的状态。
+///
+/// **六个输入框的 Entity 存在这里而不是每帧重建**——重建会让用户每敲一个字
+/// 就丢一次焦点。系统通知那个开关不占 Entity：它即时落盘，不参与「保存」
+pub(crate) struct SettingsDialog {
+    pub(crate) git_name: Entity<InputState>,
+    pub(crate) git_email: Entity<InputState>,
+    pub(crate) github_token: Entity<InputState>,
+    pub(crate) gitee_token: Entity<InputState>,
+    pub(crate) ssh_key: Entity<InputState>,
+    pub(crate) proxy: Entity<InputState>,
+    pub(crate) notify: bool,
+    /// 「检测代理」在跑（按钮转圈、防连点）
+    pub(crate) probing: bool,
+    /// 探测结果的一句话
+    pub(crate) probe_note: Option<String>,
+    pub(crate) error: Option<String>,
+}
+
+/// 「同步设置」页签的草稿。
+///
+/// 编辑期间改动只落在这份草稿上，按「保存」才写进配置——这一页三项会互相影响
+/// （档位一变，间隔与时间点谁生效就变了），逐项存会留下半套配置
+pub(crate) struct SyncCfg {
+    /// 档位下标：`0` = 不定时，`1..=5` = 每 N 分钟，`6` = 每天定时
+    pub(crate) mode: usize,
+    /// 检测到云端更新后自动拉取
+    pub(crate) auto_pull: bool,
+    /// 「每天几点」那个输入框。**Entity 存在草稿里而不是每帧重建**——
+    /// 重建会让用户每敲一个字就丢一次焦点
+    pub(crate) daily_input: Entity<InputState>,
+    /// 保存失败的一句话
+    pub(crate) error: Option<String>,
+}
+
+/// 定时同步的间隔档位（分钟）。与 core 的 `AUTO_SYNC_MINS_RANGE` 同一条下限：
+/// 界面能选的最小值必须正好是 core 夹出来的下限，不然用户选了 3 分钟、
+/// 存下去被夹成 5，下次打开界面显示 5，他会以为是自己记错了
+pub(crate) const SYNC_MINS_PRESETS: [u32; 5] = [5, 15, 30, 60, 180];
+
+impl SyncCfg {
+    /// 档位下标：`0` = 不定时，`1..=5` = 每 N 分钟，`6` = 每天定时。
+    /// 固定成这 7 档而不是动态列表，是因为"当前选中第几档"要能从配置反推出来
+    pub(crate) const OFF: usize = 0;
+    pub(crate) const DAILY: usize = SYNC_MINS_PRESETS.len() + 1;
+
+    /// 当前草稿翻译成 core 的档位。**存盘与显示走同一个函数**，
+    /// 免得"界面上选的是每天 09:00、存下去成了间隔模式"
+    pub(crate) fn to_auto_sync(&self, daily: &str) -> store::AutoSync {
+        match self.mode {
+            Self::DAILY => store::AutoSync::Daily(daily.to_string()),
+            Self::OFF => store::AutoSync::Off,
+            i => store::AutoSync::Every(SYNC_MINS_PRESETS[i - 1]),
+        }
+    }
+
+    /// 每天定时那一档填的时间合不合法。合法才让保存按钮可点
+    pub(crate) fn daily_ok(&self, daily: &str) -> bool {
+        self.mode != Self::DAILY || store::parse_hhmm(daily).is_some()
+    }
+}
+
+impl Shell {
+    /// 当前选中仓库的日志（只读）。没有记录时回落到 `LogState::EMPTY`，
+    /// 这样界面各处不必先判有没有再取
+    pub(crate) fn log(&self) -> &LogState {
+        match self.selected.as_deref() {
+            Some(p) => self.logs.get(p).unwrap_or(&LOG_EMPTY),
+            None => &LOG_EMPTY,
+        }
+    }
+
+    /// 某个仓库的日志（可写），没有就建一条空的。
+    ///
+    /// **写入一律走这个，别用 `log()`**。后台线程回来时用户可能已经切到别的
+    /// 仓库去了，`log()` 会把结果写进别人的日志里
+    pub(crate) fn log_of(&mut self, path: &str) -> &mut LogState {
+        self.logs.entry(path.to_string()).or_default()
+    }
+
+    /// 某分组里的第一个仓库路径。导航轨第 2、3 个按钮用它落选中项。
+    pub(crate) fn first_in_group(&self, group: Group) -> Option<String> {
+        self.repos
+            .iter()
+            .find(|r| r.is_third_party == group.is_third())
+            .map(|r| r.path.clone())
+    }
+
+    /// 当前选中的仓库是不是属于这一组。分组内点行不改变焦点，反之亦然。
+    pub(crate) fn selected_in_group(&self, group: Group) -> bool {
+        match self.selected.as_deref().and_then(|p| self.entry(p)) {
+            Some(e) => e.is_third_party == group.is_third(),
+            None => false,
+        }
+    }
+}
+
+/// 添加 / 编辑仓库弹窗的状态。
+/// 输入框的 Entity 在打开弹窗时重建（初值靠 placeholder 表达，不预填——
+/// 预填要走 `InputState::set_value`，那需要 window，弹窗入口处没有）。
+pub(crate) struct RepoDialog {
+    /// None = 添加模式；Some(path) = 编辑该仓库
+    pub(crate) editing: Option<String>,
+    pub(crate) path_input: Entity<InputState>,
+    pub(crate) name_input: Entity<InputState>,
+    /// 归属：第三方仓库（false = 我的）
+    pub(crate) third: bool,
+    pub(crate) error: Option<String>,
+    /// 非空 = 初始化向导：填的路径还不是 git 仓库，转这里引导 git init
+    pub(crate) init: Option<InitState>,
+}
+
+/// 克隆对话框的状态。
+///
+/// **输入框的 Entity 存在这里而不是每帧重建**——重建会让用户每敲一个字
+/// 就丢一次焦点。
+pub(crate) struct CloneDialog {
+    /// 远端地址
+    pub(crate) url: Entity<InputState>,
+    /// 目标**父目录**（仓库会建在它下面）
+    pub(crate) parent: Entity<InputState>,
+    /// 正在克隆（按钮转圈、防连点）
+    pub(crate) running: bool,
+    /// 当前阶段词（"接收对象" / "正在取消…" …）
+    pub(crate) stage: String,
+    /// 确定态百分比 0–100。**None = 不定态**，界面走官方的不定态条
+    pub(crate) percent: Option<f32>,
+    /// 实时输出（只留文字变了的那些行）
+    pub(crate) output: Vec<String>,
+    /// 失败的一句中文结论 + git 原始 stderr
+    pub(crate) error: Option<String>,
+}
+
+/// 初始化向导的状态：顶层目录清单 + 勾选的排除项
+#[derive(Clone)]
+pub(crate) struct InitState {
+    pub(crate) path: String,
+    pub(crate) items: Vec<repos::DirItem>,
+    pub(crate) excludes: std::collections::HashSet<String>,
+    pub(crate) working: bool,
+}
+
+/// 初始化时默认勾选的排除项：构建产物 / 依赖 / IDE 目录。
+/// 与旧版同一份清单——用户大概率不想把这些提交进去。
+pub(crate) const INIT_EXCLUDE_HINTS: &[&str] = &[
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    "target",
+    ".idea",
+    ".vs",
+    "vendor",
+    "__pycache__",
+    ".gradle",
+    "bin",
+    "obj",
+    "coverage",
+    ".next",
+    ".nuxt",
+    "venv",
+];
+
+/// 批量同步的三条固定命令（Q3，2026-10-03 用户拍板）。
+///
+/// 形态是**固定三条 + 按分档自动筛**，不是"在列表里勾选再跑"：
+/// 判断依据（谁落后、谁待推送）在状态扫描里已经算好了，界面上再摆一套
+/// 复选框等于把同一件事做两遍，而复选框那一套在阶段 6 已经从总览页删掉了。
+/// 仓库是零散的，一口气列出来让人挑反而更容易挑错
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BatchKind {
+    Pull,
+    Push,
+    Check,
+}
+
+impl BatchKind {
+    /// 「批量拉取」这种句式，用在状态条与汇总里
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            BatchKind::Pull => "批量拉取",
+            BatchKind::Push => "批量推送",
+            BatchKind::Check => "批量检测",
+        }
+    }
+
+    /// 「拉取全部」这种句式，用在 ⌘K 那一行上
+    pub(crate) fn verb(self) -> &'static str {
+        match self {
+            BatchKind::Pull => "拉取全部",
+            BatchKind::Push => "推送全部",
+            BatchKind::Check => "检测全部",
+        }
+    }
+
+    /// 这个仓库要不要进这一批。**纯读已扫到的状态，不新增任何 git 调用**
+    pub(crate) fn wants(self, third: bool, s: &RepoStatus) -> bool {
+        match self {
+            // behind > 0 才值得拉。分叉的仓库 behind 也 > 0，而 `--ff-only`
+            // 拉不下来——它会失败并在日志里说清该走变基向导，这比在这里
+            // 悄悄把它滤掉更有用（用户至少知道自己那个仓库有问题）
+            BatchKind::Pull => s.behind > 0,
+            // 推送会改**别人**的仓库：第三方一律不进这条队列。
+            // 这条是设计 3.5 的硬边界，批量层不能因为"方便"就绕过
+            BatchKind::Push => !third && s.ahead > 0,
+            // 检测不改任何东西，全部都跑
+            BatchKind::Check => true,
+        }
+    }
+
+    /// 这一批在搜索框里能命中哪些词
+    pub(crate) fn keywords(self) -> &'static [&'static str] {
+        match self {
+            BatchKind::Pull => &["拉取", "pull", "落后", "behind", "更新", "同步"],
+            BatchKind::Push => &["推送", "push", "待推送", "ahead", "上传", "同步"],
+            BatchKind::Check => &["检测", "check", "刷新", "扫描", "状态"],
+        }
+    }
+}
+
+/// 批量同步的进度与结论。入口在 ⌘K（Q3），**界面上的复选框与批量条在阶段 6 已删**。
+///
+/// 汇总写进 `Shell::app_log`（全局槽）而不是某个仓库的日志：这一批横跨多个
+/// 仓库，记到"当前选中"名下会让人以为只动了一个
+pub(crate) struct BatchRun {
+    pub(crate) kind: BatchKind,
+    /// 队列里的仓库路径，顺序即执行顺序
+    pub(crate) paths: Vec<String>,
+    pub(crate) done: usize,
+    pub(crate) ok: usize,
+    /// 拉取时脏工作区跳过的个数（推送与检测没有这条路，恒 0）
+    pub(crate) skipped: usize,
+    pub(crate) failed: usize,
+    pub(crate) running: bool,
+    /// 跑完（或失败）的一句话结论，状态条展示
+    pub(crate) note: Option<String>,
+}
+
+/// 档案页迷你柱图的天数窗口。设计稿标「近 30 天活跃度」；
+/// 与旧检视抽屉的 14 天不是一回事，各用各的参数。
+pub(crate) const PROFILE_ACTIVITY_DAYS: u32 = 30;
+
+/// 仓库在侧栏的状态口径：分叉 > 落后 > 领先 > 脏 > 已同步。
+/// 与后端 `ForkInfo` 一致（ahead>0 && behind>0 就是分叉），不另立标准。
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Bucket {
+    Synced,
+    Dirty,
+    Ahead,
+    Behind,
+    Forked,
+    Unknown,
+}
+
+pub(crate) fn bucket_of(s: &RepoStatus) -> Bucket {
+    if !s.is_repo {
+        return Bucket::Unknown;
+    }
+    if s.ahead > 0 && s.behind > 0 {
+        Bucket::Forked
+    } else if s.behind > 0 {
+        Bucket::Behind
+    } else if s.ahead > 0 {
+        Bucket::Ahead
+    } else if s.dirty {
+        Bucket::Dirty
+    } else {
+        Bucket::Synced
+    }
+}
+
+/// 分档取色。**全站唯一一份口径**（Q7，2026-10-03 用户拍板），
+/// 侧栏状态点 / 侧栏徽标 / 同步环 / ⌘K 状态点 / 总览统计卡都从这里取。
+///
+/// | 档位 | 取色 | 理由 |
+/// |---|---|---|
+/// | 已同步 | 绿 `success` | 干净是常态也安全，与旧 React 版一致，不回归 |
+/// | 有未提交 | 蓝 `accent` | 需要动手但不紧急 |
+/// | 待推送 | 蓝 `accent` | 与上一档同语义，不另开色 |
+/// | 落后 | 橙 `chart_3` | 拉一下就好 |
+/// | 已分叉 | 红 `danger` | 唯一"不能一键解决"的档，值得最重的色 |
+///
+/// ⚠️ 「已同步」刻意**不占强调色**：它是占比最高的一档，而它恰恰是
+/// 不需要动手的一档，给它蓝色会让绝大多数干净的仓库在侧栏和总览里一片蓝。
+/// ⚠️ 「已分叉」从旧 React 版的紫 `#7c3aed` 改成红：theme.json 只有
+/// chart.1–4 四个语义色（蓝 / 绿 / 橙 / 红），没有紫色档；为分叉单开
+/// 第五个色相跟整套"灰白调 + 四个语义色"打架。
+pub(crate) fn dot_color(b: Bucket, t: &Theme) -> Hsla {
+    match b {
+        Bucket::Synced => t.colors.success,
+        Bucket::Dirty => t.colors.accent,
+        Bucket::Ahead => t.colors.accent,
+        Bucket::Behind => orange(t),
+        Bucket::Forked => t.colors.danger,
+        Bucket::Unknown => t.colors.border,
+    }
+}
+
+/// 分档的一个词。**只给搜索用**——界面上显示的那句话由各处自己按版面拼
+/// （侧栏 200px 要带数字，总览表格旁边就有独立数字列）。
+/// 放在这里是让 ⌘K 能按「落后」「分叉」这类词搜到仓库：
+/// 官方的 `CommandItem` 只做子串包含匹配，用户打「分叉」时
+/// 标签里没有这个词就一条都搜不出来
+pub(crate) fn bucket_word(b: Bucket) -> &'static str {
+    match b {
+        Bucket::Synced => "已同步",
+        Bucket::Dirty => "未提交",
+        Bucket::Ahead => "待推送",
+        Bucket::Behind => "落后",
+        Bucket::Forked => "已分叉",
+        Bucket::Unknown => "待扫描",
+    }
+}
+
+/// 时间戳 → 「2 小时前」这种说法。0 = 从没跑过。
+pub(crate) fn rel_time(ts: u64) -> String {
+    if ts == 0 {
+        return String::new();
+    }
+    let now = qingbird_core::store::now_secs();
+    let d = now.saturating_sub(ts);
+    match d {
+        0..=59 => "刚刚".into(),
+        60..=3_599 => format!("{} 分钟前", d / 60),
+        3_600..=86_399 => format!("{} 小时前", d / 3_600),
+        86_400..=172_799 => "昨天".into(),
+        _ => format!("{} 天前", d / 86_400),
+    }
+}
+
+/// 空视图：仓库还没有被扫到时（首帧、扫描中）给总览行兜底
+pub(crate) static EMPTY_VIEW: RepoView = RepoView {
+    last_commit_ts: 0,
+    status: RepoStatus {
+        is_repo: false,
+        branch: String::new(),
+        ahead: 0,
+        behind: 0,
+        dirty: false,
+        has_upstream: false,
+        upstream: String::new(),
+        remote_url: String::new(),
+    },
+    changed: 0,
+    changes: Vec::new(),
+    detected: run_cmd::CmdDetect {
+        test_cmd: String::new(),
+        build_cmd: String::new(),
+        dev_cmd: String::new(),
+        install_cmd: String::new(),
+    },
+};

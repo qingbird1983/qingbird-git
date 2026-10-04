@@ -12,3 +12,7 @@ path = "src/main.rs"
 qingbird-core = { path = "../crates/core" }
 gpui-kit = "0.7"
 serde_json = "1"
+# 托盘图标（Q11）。gpui-kit 没有托盘件，基座也没有 tray API，只能自挂。
+# muda 是 Windows 上的 win-menu 实现（托盘右键菜单），托盘图标自身没有菜单能力。
+tray-icon = "0.26"
+muda = "0.21"

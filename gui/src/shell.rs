@@ -1,336 +1,765 @@
-//! 应用壳：标题栏 / 导航轨 / 仓库侧栏 / 主区 / 状态条。
+//! 窗口壳：标题栏 / 导航轨 / 状态条，仓库选中与状态刷新。
 //!
-//! 结构严格对应设计稿（Ardot 731415807346283）：
-//! - Screen 1「仓库工作区」：选中**第三方**仓库时显示——侧栏(264px) + 档案页
-//! - Screen 3「我的仓库工作台」：选中**我的**仓库时显示——无侧栏，主区直接铺满
-//! - Screen 2「总览批量同步」：导航轨第二项，待实现
-//!
-//! 数据全部来自 qingbird-core：真实仓库列表、真实 git 状态、真实命令。
-//! 耗时操作（扫状态、跑命令、扫磁盘）一律进后台线程，界面先画上一次结果。
+//! `Render for Shell` 在这里，四块面板由 sidebar / overview / detail 提供。
 
 // 图标只认这一套：assets 里是完整 lucide，外加品牌 Bird。
 // 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
 // 混在同一屏里一眼就能看出不一致。
 use gpui_kit::assets::IconName as AssetIcon;
-use gpui_kit::base::InteractiveElementExt as _;
+use gpui_kit::base::motion::{transition, Transition};
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::Disableable as _;
-use gpui_kit::component::skeleton::Skeleton;
-use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Size, Theme, WindowExt as _};
+use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::resizable::{
+    h_resizable, resizable_panel, ResizablePanelGroup, ResizableState,
+};
+use gpui_kit::component::separator::Separator;
+use gpui_kit::component::status_bar::StatusBar;
+use gpui_kit::component::text::TextViewState;
+use gpui_kit::component::table::{TableEvent, TableState};
+use gpui_kit::component::{ActiveTheme, Selectable as _, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, ease_in_out, relative, AnyElement, AnyWindowHandle, Animation, AnimationExt as _,
-    AppContext as _, Context, Div, Entity, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement, Render, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled, Task, Window, px, rgb,
+    div, img, px, Action, AnyElement, AppContext, Context, Div, FontWeight, InteractiveElement,
+    IntoElement, KeyBinding, ParentElement, Pixels, Render, ScrollHandle,
+    StatefulInteractiveElement, Styled, Window,
 };
 use qingbird_core::fork;
 use qingbird_core::net;
-use qingbird_core::repos::{self, ActivityDay, LangStat, ReadmePreview};
-use qingbird_core::run_cmd::{self, Slot, MAX_PINNED_CMDS};
-use qingbird_core::space;
+use qingbird_core::repos::{self};
+use qingbird_core::run_cmd::{self, Slot};
 use qingbird_core::store::RepoEntry;
-use qingbird_core::sync;
-use qingbird_core::types::{ForkInfo, RepoStatus};
+use qingbird_core::types::RepoStatus;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-// ---------- 规范板色板中 theme.json 没有的补充灰阶 ----------
-// 设计规范：正文 #37352F / 三级 #787871 / 四级 #A4A099 / 占位 #BBB8B1，
-// 以及选中暖灰面 #EDEBE7、条轨 #EDEAE5、可更新暖橙底 #FDEFE4。
-// theme.json 的 token 覆盖不了这几级，集中在这里定义，禁止散落魔法数字。
+use crate::detail::DetailTab;
+use crate::ops::sync_cfg_from;
+use crate::state::*;
+use crate::tokens::*;
+use crate::widgets::*;
 
-/// 正文 / 行内主要文字（比 foreground #1A1A1A 柔一档）
-fn body(_t: &Theme) -> Hsla {
-    rgb(0x37352F).into()
-}
-/// 三级：元信息、说明文字
-fn tier3(_t: &Theme) -> Hsla {
-    rgb(0x787871).into()
-}
-/// 四级：弱提示、上次结果
-fn tier4(_t: &Theme) -> Hsla {
-    rgb(0xA4A099).into()
-}
-/// 选中项暖灰面（侧栏行 / 导航图标底）
-fn warm(_t: &Theme) -> Hsla {
-    rgb(0xEDEBE7).into()
-}
-/// 构成条 / 进度条的轨道
-fn track(_t: &Theme) -> Hsla {
-    rgb(0xEDEAE5).into()
-}
-/// 「可更新」徽章 / 清理条的暖橙底
-fn orange_bg(_t: &Theme) -> Hsla {
-    rgb(0xFDEFE4).into()
-}
-/// 清理条上的深橙文字
-fn orange_text(_t: &Theme) -> Hsla {
-    rgb(0x9A4500).into()
-}
-/// 「运行中 / 未提交」徽章的蓝灰底
-fn blue_bg(_t: &Theme) -> Hsla {
-    rgb(0xEDF1F5).into()
-}
-/// 次按钮描边（比 hairline 深一档）
-fn edge(_t: &Theme) -> Hsla {
-    rgb(0xC8C4BE).into()
-}
-
-/// 「落后 / 分叉」的橙色。
-/// 主题 token 里没有单独的 warning 语义色（只有 `button_warning`），
-/// theme.json 已把 `chart.3` 定成规范板的 #DD5B00，这里借用它。
-fn orange(t: &Theme) -> Hsla {
-    t.colors.chart_3
-}
-
-// ---------- 版面规范：字号 / 圆角 / 间距 / 按钮 / 图标 ----------
-// 之前这些值是就地硬编码，结果同一个「卡片圆角」在不同屏上冒出
-// 1/2/3/5/10 五种杂值，按钮高度有 6 种。这里定成档位，新增元素只能选档，
-// 不许再写裸数字——视觉一致靠的是只有这几档可挑。
-
-/// 元信息、弱提示（标签、说明）
-const FS_META: f32 = 11.0;
-/// 次要文字（表格行、副标题）
-const FS_SEC: f32 = 12.0;
-/// 正文
-const FS_BODY: f32 = 13.0;
-/// 卡片标题 / 弹窗标题
-const FS_TITLE: f32 = 16.0;
-/// 页面主标题
-const FS_HEAD: f32 = 18.0;
-/// 统计卡大数字
-const FS_NUM: f32 = 20.0;
-
-/// 小色块 / 进度条
-const R_SM: f32 = 4.0;
-/// chip、徽章、图例方块
-const R_MD: f32 = 6.0;
-/// 按钮、列表行、小面板
-const R_LG: f32 = 8.0;
-/// 大卡片、表格容器
-const R_XL: f32 = 12.0;
-
-/// 紧密（标签与值、柱间）
-const GAP_TIGHT: f32 = 4.0;
-/// 常规（图标与文字、行内元素）
-const GAP: f32 = 8.0;
-/// 分组（卡片内区块）
-const GAP_LG: f32 = 12.0;
-
-// 按钮高度不再自定数值：官方命名档才是配套的（Medium = 32px 高 / 14px 字 /
-// 16px 图标，Small = 24px 高 / 14px 字 / 14px 图标）。
-// 之前用 Size::Size(px(30)) 这类自定义档，官方 Button 会把文字放大到
-// 16px、图标放大到 size×0.75（22.5px）——整屏图标过大、字顶边的根因。
-
-/// 图标档位：行内小图标
-const ICON_SM: f32 = 14.0;
-/// 图标档位：按钮内图标
-const ICON: f32 = 16.0;
-
-/// 悬停状态的 key：仓库行用路径，「添加仓库」这条没有路径，用固定 key
-const ADD_HOVER_KEY: &str = "__add_repo__";
-
-/// 行内图标（统一走 lucide 一套，只有品牌 logo 用 assets 的 Bird）。
-/// 尺寸显式写死而不是 `.small()`：两套图标集混着用时，默认尺寸并不一致，
-/// 显式档位才能保证行与行对齐。
-fn icon_sm(name: impl Into<Icon>) -> Icon {
-    Icon::new(name).with_size(Size::Size(px(ICON_SM)))
-}
-
-/// 按钮内图标
-fn icon_md(name: impl Into<Icon>) -> Icon {
-    Icon::new(name).with_size(Size::Size(px(ICON)))
-}
-
-/// 一个仓库在界面上要显示的东西
-struct RepoView {
-    status: RepoStatus,
-    /// 未提交文件数（仓库头的「未提交 N 文件」）
-    changed: u32,
-    /// 自动识别出来的四条命令：仓库没存命令时拿来预填
-    detected: run_cmd::CmdDetect,
-}
-
-impl RepoView {
-    fn blank() -> Self {
-        Self {
-            status: RepoStatus::default(),
-            changed: 0,
-            detected: run_cmd::CmdDetect::default(),
+impl Render for Shell {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        // 定位要在这一帧布局之前消费：`scroll_to_top_of_item` 设的偏移量
+        // 由本帧的布局读取，晚一帧就会看到一次跳
+        self.apply_reveal(cx);
+        // 克隆成功后的完整定位（切页 + 展开侧栏 + 选中 + 重扫）。
+        // 同样必须在这一帧兑现：后台任务里凑不齐 `&mut Shell` + `&mut Window`
+        if let Some(path) = self.pending_reveal.take() {
+            self.reveal_repo(path, window, cx);
         }
+        // 「复制地址」的对号反馈到期翻回去。
+        //
+        // 翻回去由 `arm_copy_expiry` 排的那个定时任务负责（它在 `mark_copied`
+        // 时就排好了，醒来清 `copied` 并 notify），这里**不再每帧重复排**——
+        // 每帧排一个两秒后的任务等于每秒排六百个。
+        //
+        // 下面这一段只兜一个洞：`Shell` 是从配置反序列化不出来的，
+        // 而 `copied`/`copied_until` 也只在内存里，所以理论上不会出现
+        // "有 `copied` 但没有任务在跑"的状态。留着它是因为代价只有一次
+        // 比较，而漏掉的话表现是**对号永远挂着**——一个静默的坏状态。
+        if self.copied.is_some() && qingbird_core::store::now_secs() >= self.copied_until {
+            self.copied = None;
+            // `cx.notify()` 不用调：这一帧正在重画，改完状态本帧就生效
+        }
+        // 总览的行快照每帧同步一次。委托只存索引读 `ov_rows`，
+        // 靠这一行保证它永远是最新的——两处各自更新必然会差一帧
+        if self.page == Page::Overview {
+            self.sync_ov_rows(cx);
+            // 列宽跟着窗口走。放在行快照之后：它要读上一帧表格实测的可用宽度，
+            // 与行数无关，但同一帧里做完两件事比跨帧清楚
+            self.sync_ov_col_widths(window, cx);
+            // 冷启动就停在总览页，而活跃度扫描只挂在「点导航轨进总览」那条路上。
+            // 少这一次，柱状图是一排 0 高度——看着像"近两周没人提交"，不是像 bug
+            if self.ov_need_scan {
+                self.ov_need_scan = false;
+                self.scan_overview_activity(cx);
+            }
+        }
+
+        // 主区：按页面与仓库归属路由
+        let main: AnyElement = match self.page {
+            Page::Overview => self.overview_page(&t, cx).into_any_element(),
+            Page::Repos => match self.selected.clone() {
+                // 两类仓库进**同一个**详情页骨架，只有页签序列按归属裁剪不同
+                Some(path) => self.detail_page(&path, &t, cx).into_any_element(),
+                None => empty_main(&t, window).into_any_element(),
+            },
+        };
+
+        // 侧栏宽度只有一个真源：`ResizableState` 里第 0 号面板的宽度。
+        // 折叠 / 展开 / 切到总览都只是把"目标宽度"改成 0 或 sidebar_w，
+        // 中间值由官方 transition 补出来——不要在别处再存一份宽度。
+        let motion = cx.theme().motion_tokens();
+        let policy = Transition::new(motion.duration_fast).easing(motion.easing_move.clone());
+        let target_w: Pixels = if self.sidebar_collapsed || self.page == Page::Overview {
+            px(0.0)
+        } else {
+            px(self.sidebar_w)
+        };
+        // id 是稳定字符串：transition 的状态挂在它上面，id 一变动画就从头开始
+        let anim_w: Pixels = transition("sidebar-width", target_w, policy, window, cx);
+        // 补间中 = 当前值与目标值对不上。`cx.reduce_motion()` 为真时官方
+        // transition 直接返回终值，这里自然落到 false，不补间
+        let animating = (anim_w - target_w).abs() > px(0.5);
+
+        // 只在可见或正在滑出时挂面板。宽度到 0 就把面板整个摘掉，
+        // 这才是"不留空槽位"——留一个 0 宽面板在 flex 里，主区虽然吃掉了它的
+        // 份额，可第 1 号面板上那个拖拽把手还挂在 x=0，一条按了没用的 4px 命中区
+        let sidebar_mounted =
+            (self.page == Page::Repos && !self.sidebar_collapsed) || anim_w > px(0.5);
+
+        if sidebar_mounted && animating {
+            self.split.update(cx, |s, cx| {
+                // 补间期间由 transition 说话。**不在非补间时写**：
+                // 那时宽度归拖拽，写进去会把用户刚拖出来的宽度一帧拽回去
+                if s.sizes().len() < 2 {
+                    // 面板这一帧才挂上。状态里还没有第 0 号面板，
+                    // `resize_panel` 是空操作，面板会退回 `initial_size`（= 全宽）
+                    // 闪一下再缩回去。直接按当前动画值插入，省掉那一帧
+                    s.insert_panel(Some(anim_w), Some(0), cx);
+                } else {
+                    s.resize_panel(0, anim_w, window, cx);
+                }
+            });
+        }
+
+        // 下限放开成 0 的两种情形：正在补间（滑进滑出都要经过 200px 以下），
+        // 或者目标就是 0。少了后一条，折叠停在仓库页时 min_w 会把面板按回 200px，
+        // 凭空多出一条空槽——正好是这一步要消灭的东西。
+        // 非折叠状态下下限照常夹住，拖宽才拖不到 0
+        let min_w: Pixels = if animating || target_w <= px(0.5) {
+            px(0.0)
+        } else {
+            px(SIDEBAR_MIN_W)
+        };
+
+        let mut group = h_resizable("body-split").with_state(&self.split);
+        if sidebar_mounted {
+            group = group.child(
+                resizable_panel()
+                    .size_range(min_w..px(SIDEBAR_MAX_W))
+                    .size(px(self.sidebar_w))
+                    // 官方面板默认 flex_grow: 1，会把主区挤走；定宽面板要自己关掉
+                    .flex_none()
+                    .child(self.sidebar(&t, window, cx)),
+            );
+        }
+        // 主区不带 size：不写 flex_basis，让它吃掉剩下的全部宽度。
+        // `on_resize` 只在拖拽松手时触发（不是每帧），正合"松手才落盘"的语义
+        let group = group.child(resizable_panel().child(main)).on_resize({
+            let this = cx.entity();
+            move |state, _, cx| {
+                let w = state.read(cx).sizes().first().copied();
+                this.update(cx, |this, cx| {
+                    if let Some(w) = w {
+                        this.commit_sidebar_width(w, cx);
+                    }
+                });
+            }
+        });
+        self.finish_frame(t, group, window, cx)
     }
 }
 
-/// 输出块里正在跑的操作类别
-#[derive(Clone, Copy, PartialEq)]
-enum Op {
-    Cmd(Slot),
-    Pull,
-    Push,
-    Check,
-    /// 备份并变基到云端；bool = 工作区脏时用户同意先暂存
-    Rebase(bool),
-    /// 硬回退到变基备份分支（界面已二次确认）
-    UndoRebase,
+impl Shell {
+    /// 组好窗口的其余部分：导航轨 / 主区分组 / 检视抽屉 / 状态条。
+    /// `body` 已经是「侧栏（可选）+ 主区」的 resizable 分组。
+    fn finish_frame(
+        &mut self,
+        t: Theme,
+        body: ResizablePanelGroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // ⚠️ `items_stretch()` 不能省。`h_flex()` 装的是 `items_center()`（基座
+        // `styled.rs` 的 `h_flex` 文档明写「centers its children on the cross axis」，
+        // 而 `v_flex()` 不装任何交叉轴对齐 = stretch，**两者不对称**）。
+        // 不加这一句：nav_rail / 主区 / 检视抽屉三个子项各拿**内容高度**并被
+        // 垂直居中，主区整体缩成内容高、飘在行中间——表现为整屏上方一大块空洞、
+        // 概览页被挤成一小条（2026-10-03 实机首轮就撞上，三个主板面同时炸）。
+        //
+        // 「主区 + 检视列」是一个**独立的 resizable 分组**（`insp_split`），
+        // 与侧栏那组（`split`）分开持有：侧栏那组只在仓库页有、且总览页整组不挂，
+        // 混进同一组会让面板下标随页面变，下标与列的对应关系就不再固定。
+        // 面板数量由基座的 `sync_panels_count` 每帧自动对齐
+        // （`resizable/panel.rs:151`），所以收起那一列不用手动同步状态。
+        //
+        // **主区面板不带 `size`**：让 `flex_grow` 吃掉除检视列以外的全部宽度；
+        // 检视列 `.flex_none()` 是必须的——官方面板默认 `flex_grow: 1`，
+        // 不关掉它会把主区挤走（`resizable/panel.rs:318-322` 与官方文档同一句）
+        let mut main_group = h_resizable("insp-split").with_state(&self.insp_split);
+        main_group = main_group.child(resizable_panel().child(body));
+        // 检视抽屉只在仓库页有——总览页没有当前仓库，这一列里没有东西可看
+        if self.page == Page::Repos && self.inspector_open && self.selected.is_some() {
+            main_group = main_group.child(
+                resizable_panel()
+                    .size_range(px(INSPECTOR_MIN_W)..px(INSPECTOR_MAX_W))
+                    // 只在这一列**首次挂上**、状态里还没有它那一格时起作用
+                    // （`panel.rs:341-349`：`panel_state.size` 为 None 才吃
+                    // `initial_size`）。之后就归 `ResizableState` 自己管，
+                    // 每帧再写一遍会把用户正拖的宽度一帧拽回去
+                    .size(px(self.inspector_w))
+                    .flex_none()
+                    .child(self.inspector(&t, cx)),
+            );
+        }
+        // `on_resize` 只在拖拽松手时触发（不是每帧），正合"松手才落盘"的语义
+        let main_group = main_group.on_resize({
+            let this = cx.entity();
+            move |state, _, cx| {
+                let w = state.read(cx).sizes().last().copied();
+                this.update(cx, |this, cx| {
+                    if let Some(w) = w {
+                        this.commit_inspector_width(w, cx);
+                    }
+                });
+            }
+        });
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .bg(t.colors.background)
+            .text_color(t.colors.foreground)
+            // 必须 `track_focus`，否则这个节点不在派发路径上（`state.rs` 的 `focus` 字段有详述）
+            .track_focus(&self.focus)
+            // ⚠️ Action 监听器必须挂在**元素**上，不能用 `Context::on_action`。
+            // 后者（window.rs:6677）第一行是 `debug_assert_paint()`，只允许在
+            // `DrawPhase::Paint` 期间调；而 `DrawPhase::Paint` 只在
+            // `Window::draw_roots` 的 `root_element.paint(..)` 那段被设上（window.rs:3571），
+            // `Render::render` 跑的是 `Prepaint`。所以在 `new()` 或 `render` 里挂：
+            // debug 构建直接 panic（"this method can only be called during paint"，
+            // 2026-10-03 首次实机启动就是这个），release 下 `debug_assert!` 是空操作、
+            // 监听器只活一帧（`next_frame` 每帧清空）——快捷键会集体失灵且界面看不出异常。
+            // 元素级则由 `Div::paint_keyboard_listeners` 在 paint 里统一注册，
+            // 天然每帧重挂，不需要额外维护。gpui-component 自己就是这么写的。
+            .on_action(
+                cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| this.toggle_inspector(cx)))
+            .on_action(cx.listener(|this, _: &StopOp, window, cx| this.stop_current(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &OpenTerminal, window, cx| this.hotkey_terminal(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SyncPull, window, cx| {
+                    this.hotkey_sync(Op::Pull, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &SyncPush, window, cx| {
+                    this.hotkey_sync(Op::Push, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &SyncCheck, window, cx| {
+                this.hotkey_sync(Op::Check, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NextRepo, window, cx| this.move_repo(1, window, cx)))
+            .on_action(cx.listener(|this, _: &PrevRepo, window, cx| this.move_repo(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &DismissTop, window, cx| this.dismiss_top(window, cx)))
+            .child(self.title_bar(&t, window, cx))
+            // 分组外面那层 `flex_1 + min_w_0` 不能省：基座 `ResizablePanelGroup`
+            // 渲染出来是 `size_full()`，在 `h_flex` 里直接当子项会占满整行、
+            // 把导航轨顶出去。包一层由 flex 分配宽度的容器，它就只吃剩余宽度
+            .child(
+                h_flex()
+                    .items_stretch()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.nav_rail(&t, cx))
+                    .child(Separator::vertical().color(t.colors.border))
+                    .child(div().flex_1().min_w_0().min_h_0().child(main_group)),
+            )
+            .child(self.status_bar(&t, cx))
+            .into_any_element()
+    }
 }
 
-/// 深色输出块的状态
-#[derive(Default)]
-struct OutState {
-    running: bool,
-    /// 正在跑哪个操作（None = 没在跑）
-    op: Option<Op>,
-    lines: Vec<String>,
-    /// 命令起不来 / 非零退出时的一句话
-    error: Option<String>,
+// ================= 标题栏 =================
+
+impl Shell {
+    /// 标题栏。**自研，不用官方 `TitleBar`**（B 方案，用户已拍板）。
+    ///
+    /// ## 为什么组件库做不到
+    ///
+    /// 官方 `TitleBar` 把**所有** `children` 塞进一个带
+    /// `window_control_area(WindowControlArea::Drag)` 的 `h_flex`
+    /// （`title_bar.rs:371-398`）。Windows 侧 `handle_hit_test_msg` 把它翻成
+    /// `HTCAPTION`（`gpui-pre-windows/src/events.rs:976`）——**非客户区命中**，
+    /// 点击直接交给系统去拖窗口，**永远不派发到子元素**。
+    ///
+    /// 表现就是侧栏开关画得出来、位置也对，但 `on_click` 一次都不触发。
+    /// 官方公开 API 只有 `new` / `h` / `bg` / `border_color` / `pl` / `child` /
+    /// `children` / `on_close_window`，**没有任何"这块别算拖拽区"的开关**。
+    /// 备选是"把开关挪到标题栏之下另起一行"，但那会多占 40px 主区高度，
+    /// 已否。官方 `WindowControls` 也是私有 enum（`title_bar.rs:248`），
+    /// 导不出来复用，所以那三个键一并接管。
+    ///
+    /// ## 自研时接住了官方的三样（别弄丢）
+    ///
+    /// ① **窗口控件只声明 area、交给系统**（官方 `title_bar.rs:220-222`，
+    ///    它的 `on_click` 只在 `is_linux` 那条臂里，`:223-242`）。
+    /// ② **图标用现成的**：`WindowMinimize` / `WindowMaximize` /
+    ///    `WindowRestore` / `WindowClose` 都在 lucide 那一套里
+    ///    （`title_bar.rs:148-151`），悬停面同源（`:175-183`）。
+    /// ③ **拖拽区**：基座规范明写 "Preserve its drag region"
+    ///    （`design-guides.md:467`）。左边这一组排除在拖拽区外，
+    ///    **右边空白仍是拖拽区**；双击缩放补 `zoom_window()`
+    ///    （官方只在 Linux/macOS 挂，`:344-349`）。
+    ///
+    /// ## 开关为什么在「青鸟 Git」**文字后面**
+    ///
+    /// 图标和标题是一个整体（"我是谁"），开关是它们的附属控件（"我在哪"）。
+    /// 三者必须并成**同一个** `h_flex`：官方那行是 `justify_between()`，
+    /// 分成两个子项会被推到两头去，开关就会贴到窗口控件上。
+    pub(crate) fn title_bar(
+        &self,
+        t: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // ⚠️ `on_double_click` 来自 `InteractiveElementExt`（gpui-component 的
+        // 扩展 trait，官方 `title_bar.rs:345` 用的就是它）。**它只在
+        // `Stateful<E>` 上有**——所以这行必须先 `.id("title-bar")`，
+        // 裸 `Div` 上是 E0599。
+        use gpui_kit::component::InteractiveElementExt as _;
+        // 最大化/还原图标要跟着窗口实际状态翻，而这两个读数**只能从 `Window` 拿**：
+        // `Context<T>` 没有 `window()`（E0599），所以 `title_bar` 得收 `&mut Window`。
+        // 官方也是从 `render` 那一层往下传（`title_bar.rs:286` 读 `window.is_maximized()`）
+        let supported = window.window_controls();
+        let maximized = window.is_maximized();
+        h_flex()
+            // ⚠️ 这个 `id` 不能省：它不只是稳定标识，更是 `on_double_click`
+            // 的前置条件（见上面那行 `use` 的注释）
+            .id("title-bar")
+            .w_full()
+            .h(px(TITLE_BAR_H))
+            .flex_shrink_0()
+            .items_center()
+            .bg(t.colors.popover)
+            .border_b_1()
+            .border_color(t.colors.border)
+            // 左边距按轨宽反推，让图标与导航轨那一列的中心线对齐
+            .pl(px(TITLE_BAR_PAD_L))
+            // 左组：图标 + 标题 + 开关（开关在文字**之后**）
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(GAP_TIGHT))
+                    .flex_shrink_0()
+                    .h_full()
+                    // 应用图标（老 Tauri 版那张 128px 位图，不是 lucide 的 Bird）
+                    .child(img(crate::app_assets::APP_ICON_ASSET).size(px(APP_ICON)))
+                    .child(
+                        div()
+                            .text_size(px(FS_BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(body(t))
+                            .child("青鸟 Git"),
+                    )
+                    // 总览页没有侧栏可折，藏起来免得点了个没反应的东西
+                    .when(self.page == Page::Repos, |bar| {
+                        bar.child(self.sidebar_toggle(t, cx))
+                    }),
+            )
+            // ③ 拖拽区：左右两组之间的**空白**才是拖窗口的地方
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(gpui_kit::WindowControlArea::Drag),
+            )
+            .on_double_click(|_, window, _| window.zoom_window())
+            .child(self.window_controls(supported, maximized, cx))
+            .into_any_element()
+    }
+
+    /// 侧栏展开 / 收起开关。
+    ///
+    /// **为什么用裸 `Button` 而不用官方 `SidebarToggleButton`**：
+    /// 那个组件内部写死了 `Button::new("collapse").custom(ghost_variant(cx)).small()` +
+    /// `Icon::new(icon).size_4()`（`sidebar/mod.rs:313`/`:378`），
+    /// **图标没有 `text_color` 入口**（公开 API 只有 `new` / `side` /
+    /// `collapsed` / `accessibility_label` / `on_click`）。
+    /// 实机后果：那个图标继承到深色，在标题栏里渲成**一块实心深底**，
+    /// 灰白底上一颗糊掉的方块——2026-10-04 抓帧确认。
+    ///
+    /// 换 `Button` 不是"自研"，是换官方件的**档位**：图标档、颜色档、
+    /// 悬停提示都变成可配的，而"图标随折叠态在 Close/Open 之间翻"
+    /// 这一条我们自己照搬（`collapsed` 那一行），没丢语义。
+    /// 组件库做不到的是**调一个图标颜色**，不是"画一颗开关按钮"。
+    fn sidebar_toggle(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // 图标随折叠态翻：这颗键的图标就是"它现在会做什么"的说明
+        let icon = if self.sidebar_collapsed {
+            AssetIcon::PanelLeftOpen
+        } else {
+            AssetIcon::PanelLeftClose
+        };
+        let label = if self.sidebar_collapsed {
+            "展开仓库侧栏"
+        } else {
+            "收起仓库侧栏"
+        };
+        Button::new("titlebar-sidebar-toggle")
+            .icon(icon_sm(icon).text_color(tier3(t)))
+            .custom(ghost_variant(cx))
+            .with_size(Size::Small)
+            .tooltip(label)
+            .accessibility_label(label)
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
+            .into_any_element()
+    }
+
+    /// 窗口控件：最小化 / 最大化（还原）/ 关闭。
+    ///
+    /// ## 点击**一律不自己处理**（①）
+    ///
+    /// 三块都只挂 `window_control_area`，让 `handle_hit_test_msg` 翻成
+    /// `HTMINBUTTON` / `HTMAXBUTTON` / `HTCLOSE`（`events.rs:978-984`），
+    /// 由系统发对应的窗口消息。
+    ///
+    /// ⚠️ 自己在 `on_click` 里调 `remove_window()` 看着一样，行为不一样：
+    /// 那条路绕过 `WM_CLOSE`，而 `tray.rs` 的托盘唤起与 `QuitMode::Explicit`
+    /// 全按"系统关窗 → 销毁窗口 → 进程留着"设计，绕过去托盘就唤不醒了。
+    ///
+    /// ## 图标与悬停面（②）
+    ///
+    /// 图标取官方同款（`title_bar.rs:148-151`），最大化/还原按
+    /// `window.is_maximized()`（`window.rs:2374`）翻。系统不支持某键时
+    /// 官方也不画图标（`:282-291` 的 `when(supported.., ..)`），这里照做
+    ///
+    /// ⚠️ 窗口状态要用 `Window` 拿，**不能从 `Context` 拿**：`Context<T>`
+    /// 没有 `window()` 方法（E0599，`help` 里提示的 `windows` 是另一回事：
+    /// 它返回全部窗口的集合）。所以这两个读数由调用方 `title_bar` 传进来
+    fn window_controls(
+        &self,
+        supported: gpui_kit::WindowControls,
+        maximized: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let th = cx.theme().clone();
+        h_flex()
+            .id("window-controls")
+            .items_center()
+            .flex_shrink_0()
+            .h_full()
+            .when(supported.minimize, |row| {
+                row.child(window_control_button(
+                    "min",
+                    Some(AssetIcon::WindowMinimize),
+                    th.secondary_hover,
+                    gpui_kit::WindowControlArea::Min,
+                ))
+            })
+            .when(supported.maximize, |row| {
+                row.child(window_control_button(
+                    "max",
+                    Some(if maximized {
+                        AssetIcon::WindowRestore
+                    } else {
+                        AssetIcon::WindowMaximize
+                    }),
+                    th.secondary_hover,
+                    gpui_kit::WindowControlArea::Max,
+                ))
+            })
+            // 关闭键永远给：系统说"不支持"的通常是别的键
+            .child(window_control_button(
+                "close",
+                Some(AssetIcon::WindowClose),
+                th.danger,
+                gpui_kit::WindowControlArea::Close,
+            ))
+            .into_any_element()
+    }
 }
 
-/// 磁盘占用卡的状态（只跟随当前选中的仓库）
-#[derive(Default)]
-struct SpaceState {
-    report: Option<space::SpaceReport>,
-    scanning: bool,
-    /// 一键清理进行中：按钮转圈、防连点
-    cleaning: bool,
-    /// 上次清理的结果（「已释放 1.6 GB」）
-    note: Option<String>,
-    error: Option<String>,
-}
-
-/// 档案页（Screen 1）的本地数据：语言统计 / 活跃度 / 最近提交 / README。
-/// 全部是几条本地 git 命令 + 读一个文件，放后台线程扫，界面先画占位。
-#[derive(Default)]
-struct ProfileState {
-    langs: Vec<LangStat>,
-    /// 近 30 天有提交的日子（后端不补空白日）
-    activity: Vec<ActivityDay>,
-    /// 最近一次提交的秒级时间戳，0 = 从没提交过
-    last_commit_ts: u64,
-    readme: Option<ReadmePreview>,
-    scanning: bool,
-}
-
-/// 导航轨指向的页面
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Page {
-    /// Screen 1 / Screen 3：仓库工作区
-    Repos,
-    /// Screen 2：总览批量同步（待实现）
-    Overview,
-}
-
-pub struct Shell {
-    /// 窗口句柄：异步跑完（初始化仓库等）要回来关弹窗
-    win: AnyWindowHandle,
-    page: Page,
-    repos: Vec<RepoEntry>,
-    views: HashMap<String, RepoView>,
-    selected: Option<String>,
-    /// 标题栏全局搜索（官方 Input，检索逻辑待接）
-    global_search: Entity<InputState>,
-    /// 侧栏过滤框（官方 Input，过滤逻辑待接）
-    side_filter: Entity<InputState>,
-    scanning: bool,
-    /// 状态扫描的任务句柄：存着才能在下一次扫描时丢掉上一次
-    scan: Option<Task<()>>,
-    /// 扫描代数：过期结果不许覆盖新结果
-    seq: u64,
-    out: OutState,
-    space: SpaceState,
-    /// 磁盘扫描的代数：切仓库 / 重扫时作废旧结果
-    space_seq: u64,
-    space_task: Option<Task<()>>,
-    profile: ProfileState,
-    profile_seq: u64,
-    profile_task: Option<Task<()>>,
-    /// 总览页勾选的仓库路径（Screen 2 表格行首复选框）
-    ov_checked: std::collections::HashSet<String>,
-    /// 总览页批量同步的进度与结论；None = 本会话还没跑过批量
-    batch: Option<BatchRun>,
-    /// 添加 / 编辑仓库弹窗；None = 弹窗未打开
-    dlg: Option<RepoDialog>,
-    /// 鼠标悬停在哪一行（侧栏仓库 / 总览表格行）。
-    /// gpui 没有 CSS 那样的 `:hover` 样式，悬停反馈只能靠事件记状态再重画。
-    hovered: Option<String>,
-    /// 当前选中仓库的分叉信息（ahead>0 且 behind>0 时由状态扫描顺手算出）
-    fork: Option<ForkInfo>,
-    /// 刚做完变基的备份分支名：有这个值界面才提供「撤销变基」，切仓库即失效
-    fork_backup: Option<String>,
-    /// 分叉卡「只看差异」是否展开
-    fork_diff: bool,
-    /// 「撤销变基」处于二次确认状态（会丢弃变基后的新提交，必须确认）
-    fork_confirm: bool,
-}
-
-/// 添加 / 编辑仓库弹窗的状态。
-/// 输入框的 Entity 在打开弹窗时重建（初值靠 placeholder 表达，不预填——
-/// 预填要走 `InputState::set_value`，那需要 window，弹窗入口处没有）。
-struct RepoDialog {
-    /// None = 添加模式；Some(path) = 编辑该仓库
-    editing: Option<String>,
-    path_input: Entity<InputState>,
-    name_input: Entity<InputState>,
-    /// 归属：第三方仓库（false = 我的）
-    third: bool,
-    error: Option<String>,
-    /// 非空 = 初始化向导：填的路径还不是 git 仓库，转这里引导 git init
-    init: Option<InitState>,
-}
-
-/// 初始化向导的状态：顶层目录清单 + 勾选的排除项
-#[derive(Clone)]
-struct InitState {
-    path: String,
-    items: Vec<repos::DirItem>,
-    excludes: std::collections::HashSet<String>,
-    working: bool,
-}
-
-/// 初始化时默认勾选的排除项：构建产物 / 依赖 / IDE 目录。
-/// 与旧版同一份清单——用户大概率不想把这些提交进去。
-const INIT_EXCLUDE_HINTS: &[&str] = &[
-    "node_modules",
-    "dist",
-    "build",
-    "out",
-    "target",
-    ".idea",
-    ".vs",
-    "vendor",
-    "__pycache__",
-    ".gradle",
-    "bin",
-    "obj",
-    "coverage",
-    ".next",
-    ".nuxt",
-    "venv",
-];
-
-/// 总览页的一键批量。与旧版约定一致：前端串行循环 core 的 pull/push，
-/// 不新增后端批量命令——代理回退、脏工作区判定都已在那两条路径里。
-struct BatchRun {
-    pull: bool,
-    /// 队列里的仓库路径，顺序即执行顺序
-    paths: Vec<String>,
-    done: usize,
-    ok: usize,
-    /// 拉取时脏工作区跳过的个数（推送没有这条路，恒 0）
-    skipped: usize,
-    failed: usize,
-    running: bool,
-    /// 跑完（或失败）的一句话结论，总览页状态条展示
-    note: Option<String>,
+/// 一颗窗口控件键：**只有外观与 area，没有点击处理**
+/// （理由见 `Shell::window_controls` 的 ①）。
+///
+/// `id` 固定为 `min` / `max` / `close`，**不能省**：gpui 在 paint 阶段靠节点的
+/// id 把它登记进 `window_control_hitboxes`（`window.rs:5130`），
+/// `handle_hit_test_msg` 再靠这个 id 判断鼠标落在不在这一区。没有 id，
+/// 系统永远收不到 `HTMINBUTTON` / `HTCLOSE`，键就成了一块死区。
+///
+/// 返回 `Stateful<Div>`（`.id(..)` 的产物）而不是 `Div`：带 `id` 的节点
+/// 就是 `Stateful`，签名写 `Div` 会 E0308
+///
+/// `icon` 为 `None` 时**照旧占满宽度**（系统不支持时官方也是这么留位的），
+/// 宽度是系统约定，不能因为不画图标就缩
+fn window_control_button(
+    id: &'static str,
+    icon: Option<AssetIcon>,
+    hover_bg: gpui_kit::Hsla,
+    area: gpui_kit::WindowControlArea,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    use gpui_kit::component::{Icon, Sizable as _};
+    div()
+        .id(id)
+        .w(px(TITLE_BAR_CTRL_W))
+        .h_full()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .window_control_area(area)
+        .when_some(icon, |this, name| this.child(Icon::new(name).small()))
+        .hover(move |style| style.bg(hover_bg))
 }
 
 impl Shell {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// 折叠 / 展开侧栏（`Ctrl B` 与标题栏按钮共这一个入口）。
+    /// 折叠态与宽度都落盘，下次启动回到用户自己摆的样子
+    pub(crate) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page != Page::Repos {
+            // 总览页没有侧栏。按 `Ctrl B` 却什么都不发生会像坏了，
+            // 不如把它当成"我要看仓库"——切回仓库页并展开
+            self.go(Nav::Group(self.side_focus), window, cx);
+            return;
+        }
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        self.persist_sidebar_layout();
+        cx.notify();
+    }
+
+    /// 拖宽结束后把新宽度记下来。不记的话折叠再展开会弹回旧宽度，
+    /// 用户会以为拖拽没生效
+    fn commit_sidebar_width(&mut self, w: Pixels, cx: &mut Context<Self>) {
+        let w = qingbird_core::store::clamp_sidebar_w(w.as_f32());
+        if (w - self.sidebar_w).abs() < f32::EPSILON {
+            return;
+        }
+        self.sidebar_w = w;
+        self.persist_sidebar_layout();
+        cx.notify();
+    }
+
+    /// 落盘失败不弹窗：侧栏宽度存不住，下次开还是这个宽度，
+    /// 用户自己再拖一次就行，不值得打断他
+    fn persist_sidebar_layout(&self) {
+        let _ = qingbird_core::store::set_sidebar_layout(self.sidebar_w, self.sidebar_collapsed);
+    }
+
+    /// 拖宽检视列结束后把新宽度记下来。理由与 `commit_sidebar_width` 相同：
+    /// 不记的话收起再展开会弹回旧宽度，用户会以为拖拽没生效
+    pub(crate) fn commit_inspector_width(&mut self, w: Pixels, cx: &mut Context<Self>) {
+        let w = qingbird_core::store::clamp_inspector_w(w.as_f32());
+        if (w - self.inspector_w).abs() < f32::EPSILON {
+            return;
+        }
+        self.inspector_w = w;
+        self.persist_inspector_layout();
+        cx.notify();
+    }
+
+    /// 落盘检视列版式（宽度 + 展开态）。与 `persist_sidebar_layout` 一对
+    pub(crate) fn persist_inspector_layout(&self) {
+        let _ = qingbird_core::store::set_inspector_layout(self.inspector_w, self.inspector_open);
+    }
+}
+
+// ================= 导航轨 =================
+
+/// 导航轨按钮里的图标。
+///
+/// **为什么不给它写尺寸。** 官方 `Button` 会用按钮档反推图标档再覆盖一遍
+/// （`button.rs:756-761`：`icon.with_size(icon_size)`），而 `icon_size`
+/// 只在 `content_style(..)` 那条路上能被外面塞进去，公开 API 给不了。
+/// 所以这里传进去的任何 `Size` 都会被丢弃——**写了不生效，
+/// 留着就是一句会骗人的话**（AGENTS.md「基座的 builder 方法」那条）。
+/// 真正决定图标多大的是按钮档 `Size::Large`，见 `nav_item` 的注释。
+fn nav_icon(name: AssetIcon) -> gpui_kit::component::Icon {
+    gpui_kit::component::Icon::new(name)
+}
+
+impl Shell {
+    /// 只有三个导航按钮 + 设置（D2：导航轨只回答"我在看哪一屏"）。
+    /// 添加 / 扫描这类功能入口不往这儿塞——功能入口塞进导航轨是这版界面
+    /// 上一轮最大的问题：轨上一排图标分不清哪些是切屏、哪些是动作。
+    ///
+    /// 轨宽与内边距是**三档**（D58 / D59）：横向 `NAV_PAD` 被"装得下按钮"钉死、
+    /// 顶部 `NAV_PAD_TOP` 是一条对齐基线、底部 `NAV_PAD_BOTTOM` 是"独立一组的气口"。
+    /// 三者**不能共用一个数**——共用过一次（6），实机看着"logo 和三颗图标糊成一片"；
+    /// 只修顶部又漏了底部，齿轮直接坐在状态条上沿。`tokens::tests` 钉住了这条。
+    pub(crate) fn nav_rail(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
+        debug_assert_eq!(
+            NAV_W - 2.0 * NAV_PAD,
+            32.0,
+            "导航轨的内容盒（{NAV_W} − 2×{NAV_PAD}）必须装得下 ghost 图标按钮并居中；\
+             实测按钮渲染成 26px、内容盒 32px，左右各多出 3px"
+        );
+        v_flex()
+            .w(px(NAV_W))
+            .h_full()
+            .flex_shrink_0()
+            .bg(t.colors.popover)
+            .items_center()
+            .px(px(NAV_PAD))
+            .pt(px(NAV_PAD_TOP))
+            .pb(px(NAV_PAD_BOTTOM))
+            // ⚠️ 这一处用 `GAP_LG`（12）而不是 `GAP_DENSE`，**是有意的**：
+            // `GAP_DENSE`（2）治的是「一串同类**行**相邻两项」（列表行、色块分段），
+            // 那些行本来就是一整块、行内还有内边距，所以贴着才连得起来。
+            // 导航轨上是**三个各自独立的按钮**——各有各的命中区、各有各的选中底块，
+            // 贴着排读起来是"糊成一片"，实机按 4px 排出来用户就说"快粘到一起了"。
+            // 它们之间要的是"两个不同的东西"那种能分开的气口
+            .gap(px(GAP_LG))
+            .child(self.nav_item(AssetIcon::LayoutDashboard, Nav::Overview, "总览", t, cx))
+            .child(self.nav_item(
+                AssetIcon::GitBranch,
+                Nav::Group(Group::Mine),
+                "我的仓库",
+                t,
+                cx,
+            ))
+            .child(self.nav_item(
+                AssetIcon::Users,
+                Nav::Group(Group::Third),
+                "第三方仓库",
+                t,
+                cx,
+            ))
+            .child(div().flex_1())
+            .child(
+                Button::new("nav-settings")
+                    .icon(nav_icon(AssetIcon::Settings).text_color(tier3(t)))
+                    .custom(ghost_variant(cx))
+                    .with_size(Size::Large)
+                    .tooltip("设置")
+                    .accessibility_label("设置")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_settings_dlg(window, cx)),
+                    ),
+            )
+    }
+
+    /// 导航按钮。选中态仍交给官方 `Button::selected`（它管焦点环、a11y 与
+    /// 「打开态也画成选中」这条语义），但**底色由我们自己给**（D60）。
+    ///
+    /// ⚠️ 官方 ghost 选中的底是 `button.active.background`，而 `theme.json`
+    /// 没配这一项 → 落基座兜底 `input.mix_oklab(transparent, 0.7)`，比规范板的
+    /// 选中面深一大截。所以用 `tokens::selected_mask` 盖掉。
+    /// **能盖掉是因为官方在每个状态层的最后重放调用方样式**
+    /// （`button.rs:733`、`:795` 的 `refine_style(&instance_style)`）——
+    /// 这条顺序是"编译得过但不写注释就会失效"的那类知识，改基座大版本时先复核它。
+    ///
+    /// **`when(active, ..)` 不能省**：同一份 `instance_style` 在常态层也会被重放，
+    /// 无条件 `.bg()` 会让三颗按钮统统带上底。
+    ///
+    /// **图标尺寸为什么是 `Size::Large`。** 官方 `Button` 的图标档是从按钮档
+    /// 推出来的（`button.rs:615-618`）：`Size::Size(v)` → `v × 0.75`，
+    /// 其余档原样传给图标。而 icon-only 按钮的外框是
+    /// `XSmall=20 / Small=24 / Medium=Large=32`（`button.rs:661-666`）——
+    /// **`Large` 的外框和 `Medium` 一样是 32px，图标却从 16px 变 24px**。
+    /// 这正是要的那一档：框不变、图标变大，没有第二个档能这么调。
+    ///
+    /// ⚠️ **不要用 `Size::Size(px(..))` 放大**（AGENTS.md 已记）：那条路会让
+    /// 官方把文字也一起放大到 16px、图标放大到 size×0.75，整屏图标过大。
+    pub(crate) fn nav_item(
+        &self,
+        icon: AssetIcon,
+        nav: Nav,
+        label: &'static str,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let active = match nav {
+            Nav::Overview => self.page == Page::Overview,
+            Nav::Group(g) => self.page == Page::Repos && self.side_focus == g,
+        };
+        let ink = if active {
+            t.colors.foreground
+        } else {
+            tier3(t)
+        };
+        let id: &'static str = match nav {
+            Nav::Overview => "nav-overview",
+            Nav::Group(Group::Mine) => "nav-mine",
+            Nav::Group(Group::Third) => "nav-third",
+        };
+        Button::new(id)
+            .icon(nav_icon(icon).text_color(ink))
+            .custom(ghost_variant(cx))
+            .selected(active)
+            .when(active, |this| this.bg(selected_mask(t)))
+            // ⚠️ **不要在这里加 `.hover(..)` 改悬停面**（Q12 已开，见路线表）。
+            // 想改也改不动：官方在 `render` 里先注册自己的悬停层（`button.rs:713`），
+            // 调用方再来一次会撞上 `div.rs:843` 的 `debug_assert!(hover_style already set)`
+            // ——**debug 构建直接 panic**。正解是换 `ButtonVariant::Custom`，
+            // 那是重新设计这颗按钮（焦点环 Edge→Inside、描边逻辑都变），不是改个色。
+            .with_size(Size::Large)
+            .tooltip(label)
+            .accessibility_label(label)
+            .on_click(cx.listener(move |this, _, window, cx| this.go(nav, window, cx)))
+            .into_any_element()
+    }
+}
+
+impl Shell {
+    /// 导航轨点击的唯一入口。第 2、3 个按钮不是"切页面"而是"驱动侧栏"（D2）：
+    /// 停在总览时点它们要同时切到仓库页，否则点了没反应会被当成坏了。
+    pub(crate) fn go(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
+        match nav {
+            Nav::Overview => {
+                // 只切屏，不动 `sidebar_collapsed`。总览没有侧栏是"那屏没有侧栏"，
+                // 不是"用户把侧栏折了"——把两者混成一个值，用户回仓库页会发现
+                // 自己刚摆好的侧栏不见了
+                self.page = Page::Overview;
+                // 活跃度每个仓库一条 `git log`，只在真的进总览时扫
+                self.scan_overview_activity(cx);
+            }
+            Nav::Group(g) => {
+                self.page = Page::Repos;
+                self.side_focus = g;
+                // 点"我的仓库 / 第三方仓库"就是要看仓库，侧栏必须跟着出来。
+                // 重新落一次盘：这个展开是用户刚做出的选择
+                let was_collapsed = self.sidebar_collapsed;
+                self.sidebar_collapsed = false;
+                if was_collapsed {
+                    self.persist_sidebar_layout();
+                }
+                // 导航按钮点的是"组"，组开着才看得见里面的仓库。
+                // 只切焦点不展开的话，用户会看到侧栏里那组仍折着，像按钮没生效
+                let group_was_closed = !self.group_open[g.ix()];
+                self.group_open[g.ix()] = true;
+                // 已经在这一组里就只切焦点、不动选中：否则点两下会莫名换掉当前仓库
+                if !self.selected_in_group(g) {
+                    match self.first_in_group(g) {
+                        Some(path) => {
+                            self.reveal = Some(path.clone());
+                            self.select(path, window, cx);
+                        }
+                        // 这一组一个仓库都没有：清选中，主区给空态。
+                        // 留着另一组的选中会让导航高亮与主区内容对不上
+                        None => self.select_none(),
+                    }
+                } else if group_was_closed {
+                    // 刚把这一组展开：把它选中的那行滚到眼前，
+                    // 否则展开完视线还停在组标题上，不知道自己落到了哪儿
+                    self.reveal = self.selected.clone();
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 清掉选中（分组为空时用）。不复用 `select`：那个函数要落盘 touch 记录，
+    /// 空分组没有仓库可 touch
+    pub(crate) fn select_none(&mut self) {
+        self.selected = None;
+        self.fork = None;
+        self.fork_backup = None;
+        self.fork_diff = false;
+        self.fork_confirm = false;
+    }
+}
+
+impl Shell {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let repos = repos::list_repos();
         // 自动识别只读文件、不派生 git 子进程，放启动路径上不卡界面
         let mut views = HashMap::new();
@@ -344,52 +773,354 @@ impl Shell {
             );
         }
         let selected = repos.first().map(|r| r.path.clone());
-        let global_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索仓库 · Ctrl K"));
         let side_filter = cx.new(|cx| InputState::new(window, cx).placeholder("筛选名称或分支"));
+        // 总览表格：官方 DataTable。委托只带一个回指 `Shell` 的 Entity，
+        // 数据在 `Shell::ov_rows`——每帧由 `sync_ov_rows` 压一次
+        let ov_table = {
+            let this = cx.entity();
+            cx.new(|cx| TableState::new(crate::overview::OvDelegate::new(this), window, cx))
+        };
+        // 提交列表：官方 List。和总览表格一样，委托只带一个回指 `Shell` 的
+        // Entity，数据在 `Shell::history`——不存第二份，两处必然会对不上
+        let history_table = {
+            let this = cx.entity();
+            cx.new(|cx| {
+                gpui_kit::component::list::ListState::new(
+                    crate::history_tab::CommitDelegate::new(this),
+                    window,
+                    cx,
+                )
+            })
+        };
+        // 命令面板：官方 CommandState。查询词、高亮项、焦点都在它身上，
+        // 整个应用只建这一个——重建等于每次打开都把上次搜到哪儿扔掉
+        let palette = { cx.new(|cx| gpui_kit::component::command::CommandState::new(window, cx)) };
+        // 侧栏版式跟着用户走。启动首屏是总览（D1），那屏不显示侧栏，
+        // 但用户的折叠选择要留着——回仓库页时回到他上次摆的样子
+        let saved = qingbird_core::store::load().settings;
+        // 同步设置草稿要在结构体字面量之外建：它内部要 `cx.new` 建一个
+        // InputState 的 Entity，放字面量里会让 window 的借用拖到函数尾
+        let sync_cfg = sync_cfg_from(None, window, cx);
         let mut this = Self {
             win: window.window_handle(),
-            page: Page::Repos,
+            // 壳层根节点自己的焦点句柄。**必须真的去聚焦**（下面 focus 那一行），
+            // 光建不聚焦等于没建：Action 派发是从焦点节点往上冒泡的，
+            // 一个焦点都没有时落到的是 dispatch tree 的根节点（gpui-kit 那层
+            // `Root`），壳层的监听器在更深一层，一次都收不到。
+            // 详见 `state.rs` 里 `focus` 字段的注释
+            focus: cx.focus_handle(),
+            page: Page::Overview,
+            side_focus: Group::Mine,
+            sidebar_collapsed: saved.sidebar_collapsed,
+            sidebar_w: qingbird_core::store::clamp_sidebar_w(saved.sidebar_w),
+            split: cx.new(|_| ResizableState::default()),
+            // 右栏两件都从配置读，与侧栏同一口径：宽度夹过、展开态是用户自己的选择。
+            // 默认展开（core 的 `inspector_open` 是 `default_true`）——
+            // 收起的右栏只有仓库头那颗按钮能叫回来，默认为收等于新装用户看不到这列
+            inspector_open: saved.inspector_open,
+            inspector_w: qingbird_core::store::clamp_inspector_w(saved.inspector_w),
+            insp_split: cx.new(|_| ResizableState::default()),
+            copied: None,
+            copied_until: 0,
+            addr_hover: None,
+            readme_state: cx.new(|cx| TextViewState::markdown("", cx)),
+            readme_task: None,
             repos,
             views,
             selected,
-            global_search,
             side_filter,
+            filter_open: false,
+            // 两组默认都展开：仓库一般不多，展开着省一次点击；
+            // 真嫌挤可以自己点标题折起来
+            group_open: [true, true],
+            tree_scroll: ScrollHandle::new(),
+            reveal: None,
+            pending_reveal: None,
             scanning: false,
+            last_scan_ts: 0,
             scan: None,
             seq: 0,
-            out: OutState::default(),
+            logs: HashMap::new(),
+            detail_tab: 0,
             space: SpaceState::default(),
             space_seq: 0,
             space_task: None,
             profile: ProfileState::default(),
             profile_seq: 0,
             profile_task: None,
-            ov_checked: std::collections::HashSet::new(),
+            history: HistoryState::default(),
+            history_table,
+            ov_table,
+            ov_rows: Vec::new(),
+            ov_activity: Vec::new(),
+            ov_seq: 0,
+            ov_task: None,
+            ov_need_scan: true,
             batch: None,
+            app_log: LogState::default(),
             dlg: None,
-            hovered: None,
             fork: None,
             fork_backup: None,
             fork_diff: false,
             fork_confirm: false,
+            commit_dlg: None,
+            clean_dlg: None,
+            clone_dlg: None,
+            cmd_dlg: None,
+            settings_dlg: None,
+            sync_cfg,
+            palette,
+            palette_actions: Vec::new(),
+            palette_open: false,
         };
+        // 全部走官方 action + key binding，不自己 `on_key_down` 判键：
+        // 自己判的那份不知道当前焦点在输入框还是按钮上，会在打字时把侧栏折了。
+        // `context` 传 None = 全局生效；命令面板自己那个 Dialog 上下文里
+        // ↑↓ 与回车由 `command::init` 绑，不在这里重复占键
+        cx.bind_keys([
+            KeyBinding::new("ctrl-b", ToggleSidebar, None),
+            KeyBinding::new("ctrl-i", ToggleInspector, None),
+            // `Ctrl .` 停当前操作。键位跟着"停"这个动作走，和日志工具行那个
+            // 停止按钮共用 `stop_current`——两处不该各调一次 core 的取消入口
+            KeyBinding::new("ctrl-.", StopOp, None),
+            KeyBinding::new("ctrl-k", OpenPalette, None),
+            KeyBinding::new("ctrl-t", OpenTerminal, None),
+            KeyBinding::new("1", SyncPull, None),
+            KeyBinding::new("2", SyncPush, None),
+            KeyBinding::new("3", SyncCheck, None),
+            KeyBinding::new("down", NextRepo, None),
+            KeyBinding::new("up", PrevRepo, None),
+            KeyBinding::new("escape", DismissTop, None),
+        ]);
+        // 过滤框每敲一个字都要重画侧栏。官方 Input 的 value() 是纯读取，
+        // 不订阅就永远停在旧值上——这是"输入框接了但过滤不生效"的典型原因
+        cx.subscribe(&this.side_filter, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        // Action 监听器不在这里挂，见 impl Shell::bind_actions 的注释：
+        // `Window::on_action` 只允许在 paint 阶段调用，而构造期不是 paint。
+        // 快捷键的 `bind_keys` 可以在构造时挂（全局键位表，不挑阶段），
+        // 但收到 Action 之后要做什么这一半必须每帧重挂
+        //
+        // 点总览表格的一行 = 切仓库页 + 展开侧栏 + 展开它那组 + 滚到那一行。
+        // 与侧栏行点击、右键「打开」、⌘K 切仓库共用 `reveal_repo`。
+        // 订阅回调的第 1 个参数就是 `&mut Shell`，第 4 个是 `&mut Context<Shell>`——
+        // 所以这里能直接改状态，不必绕回 `Entity`
+        //
+        // ⚠️ **只能置一次性标记，不能在这里直接调 `reveal_repo`。**
+        // 早先的写法是 `cx.update_window(win, |view, window, cx| view.downcast::<Shell>())`，
+        // 它静默失败、点行不跳转：`App::update_window_id` 靠
+        // `cx.windows.get_mut(id).and_then(Option::take)` 取窗口（app.rs:2888），
+        // 而这个订阅恰恰跑在**该窗口自己的事件处理里**——窗口此刻已经被 take 走了，
+        // 于是 `update(None)` 把整个闭包丢掉，返回 `Err("window not found")`，
+        // 外面那个 `.ok()` 又把错误吞了。三处都不出声，表现为"行选中了但没反应"。
+        //
+        // `reveal_repo` 要 `&mut Window`，而订阅回调拿不到；`render` 里拿得到。
+        // 所以置 `pending_reveal`，下一帧由 `render` 兑现——与克隆成功后那条路同一条
+        cx.subscribe(&this.ov_table, |this, _t, event: &TableEvent, cx| {
+            if let TableEvent::SelectRow(ix) = event {
+                if let Some(path) = this.ov_rows.get(*ix).map(|r| r.path.clone()) {
+                    this.pending_reveal = Some(path);
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
+        // 目录树**没有**官方 TreeState 可挂：懒加载的文件夹在扫之前
+        // `is_folder()` 恒为 false，基座点不开（理由与查证见 `state.rs::TreeNode`）
         this.refresh_status(cx);
         this.scan_space(cx);
         this.scan_profile(cx);
+        // 启动时的选中项是构造时就定下的，**没有走过 `select`**，所以这条链上
+        // 灌地址条与同步设置草稿的那两步得在这里自己补。不补的话第一屏的
+        // 地址条停在占位符上、「同步设置」页签显示的是上一份（其实是空）草稿，
+        // 而用户完全没做过任何操作就会以为是坏了
+        this.load_sync_cfg(window, cx);
+        // 启动就把焦点落在壳层根节点上。理由见 `state.rs` 里 `focus` 字段的注释：
+        // Action 派发走「焦点节点 → 逐级上冒」，没有焦点时落到的是 dispatch tree
+        // 的根节点（gpui-kit 包的那层 `Root`），壳层挂在更深处的监听器收不到任何派发
+        this.focus.focus(window, cx);
         this
     }
+}
 
-    fn entry(&self, path: &str) -> Option<&RepoEntry> {
+/// `Ctrl B`。走官方 action + key binding，而不是自己 `on_key_down` 判键：
+/// 自己判的那份不知道当前焦点在输入框还是按钮上，会在打字时把侧栏折了
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = qingbird_gui, no_json)]
+pub(crate) struct ToggleSidebar;
+
+/// `Ctrl I`：折叠 / 展开检视抽屉
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = qingbird_gui, no_json)]
+pub(crate) struct ToggleInspector;
+
+/// `Ctrl .`：停掉当前正在跑的操作
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = qingbird_gui, no_json)]
+pub(crate) struct StopOp;
+
+/// `Ctrl K`：命令面板（全局，两屏都生效）
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = qingbird_gui, no_json)]
+pub(crate) struct OpenPalette;
+
+/// `Ctrl T`：在当前仓库开终端
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = qingbird_gui, no_json)]
+pub(crate) struct OpenTerminal;
+
+/// `1` / `2` / `3`：同步卡上**从左到右**的拉取 · 推送 · 检测。
+///
+/// 键位按**屏幕位置**对位而不是按操作顺序：用户是先看见按钮再按位置的键，
+/// 顺序一改快捷键与眼睛看到的东西就对不上了
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = qingbird_gui, no_json)]
+pub(crate) struct SyncPull;
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = qingbird_gui, no_json)]
+pub(crate) struct SyncPush;
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = qingbird_gui, no_json)]
+pub(crate) struct SyncCheck;
+
+/// `↓` / `↑`：在当前这一组里上下切仓库（到头就停，不绕回）
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = qingbird_gui, no_json)]
+pub(crate) struct NextRepo;
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = qingbird_gui, no_json)]
+pub(crate) struct PrevRepo;
+
+/// `Esc`：收起当前这一屏自己开的临时东西。
+/// 浮层（对话框 / Sheet / 右键菜单）的 Esc 由官方那几层自己吃掉，
+/// 走到这里的只可能是本壳自己画的那一样
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = qingbird_gui, no_json)]
+pub(crate) struct DismissTop;
+
+impl Shell {
+    /// 抽屉开关。标题栏的按钮、面板头那颗折叠键与 `Ctrl I` 共这一个入口。
+    /// 展开态落盘，理由与侧栏一致
+    pub(crate) fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
+        self.inspector_open = !self.inspector_open;
+        self.persist_inspector_layout();
+        cx.notify();
+    }
+}
+
+// ================= 快捷键的动作实现 =================
+//
+// 四个 `1·2·3` / `Ctrl T` 都只是**判一下这一屏有没有这个对象**，
+// 然后交给主面板那几个按钮已经在用的函数——快捷键不该是"第二份拉取逻辑"
+// （上一版的前端就因为按钮与快捷键各写一份而漂过行为）
+
+impl Shell {
+    /// 同步卡的三个键。`1·2·3` 与 ⌘K「当前仓库」那三条都走这里，
+    /// 再往里转发到 `run_sync`——执行层只有一个入口，
+    /// 快捷键与命令面板都不许是第二份拉取逻辑
+    pub(crate) fn hotkey_sync(&mut self, op: Op, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page != Page::Repos {
+            return;
+        }
+        if self.selected.is_none() {
+            window.push_notification("先选一个仓库", cx);
+            return;
+        }
+        // 第三方那把「推送」键在界面上就是一块不可点的占位（设计 3.5 硬边界）。
+        // 快捷键不能比界面多给一把——说一声比悄悄跑掉强
+        if op == Op::Push && self.selected_is_third() {
+            window.push_notification("第三方仓库不能推送", cx);
+            return;
+        }
+        self.run_sync(op, cx);
+    }
+
+    /// `Ctrl T`。与仓库头那颗终端图标、⌘K「在终端中打开」、右键菜单同一条路
+    fn hotkey_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page != Page::Repos {
+            return;
+        }
+        let Some(path) = self.selected.clone() else {
+            window.push_notification("先选一个仓库", cx);
+            return;
+        };
+        if let Err(e) = crate::os::open_terminal(&path) {
+            window.push_notification(e, cx);
+        }
+    }
+
+    /// `↑↓`：上下切仓库（到头就停，不绕回）。
+    ///
+    /// **两屏都生效**，但候选集不同：仓库页是"当前这一组、且没被过滤掉"的
+    /// 侧栏行，总览页是表格里那几行（那一屏没有侧栏，表格就是"当前看谁"）。
+    /// 两边最后都走 `reveal_repo`——切页、展开侧栏、展开那组、滚到那一行，
+    /// 与点侧栏行、点总览行、⌘K 切仓库是同一个入口
+    fn move_repo(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
+        let list: Vec<String> = if self.page == Page::Overview {
+            self.ov_rows.iter().map(|r| r.path.clone()).collect()
+        } else {
+            let filter = self.filter_text(cx);
+            self.repos
+                .iter()
+                .filter(|r| r.is_third_party == self.side_focus.is_third())
+                .filter(|r| crate::sidebar::matches_filter(r, &self.status_of(&r.path), &filter))
+                .map(|r| r.path.clone())
+                .collect()
+        };
+        if list.is_empty() {
+            return;
+        }
+        let cur = self
+            .selected
+            .as_deref()
+            .and_then(|p| list.iter().position(|x| x == p));
+        // 选中的不在候选集里（刚切组还没落选中、或刚进总览）时，
+        // ↓ 从头起步、↑ 从尾起步——否则第一次按会跳到列表中间
+        let next = match cur {
+            Some(ix) => {
+                let n = list.len() as i32;
+                (ix as i32 + delta).clamp(0, n - 1) as usize
+            }
+            None if delta > 0 => 0,
+            None => list.len() - 1,
+        };
+        self.reveal_repo(list[next].clone(), window, cx);
+    }
+
+    /// `Esc`。**只收本壳自己画的那一样**——侧栏筛选框。
+    /// 对话框 / Sheet / 右键菜单的 Esc 都被官方那几层先吃掉了，
+    /// 轮不到这里；真要在这里 `close_dialog` 反而会把用户的对话框抢关掉
+    fn dismiss_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.filter_open {
+            return;
+        }
+        self.filter_open = false;
+        let sf = self.side_filter.clone();
+        let w: &mut Window = window;
+        sf.update(cx, move |st, cx| st.set_value(String::new(), w, cx));
+        cx.notify();
+    }
+}
+
+impl Shell {
+    pub(crate) fn entry(&self, path: &str) -> Option<&RepoEntry> {
         self.repos.iter().find(|r| r.path == path)
     }
+}
 
-    fn view(&self, path: &str) -> Option<&RepoView> {
+impl Shell {
+    pub(crate) fn view(&self, path: &str) -> Option<&RepoView> {
         self.views.get(path)
     }
+}
 
+impl Shell {
     /// 当前仓库的显示名：有自定义名用自定义名
-    fn title(&self, path: &str) -> String {
+    pub(crate) fn title(&self, path: &str) -> String {
         self.entry(path)
             .map(|r| {
                 if r.alias.trim().is_empty() {
@@ -400,10 +1131,12 @@ impl Shell {
             })
             .unwrap_or_default()
     }
+}
 
+impl Shell {
     /// 某槽位实际要跑的命令：仓库里存了就用存的，没存就用自动识别的
     /// （与旧版一致：识别结果只预填，不落盘）
-    fn effective_cmd(&self, path: &str, slot: Slot) -> String {
+    pub(crate) fn effective_cmd(&self, path: &str, slot: Slot) -> String {
         if let Some(e) = self.entry(path) {
             let saved = slot.cmd(e).trim();
             if !saved.is_empty() {
@@ -422,12 +1155,14 @@ impl Shell {
             Slot::Pinned(_) => String::new(),
         }
     }
+}
 
+impl Shell {
     // ---------- 状态扫描 ----------
 
     /// 重扫所有仓库的 git 状态。每个仓库要派生 4~5 条 git 命令，串起来好几秒，
     /// 所以整个扫描丢进后台线程池，仓库之间并发，界面不等着。
-    fn refresh_status(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_status(&mut self, cx: &mut Context<Self>) {
         self.seq += 1;
         let seq = self.seq;
         // 丢掉上一次的句柄（= 取消），免得两轮结果打架
@@ -438,6 +1173,8 @@ impl Shell {
         let paths: Vec<String> = self.repos.iter().map(|r| r.path.clone()).collect();
         if paths.is_empty() {
             self.scanning = false;
+            // 一个仓库都没有时状态条不该一直挂着"尚未扫描"——这轮本身就是成功的空扫描
+            self.last_scan_ts = qingbird_core::store::now_secs();
             return;
         }
         let sel = self.selected.clone();
@@ -450,7 +1187,18 @@ impl Shell {
                             .iter()
                             .map(|p| {
                                 s.spawn(move || {
-                                    (p.clone(), repos::read_status(p), repos::changed_files(p))
+                                    (
+                                        p.clone(),
+                                        repos::read_status(p),
+                                        // 一条 `git status --porcelain` 同时给个数和文件名。
+                                        // 以前这里跑的是 `changed_files`，跑的是同一条命令、
+                                        // 只把结果数了一下行——提交对话框与检视抽屉要的
+                                        // 变更清单就是这批输出的另一半，等于白丢
+                                        repos::changed_entries(p),
+                                        // `git log -1` 只读 HEAD 不走历史，O(1)，
+                                        // 放在状态扫描这一轮里顺手算，不另开一趟
+                                        repos::last_commit_ts(p),
+                                    )
                                 })
                             })
                             .collect();
@@ -458,7 +1206,7 @@ impl Shell {
                             .into_iter()
                             .map(|h| {
                                 h.join().unwrap_or_else(|_| {
-                                    (String::new(), RepoStatus::default(), 0)
+                                    (String::new(), RepoStatus::default(), Vec::new(), 0)
                                 })
                             })
                             .collect::<Vec<_>>()
@@ -468,9 +1216,9 @@ impl Shell {
                     let fork = sel.as_ref().and_then(|sel_path| {
                         results
                             .iter()
-                            .find(|(p, _, _)| p == sel_path)
-                            .filter(|(_, st, _)| st.ahead > 0 && st.behind > 0)
-                            .and_then(|(p, st, _)| {
+                            .find(|(p, _, _, _)| p == sel_path)
+                            .filter(|(_, st, _, _)| st.ahead > 0 && st.behind > 0)
+                            .and_then(|(p, st, _, _)| {
                                 fork::fork_info(p, st, &|args: &[&str]| net::run_local(p, args))
                             })
                     });
@@ -483,10 +1231,15 @@ impl Shell {
                     return; // 已经有更新的一轮在跑了，这批过期
                 }
                 this.scanning = false;
-                for (path, status, changed) in scan {
+                // 状态条要显示"上次扫描"，得在真的扫完时记时间，
+                // 不能在发起扫描时记——那会把失败的一轮也报成"刚刚扫过"
+                this.last_scan_ts = qingbird_core::store::now_secs();
+                for (path, status, changes, last_commit) in scan {
                     let v = this.views.entry(path).or_insert_with(RepoView::blank);
                     v.status = status;
-                    v.changed = changed;
+                    v.changed = changes.len() as u32;
+                    v.changes = changes;
+                    v.last_commit_ts = last_commit;
                 }
                 this.fork = fork;
                 cx.notify();
@@ -494,13 +1247,17 @@ impl Shell {
             .ok();
         }));
     }
+}
 
-    fn select(&mut self, path: String, cx: &mut Context<Self>) {
+impl Shell {
+    pub(crate) fn select(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected.as_deref() == Some(path.as_str()) {
             return;
         }
         self.selected = Some(path.clone());
-        self.out = OutState::default();
+        // **不清日志**：日志按仓库路径存（D7），切回来还在。
+        // 之前这里是 `out = OutState::default()`，切一次仓库就把上一个的输出冲掉了，
+        // 跑到一半切走再切回来只能重跑一遍
         // 分叉状态跟仓库走：换仓库全部作废（备份分支只在"刚变基完"那一刻有意义）
         self.fork = None;
         self.fork_backup = None;
@@ -509,3550 +1266,152 @@ impl Shell {
         repos::touch_repo(&path);
         self.scan_space(cx);
         self.scan_profile(cx);
+        // 停在「历史」页签时切仓库要跟着重扫。`scan_history` 自己按路径判重，
+        // 所以「切到没扫过的仓库」才真起 git 进程，切回扫过的那个直接给缓存
+        if self.cur_detail_tab() == DetailTab::History {
+            self.scan_history(cx);
+        }
+        // 同步设置那一页的草稿跟仓库走：换个仓库还摆着上一个的半成品，
+        // 用户会以为设置是共用的
+        self.load_sync_cfg(window, cx);
         cx.notify();
     }
-
-    // ---------- 添加 / 编辑仓库弹窗 ----------
-
-    /// 打开「添加仓库」。没有原生目录选择对话框可用（gpui-kit 不带，
-    /// 也不为它引新依赖），走「粘贴路径 + 校验」：资源管理器里复制文件地址即可。
-    fn open_add_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.dlg = Some(RepoDialog {
-            editing: None,
-            path_input: cx
-                .new(|cx| InputState::new(window, cx).placeholder("粘贴仓库文件夹路径，如 F:/AIwork/xxx")),
-            name_input: cx.new(|cx| InputState::new(window, cx).placeholder("留空用目录名")),
-            third: false,
-            error: None,
-            init: None,
-        });
-        self.build_dlg(window, cx);
-    }
-
-    /// 打开「仓库设置」：改显示名与归属，或从列表移除（不动磁盘文件）。
-    fn open_edit_dlg(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        let third = self
-            .entry(&path)
-            .map(|e| e.is_third_party)
-            .unwrap_or(false);
-        let alias = self.entry(&path).map(|e| e.alias.clone()).unwrap_or_default();
-        // 当前别名进 placeholder：留空 = 不改（编辑模式不预填，避免误清空）
-        let name_hint = if alias.trim().is_empty() {
-            "留空用目录名".to_string()
-        } else {
-            format!("当前：{alias} · 留空即不改")
-        };
-        self.dlg = Some(RepoDialog {
-            editing: Some(path.clone()),
-            path_input: cx.new(|cx| InputState::new(window, cx).placeholder(path.clone())),
-            name_input: cx.new(|cx| InputState::new(window, cx).placeholder(name_hint)),
-            third,
-            error: None,
-            init: None,
-        });
-        self.build_dlg(window, cx);
-    }
-
-    /// 弹窗本体：官方 Dialog（覆盖层、聚焦、关闭都由框架管）。
-    /// Shell 只负责把自己的状态与输入框挂进去。
-    fn build_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let this = cx.entity();
-        let Some(dlg) = self.dlg.as_ref() else {
-            return;
-        };
-        let editing = dlg.editing.clone();
-        let path_input = dlg.path_input.clone();
-        let name_input = dlg.name_input.clone();
-
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let t = cx.theme().clone();
-            let state = this.read(cx).dlg.as_ref();
-            let third = state.map(|d| d.third).unwrap_or(false);
-            let error: Option<String> = state.and_then(|d| d.error.clone());
-            let init: Option<InitState> = state.and_then(|d| d.init.clone());
-
-            dialog
-                .title(if init.is_some() {
-                    "初始化为 Git 仓库"
-                } else if editing.is_some() {
-                    "仓库设置"
-                } else {
-                    "添加仓库"
-                })
-                // content / footer 的 builder 会被反复调用，每次重画一份
-                .content({
-                    let t = t.clone();
-                    let editing = editing.clone();
-                    let path_input = path_input.clone();
-                    let name_input = name_input.clone();
-                    let error = error.clone();
-                    let init = init.clone();
-                    let this = this.clone();
-                    move |c, _, _| match &init {
-                        Some(i) => c.child(init_body(&t, i, &error, &this)),
-                        None => c.child(dlg_body(
-                            &t,
-                            &editing,
-                            third,
-                            &error,
-                            &path_input,
-                            &name_input,
-                            &this,
-                        )),
-                    }
-                })
-                .footer(match &init {
-                    Some(i) => init_footer(&t, i, &this),
-                    None => dlg_footer(&this, &editing, &path_input, &name_input),
-                })
-        });
-    }
-
-    /// 保存弹窗：添加时校验路径与 .git，编辑时改名与改归属。
-    /// 返回 true = 成功（调用方据此关弹窗），false = 留在原地看错误。
-    fn commit_dlg(
-        &mut self,
-        editing: Option<String>,
-        raw_path: String,
-        raw_name: String,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let third = self.dlg.as_ref().map(|d| d.third).unwrap_or(false);
-        let name = raw_name.trim().to_string();
-
-        match editing {
-            None => {
-                let path = repos::normalize_path_input(&raw_path);
-                if path.is_empty() {
-                    self.set_dlg_error("请先填写仓库路径", cx);
-                    return false;
-                }
-                if self.repos.iter().any(|r| r.path == path) {
-                    self.set_dlg_error("这个仓库已经在列表里了", cx);
-                    return false;
-                }
-                // 不是 git 仓库不是用户的错：转初始化向导，别甩一句报错（旧版同行为）
-                if !repos::valid_repo(&path) {
-                    if !std::path::Path::new(&path).is_dir() {
-                        self.set_dlg_error("文件夹不存在，请检查路径", cx);
-                        return false;
-                    }
-                    self.enter_init(path, cx);
-                    return false;
-                }
-                let list = match repos::add_repo(&path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.set_dlg_error(&e, cx);
-                        return false;
-                    }
-                };
-                // 名字与归属都只在添加成功之后落盘，别留半成品
-                if !name.is_empty() {
-                    let _ = repos::rename_repo(&path, &name);
-                }
-                let _ = qingbird_core::store::set_third_party(&path, third);
-                self.repos = repos::list_repos();
-                let _ = list;
-                // 新仓库的命令要重新识别（启动时只识别了列表里已有的）
-                self.views
-                    .entry(path.clone())
-                    .or_insert_with(RepoView::blank)
-                    .detected = run_cmd::detect_cmds(&path);
-                self.selected = Some(path.clone());
-                self.out = OutState::default();
-                self.dlg = None;
-                self.refresh_status(cx);
-                self.scan_space(cx);
-                self.scan_profile(cx);
-                cx.notify();
-                true
-            }
-            Some(path) => {
-                // 留空 = 不改（placeholder 就是这么写的，别把别名清掉）
-                if !name.is_empty() && repos::rename_repo(&path, &name).is_err() {
-                    self.set_dlg_error("显示名保存失败（配置写不进去）", cx);
-                    return false;
-                }
-                if qingbird_core::store::set_third_party(&path, third).is_err() {
-                    self.set_dlg_error("归属保存失败（配置写不进去）", cx);
-                    return false;
-                }
-                self.repos = repos::list_repos();
-                self.dlg = None;
-                // 归属变了主区换页：划成第三方要立刻补扫档案数据
-                self.scan_profile(cx);
-                cx.notify();
-                true
-            }
-        }
-    }
-
-    /// 弹窗切到初始化向导：读出顶层目录，预勾常见排除项
-    fn enter_init(&mut self, path: String, cx: &mut Context<Self>) {
-        let items = repos::list_dir_items(&path);
-        let mut excludes = std::collections::HashSet::new();
-        for it in &items {
-            if it.is_dir && INIT_EXCLUDE_HINTS.contains(&it.name.as_str()) {
-                excludes.insert(it.name.clone());
-            }
-        }
-        if let Some(d) = self.dlg.as_mut() {
-            d.init = Some(InitState {
-                path,
-                items,
-                excludes,
-                working: false,
-            });
-            d.error = None;
-        }
-        cx.notify();
-    }
-
-    /// 跑初始化：后台线程（git init + add + commit 要好几秒），
-    /// 成功则入列表并选中，失败把原因留在弹窗里。
-    fn run_init(&mut self, cx: &mut Context<Self>) {
-        let Some(d) = self.dlg.as_ref() else {
-            return;
-        };
-        let Some(init) = d.init.as_ref() else {
-            return;
-        };
-        if init.working {
-            return;
-        }
-        let path = init.path.clone();
-        let excludes: Vec<String> = init.excludes.iter().cloned().collect();
-        if let Some(d) = self.dlg.as_mut() {
-            if let Some(i) = d.init.as_mut() {
-                i.working = true;
-            }
-            d.error = None;
-        }
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            let r = cx
-                .background_executor()
-                .spawn(async move { repos::init_repo(&path, &excludes) })
-                .await;
-            let win = this.update(cx, |this, _| this.win).ok();
-            this.update(cx, |this, cx| {
-                match r {
-                    Ok(entry) => {
-                        this.repos = repos::list_repos();
-                        this.views
-                            .entry(entry.path.clone())
-                            .or_insert_with(RepoView::blank)
-                            .detected = run_cmd::detect_cmds(&entry.path);
-                        this.selected = Some(entry.path.clone());
-                        this.out = OutState::default();
-                        this.dlg = None;
-                        this.refresh_status(cx);
-                        this.scan_space(cx);
-                        this.scan_profile(cx);
-                        // 成了就把弹窗关掉；失败留在原地让用户看到原因
-                        if let Some(win) = win {
-                            let _ = cx.update_window(win, |_, window, cx| {
-                                window.close_dialog(cx);
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        if let Some(d) = this.dlg.as_mut() {
-                            d.error = Some(e);
-                            if let Some(i) = d.init.as_mut() {
-                                i.working = false;
-                            }
-                        }
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// 写错误提示并通知重画：弹窗是浮层，不 notify 的话错误文案不会刷出来
-    fn set_dlg_error(&mut self, msg: &str, cx: &mut Context<Self>) {
-        if let Some(d) = self.dlg.as_mut() {
-            d.error = Some(msg.to_string());
-        }
-        cx.notify();
-    }
-
+}
+impl Shell {
     /// 从列表移除仓库（只删记录，不动磁盘文件）
-    fn remove_repo_at(&mut self, path: String, cx: &mut Context<Self>) {
+    ///
+    /// 收 `window` 是因为选中项可能因此换到别人，而地址条与同步设置草稿
+    /// 都得跟着换——那两步要一个活的 `&mut Window` 才能改 `InputState`
+    pub(crate) fn remove_repo_at(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let _ = repos::remove_repo(&path);
         self.repos = repos::list_repos();
         self.views.remove(&path);
         if self.selected.as_deref() == Some(path.as_str()) {
             self.selected = self.repos.first().map(|r| r.path.clone());
-            self.out = OutState::default();
             self.scan_space(cx);
             self.scan_profile(cx);
+            // 与 `select` 同一套收尾：换人之后地址条 / 草稿 / 历史都得重灌，
+            // 否则抽屉里摆着上一个仓库的远端地址
+            self.load_sync_cfg(window, cx);
+            if self.cur_detail_tab() == DetailTab::History {
+                self.scan_history(cx);
+            }
         }
+        self.logs.remove(&path);
         self.dlg = None;
         cx.notify();
     }
-
-    // ---------- 跑命令 ----------
-
-    fn run_slot(&mut self, slot: Slot, cx: &mut Context<Self>) {
-        let Some(path) = self.selected.clone() else {
-            return;
-        };
-        let cmd = self.effective_cmd(&path, slot);
-        if cmd.is_empty() {
-            self.out.error = Some(format!(
-                "识别不出「{}」的命令，这条先跳过",
-                slot.default_label()
-            ));
-            cx.notify();
-            return;
-        }
-
-        self.out = OutState {
-            running: true,
-            op: Some(Op::Cmd(slot)),
-            lines: Vec::new(),
-            error: None,
-        };
-        cx.notify();
-
-        // 命令在后台线程跑，行进共享缓冲；UI 线程定时把新行搬进状态
-        let buf: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let done = Arc::new(AtomicBool::new(false));
-
-        let sink_buf = Arc::clone(&buf);
-        let sink_done = Arc::clone(&done);
-        let run_path = path.clone();
-        let runner = cx.background_executor().spawn(async move {
-            let on_line: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |line: &str| {
-                if let Ok(mut g) = sink_buf.lock() {
-                    g.push(line.to_string());
-                }
-            });
-            let r = run_cmd::run_repo_cmd(&run_path, &cmd, slot, on_line);
-            sink_done.store(true, Ordering::SeqCst);
-            r
-        });
-
-        let ui_buf = Arc::clone(&buf);
-        let ui_done = Arc::clone(&done);
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(120))
-                    .await;
-                let batch = {
-                    let mut g = ui_buf.lock().unwrap_or_else(|e| e.into_inner());
-                    std::mem::take(&mut *g)
-                };
-                let finished = ui_done.load(Ordering::SeqCst);
-                this.update(cx, |this, cx| {
-                    this.out.lines.extend(batch);
-                    if finished {
-                        this.out.running = false;
-                    }
-                    cx.notify();
-                })
-                .ok();
-                if finished {
-                    break;
-                }
-            }
-        })
-        .detach();
-
-        cx.spawn(async move |this, cx| {
-            let result = runner.await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(_) => this.out.error = None,
-                    Err(e) => this.out.error = Some(e),
-                }
-                this.out.running = false;
-                // 命令跑完仓库状态可能变了（生成了构建产物、改了文件），顺手重扫
-                this.repos = repos::list_repos();
-                this.refresh_status(cx);
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// 跑一个同步操作（检测更新 / 拉取 / 推送）。
-    /// 与 run_slot 同一套后台管道：后台线程跑 + 共享缓冲，UI 线程 120ms 轮询回显。
-    fn run_sync(&mut self, op: Op, cx: &mut Context<Self>) {
-        let Some(path) = self.selected.clone() else {
-            return;
-        };
-        // core 的操作锁同一时刻只放一个网络操作，UI 先挡掉连点
-        if self.out.running {
-            return;
-        }
-        self.out = OutState {
-            running: true,
-            op: Some(op),
-            lines: Vec::new(),
-            error: None,
-        };
-        cx.notify();
-
-        let buf: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let done = Arc::new(AtomicBool::new(false));
-
-        let sink_buf = Arc::clone(&buf);
-        let sink_done = Arc::clone(&done);
-        let run_path = path.clone();
-        let runner = cx.background_executor().spawn(async move {
-            let on_progress: Arc<dyn Fn(&qingbird_core::types::ProgressEvent) + Send + Sync> =
-                Arc::new(move |ev: &qingbird_core::types::ProgressEvent| {
-                    if let Ok(mut g) = sink_buf.lock() {
-                        let mut line = format!("· {}", ev.stage);
-                        if !ev.detail.is_empty() {
-                            line.push_str(&format!("  {}", ev.detail));
-                        }
-                        g.push(line);
-                    }
-                });
-            let r = match op {
-                Op::Pull => sync::pull_repo(&run_path, true, Some(&*on_progress)),
-                Op::Push => sync::push_repo(&run_path),
-                Op::Check => sync::check_update(&run_path, Some(&*on_progress)),
-                Op::Rebase(stash) => fork::rebase_fork(&run_path, stash, Some(&*on_progress)),
-                Op::UndoRebase => fork::undo_rebase(&run_path),
-                Op::Cmd(_) => unreachable!("run_sync 只接同步操作"),
-            };
-            sink_done.store(true, Ordering::SeqCst);
-            r
-        });
-
-        let ui_buf = Arc::clone(&buf);
-        let ui_done = Arc::clone(&done);
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(120))
-                    .await;
-                let batch = {
-                    let mut g = ui_buf.lock().unwrap_or_else(|e| e.into_inner());
-                    std::mem::take(&mut *g)
-                };
-                let finished = ui_done.load(Ordering::SeqCst);
-                this.update(cx, |this, cx| {
-                    this.out.lines.extend(batch);
-                    if finished {
-                        this.out.running = false;
-                    }
-                    cx.notify();
-                })
-                .ok();
-                if finished {
-                    break;
-                }
-            }
-        })
-        .detach();
-
-        cx.spawn(async move |this, cx| {
-            let result = runner.await;
-            this.update(cx, |this, cx| {
-                this.out.lines.push(if result.ok {
-                    format!("✓ {}", result.message)
-                } else {
-                    format!("✗ {}", result.message)
-                });
-                this.out.running = false;
-                // 变基改写了历史：接住后端算好的分叉信息与备份分支。
-                // 备份分支只在变基成功那一刻提供"撤销"；撤销完成后不再提供
-                match op {
-                    Op::Rebase(_) => {
-                        this.fork = result.fork;
-                        this.fork_backup = result.backup_branch.filter(|_| result.ok);
-                        this.fork_confirm = false;
-                    }
-                    Op::UndoRebase => {
-                        this.fork = result.fork;
-                        this.fork_backup = None;
-                        this.fork_confirm = false;
-                    }
-                    _ => {}
-                }
-                // 拉取/推送/变基都会改 ahead/behind，重扫一遍刷新侧栏与徽章
-                this.repos = repos::list_repos();
-                this.refresh_status(cx);
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    // ---------- 磁盘占用 ----------
-
-    /// 扫当前仓库的磁盘占用。大仓库可能好几秒，放后台，界面先画「扫描中」。
-    fn scan_space(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.selected.clone() else {
-            return;
-        };
-        self.space_seq += 1;
-        let seq = self.space_seq;
-        self.space_task = None;
-        // 重扫不打掉「已释放 X」的提示：清理完会立刻重扫，note 得活着
-        let note = self.space.note.clone();
-        self.space = SpaceState {
-            scanning: true,
-            note,
-            ..SpaceState::default()
-        };
-        cx.notify();
-
-        self.space_task = Some(cx.spawn(async move |this, cx| {
-            let r = cx
-                .background_executor()
-                .spawn(async move { space::scan_repo_space(&path) })
-                .await;
-            this.update(cx, |this, cx| {
-                if this.space_seq != seq {
-                    return; // 切了仓库 / 已有新一轮，这批过期
-                }
-                this.space.scanning = false;
-                match r {
-                    Ok(rep) => this.space.report = Some(rep),
-                    Err(e) => this.space.error = Some(e),
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    /// 一键清理：把报告里的可清理缓存目录逐个删掉（白名单由 core 把关）。
-    fn clean_all(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.selected.clone() else {
-            return;
-        };
-        if self.space.cleaning {
-            return;
-        }
-        let names: Vec<String> = self
-            .space
-            .report
-            .as_ref()
-            .map(|r| {
-                r.dirs
-                    .iter()
-                    .filter(|d| d.is_cache && d.size > 0)
-                    .map(|d| d.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        if names.is_empty() {
-            return;
-        }
-        self.space.cleaning = true;
-        self.space.note = None;
-        self.space.error = None;
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            let freed = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut total = 0u64;
-                    for n in &names {
-                        match space::delete_cache_dir(&path, n) {
-                            Ok(s) => total += s,
-                            Err(e) => return Err(format!("清理「{n}」时中断：{e}")),
-                        }
-                    }
-                    Ok(total)
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                this.space.cleaning = false;
-                match freed {
-                    Ok(bytes) => {
-                        this.space.note = Some(format!("已释放 {}", space::human_size(bytes)));
-                        // 清完重扫，构成条与图例立刻对上
-                        this.scan_space(cx);
-                    }
-                    Err(e) => this.space.error = Some(e),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    // ---------- 档案页数据（Screen 1） ----------
-
-    /// 扫当前仓库的档案数据：语言统计 / 近 30 天活跃度 / 最近提交 / README。
-    /// 合起来十几条本地 git 命令，一个后台任务跑完一次性上屏。
-    /// 只有第三方仓库显示档案页，「我的」仓库不扫这些。
-    fn scan_profile(&mut self, cx: &mut Context<Self>) {
-        let need = self
-            .selected
-            .as_deref()
-            .and_then(|p| self.entry(p))
-            .map(|e| e.is_third_party)
-            .unwrap_or(false);
-        self.profile_seq += 1;
-        self.profile_task = None;
-        if !need {
-            self.profile = ProfileState::default();
-            return;
-        }
-        let Some(path) = self.selected.clone() else {
-            return;
-        };
-        let seq = self.profile_seq;
-        self.profile = ProfileState {
-            scanning: true,
-            ..ProfileState::default()
-        };
-        cx.notify();
-
-        self.profile_task = Some(cx.spawn(async move |this, cx| {
-            let r = cx
-                .background_executor()
-                .spawn(async move {
-                    (
-                        repos::repo_languages(&path),
-                        repos::commit_activity(&path, PROFILE_ACTIVITY_DAYS),
-                        repos::last_commit_ts(&path),
-                        repos::read_readme(&path),
-                    )
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                if this.profile_seq != seq {
-                    return; // 切了仓库 / 已有新一轮，这批过期
-                }
-                let (langs, activity, ts, readme) = r;
-                this.profile = ProfileState {
-                    langs,
-                    activity,
-                    last_commit_ts: ts,
-                    readme,
-                    scanning: false,
-                };
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    // ---------- 总览批量同步（Screen 2） ----------
-
-    /// 串行跑一批同步操作。拉取遇脏工作区跳过（不自动 stash——那是替用户
-    /// 做决定），与旧版总览批量的约定一致；推送没有跳过这条路。
-    /// 全程一个后台任务，每完成一项就刷一次进度。
-    fn run_batch(&mut self, pull: bool, paths: Vec<String>, cx: &mut Context<Self>) {
-        if self.batch.as_ref().is_some_and(|b| b.running) {
-            return; // 上一批还在跑
-        }
-        if paths.is_empty() {
-            return;
-        }
-        self.batch = Some(BatchRun {
-            pull,
-            paths: paths.clone(),
-            done: 0,
-            ok: 0,
-            skipped: 0,
-            failed: 0,
-            running: true,
-            note: None,
-        });
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            for path in paths {
-                // 跑之前先看脏不脏：拉取对脏工作区让路
-                let skip = this
-                    .update(cx, |this, _| {
-                        pull
-                            && this
-                                .views
-                                .get(&path)
-                                .map(|v| v.status.dirty)
-                                .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
-                // None = 跳过，Some(true) 成功，Some(false) 失败
-                let outcome: Option<bool> = if skip {
-                    None
-                } else {
-                    Some(
-                        cx.background_executor()
-                            .spawn(async move {
-                                if pull {
-                                    sync::pull_repo(&path, true, None).ok
-                                } else {
-                                    sync::push_repo(&path).ok
-                                }
-                            })
-                            .await,
-                    )
-                };
-                this.update(cx, |this, cx| {
-                    let Some(b) = this.batch.as_mut() else {
-                        return;
-                    };
-                    b.done += 1;
-                    match outcome {
-                        None => b.skipped += 1,
-                        Some(true) => b.ok += 1,
-                        Some(false) => b.failed += 1,
-                    }
-                    cx.notify();
-                })
-                .ok();
-            }
-            this.update(cx, |this, cx| {
-                if let Some(b) = this.batch.as_mut() {
-                    b.running = false;
-                    let name = if b.pull { "批量拉取" } else { "批量推送" };
-                    let mut parts = vec![format!("{} 个成功", b.ok)];
-                    if b.skipped > 0 {
-                        parts.push(format!("{} 个跳过（工作区有改动，需切到该仓库确认后再拉）", b.skipped));
-                    }
-                    if b.failed > 0 {
-                        parts.push(format!("{} 个失败，原因见各自仓库的日志", b.failed));
-                    }
-                    b.note = Some(format!("{name}完成：{}", parts.join(" · ")));
-                    // 拉取/推送改了 ahead/behind，重扫刷新侧栏与表格
-                    this.refresh_status(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
 }
-
-/// 档案页迷你柱图的天数窗口。设计稿标「近 30 天活跃度」；
-/// 与旧检视抽屉的 14 天不是一回事，各用各的参数。
-const PROFILE_ACTIVITY_DAYS: u32 = 30;
-
-/// 仓库在侧栏的状态口径：分叉 > 落后 > 领先 > 脏 > 已同步。
-/// 与后端 `ForkInfo` 一致（ahead>0 && behind>0 就是分叉），不另立标准。
-#[derive(Clone, Copy, PartialEq)]
-enum Bucket {
-    Synced,
-    Dirty,
-    Ahead,
-    Behind,
-    Forked,
-    Unknown,
-}
-
-fn bucket_of(s: &RepoStatus) -> Bucket {
-    if !s.is_repo {
-        return Bucket::Unknown;
-    }
-    if s.ahead > 0 && s.behind > 0 {
-        Bucket::Forked
-    } else if s.behind > 0 {
-        Bucket::Behind
-    } else if s.ahead > 0 {
-        Bucket::Ahead
-    } else if s.dirty {
-        Bucket::Dirty
-    } else {
-        Bucket::Synced
-    }
-}
-
-fn dot_color(b: Bucket, t: &Theme) -> Hsla {
-    match b {
-        Bucket::Synced => t.colors.success,
-        // 设计稿：未提交用灰蓝强调点，不是灰
-        Bucket::Dirty => t.colors.accent,
-        Bucket::Ahead => t.colors.accent,
-        Bucket::Behind | Bucket::Forked => orange(t),
-        Bucket::Unknown => t.colors.border,
-    }
-}
-
-/// 时间戳 → 「2 小时前」这种说法。0 = 从没跑过。
-fn rel_time(ts: u64) -> String {
-    if ts == 0 {
-        return String::new();
-    }
-    let now = qingbird_core::store::now_secs();
-    let d = now.saturating_sub(ts);
-    match d {
-        0..=59 => "刚刚".into(),
-        60..=3_599 => format!("{} 分钟前", d / 60),
-        3_600..=86_399 => format!("{} 小时前", d / 3_600),
-        86_400..=172_799 => "昨天".into(),
-        _ => format!("{} 天前", d / 86_400),
-    }
-}
-
-impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme().clone();
-
-        // 主区：按页面与仓库归属路由
-        let main: AnyElement = match self.page {
-            Page::Overview => self.overview_page(&t, cx).into_any_element(),
-            Page::Repos => match self.selected.clone() {
-                Some(path) => {
-                    let third = self
-                        .entry(&path)
-                        .map(|e| e.is_third_party)
-                        .unwrap_or(false);
-                    if third {
-                        self.profile_page(&path, &t, cx).into_any_element()
-                    } else {
-                        self.workbench_page(&path, &t, cx).into_any_element()
-                    }
-                }
-                None => empty_main(&t),
-            },
-        };
-
-        // 仓库页侧栏常驻（用户拍板）：选中的是「我的」主区显示工作台，
-        // 「第三方」显示档案页；Screen 3 未画侧栏视为画稿聚焦省略
-        let show_sidebar = self.page == Page::Repos;
-
-        let body = h_flex()
-            .flex_1()
-            .min_h_0()
-            .child(self.nav_rail(&t, cx))
-            .child(vline(&t));
-        let body = if show_sidebar {
-            body.child(self.sidebar(&t, cx))
-                .child(vline(&t))
-                .child(main)
-        } else {
-            body.child(main)
-        };
-
-        v_flex()
-            .size_full()
-            .bg(t.colors.background)
-            .text_color(t.colors.foreground)
-            .child(self.title_bar(&t))
-            .child(body)
-    }
-}
-
-// ================= 标题栏 =================
 
 impl Shell {
-    /// 48px 白底顶栏：Logo + 应用名 + 全局搜索（窗口控制交给系统装饰）
-    fn title_bar(&self, t: &Theme) -> Div {
-        h_flex()
-            .w_full()
-            .h(px(48.0))
-            .flex_shrink_0()
-            .px(px(16.0))
-            .gap(px(GAP_LG))
-            .bg(t.colors.popover)
-            .border_b_1()
-            .border_color(t.colors.border)
-            .items_center()
-            // Logo：墨色圆角方块 + 白鸟
-            .child(
-                div()
-                    .w(px(20.0))
-                    .h(px(20.0))
-                    .flex_shrink_0()
-                    .rounded(px(R_SM))
-                    .bg(t.colors.primary)
-                    .items_center()
-                    .justify_center()
-                    .text_color(t.colors.popover)
-                    .child(icon_sm(AssetIcon::Bird)),
-            )
-            .child(
-                div()
-                    .text_size(px(FS_BODY))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(body(t))
-                    .child("青鸟 Git"),
-            )
-            .child(div().flex_1())
-            // 全局搜索：官方 Input（检索逻辑待接 Ctrl K）。
-            // small = 24px 高 + 8px 水平内边距：xsmall 只有 20px 高、4px 内边距，字贴边
-            .child(
-                Input::new(&self.global_search)
-                    .prefix(icon_sm(AssetIcon::Search).text_color(tier4(t)))
-                    .small()
-                    .w(px(360.0)),
-            )
-            .child(div().flex_1())
-    }
-}
-
-// ================= 导航轨 =================
-
-impl Shell {
-    fn nav_rail(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
-        v_flex()
-            .w(px(56.0))
-            .h_full()
-            .flex_shrink_0()
-            .bg(t.colors.popover)
-            .items_center()
-            .p(px(10.0))
-            .gap(px(GAP_TIGHT))
-            .child(self.nav_item(AssetIcon::Folder, Page::Repos, t, cx))
-            .child(self.nav_item(AssetIcon::LayoutDashboard, Page::Overview, t, cx))
-            .child(div().flex_1())
-            .child(
-                Button::new("nav-plus")
-                    .icon(icon_md(AssetIcon::Plus).text_color(tier3(t)))
-                    .ghost()
-                    .with_size(Size::Medium),
-            )
-            .child(
-                Button::new("nav-scan")
-                    .icon(icon_md(AssetIcon::RefreshCw).text_color(tier3(t)))
-                    .ghost()
-                    .with_size(Size::Medium)
-                    .loading(self.scanning),
-            )
-            .child(
-                Button::new("nav-settings")
-                    .icon(icon_md(AssetIcon::Settings).text_color(tier3(t)))
-                    .ghost()
-                    .with_size(Size::Medium),
-            )
-    }
-
-    /// 可点导航项：36x36 圆角 8，选中暖灰面 + 墨色图标
-    fn nav_item(
-        &self,
-        icon: AssetIcon,
-        page: Page,
-        t: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let active = self.page == page;
-        let color = if active {
-            t.colors.foreground
-        } else {
-            tier3(t)
-        };
-        h_flex()
-            .id(SharedString::from(format!("nav-{:?}", page)))
-            .w(px(36.0))
-            .h(px(36.0))
-            .flex_shrink_0()
-            .rounded(px(R_LG))
-            .items_center()
-            .justify_center()
-            .when(active, |it| it.bg(warm(t)))
-            .child(div().text_color(color).child(icon_md(icon)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if this.page != page {
-                    this.page = page;
-                    cx.notify();
-                }
-            }))
-    }
-}
-
-// ================= 仓库侧栏（Screen 1） =================
-
-impl Shell {
-    /// 264px 白底侧栏：标题 / 搜索 / 我的与第三方分组 / 底部添加仓库
-    fn sidebar(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
-        let side = v_flex()
-            .w(px(264.0))
-            .h_full()
-            .flex_shrink_0()
-            .bg(t.colors.popover)
-            .p(px(12.0))
-            .gap(px(GAP))
-            .child(
-                h_flex()
-                    .w_full()
-                    // 与下面过滤输入框的文字（p12 + input px8 = 20px）对齐
-                    .px(px(8.0))
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(tier4(t))
-                            .child("仓库"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .text_color(tier4(t))
-                            .child(format!("{}", self.repos.len())),
-                    ),
-            )
-            .child(
-                // 侧栏过滤：官方 Input（small 档：24px 高，与设计稿一致）
-                Input::new(&self.side_filter)
-                    .prefix(icon_sm(AssetIcon::Search).text_color(tier4(t)))
-                    .small()
-                    .w_full(),
-            );
-
-        if self.repos.is_empty() {
-            return side.child(
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(GAP_TIGHT))
-                    .child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .text_color(tier4(t))
-                            .child("还没有仓库"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .text_color(tier4(t))
-                            .child("用下面的「添加仓库」加一个"),
-                    ),
-            );
-        }
-
-        let mine: Vec<&RepoEntry> = self
-            .repos
+    /// 窗口底部状态条（官方 `StatusBar`）：仓库数 · 当前选中路径 · 定时同步 · 上次扫描。
+    ///
+    /// 为什么扫描入口在这里而不在导航轨：导航轨只回答"我在看哪一屏"（D2），
+    /// 而"重新扫一遍所有仓库"是个动作。"上次扫描 · 2 分钟前"本身就是这个动作
+    /// 最好的标签——它既回答了"这些数据什么时候的"，点一下又能刷新。
+    pub(crate) fn status_bar(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // 状态条报的是"**有没有活**"，不是"当前选中的仓库有没有活"——
+        // 用户在总览页盯着侧栏时，想知道的是这机器上还有没有东西在跑
+        let running = self
+            .logs
             .iter()
-            .filter(|r| !r.is_third_party)
-            .collect();
-        let third: Vec<&RepoEntry> = self.repos.iter().filter(|r| r.is_third_party).collect();
-
-        let mut list = v_flex()
-            .id("sidebar-list")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .gap(px(2.0))
-            .child(
-                group_header(&format!("我的仓库 · {}", mine.len()), t),
-            );
-        for r in &mine {
-            list = list.child(self.repo_row(r, t, cx));
-        }
-        list = list.child(group_header(&format!("第三方仓库 · {}", third.len()), t));
-        for r in &third {
-            list = list.child(self.repo_row(r, t, cx));
-        }
-
-        side.child(list).child(
-            h_flex()
-                .id("add-repo")
-                .w_full()
-                .h(px(36.0))
-                .px(px(10.0))
-                .rounded(px(R_LG))
-                .items_center()
-                .gap(px(GAP))
-                .text_color(tier4(t))
-                .when(self.hovered.as_deref() == Some(ADD_HOVER_KEY), |r| {
-                    r.bg(t.colors.list_hover)
-                })
-                .child(icon_sm(AssetIcon::Plus))
-                .child(div().text_size(px(FS_BODY)).child("添加仓库"))
-                .on_click(cx.listener(|this, _, window, cx| this.open_add_dlg(window, cx)))
-                .on_hover({
-                    let this = cx.entity();
-                    move |hovered, _, cx| {
-                        this.update(cx, |this, cx| {
-                            if *hovered {
-                                this.hovered = Some(ADD_HOVER_KEY.to_string());
-                            } else if this.hovered.as_deref() == Some(ADD_HOVER_KEY) {
-                                this.hovered = None;
-                            }
-                            cx.notify();
-                        });
-                    }
-                }),
-        )
-    }
-
-    /// 侧栏仓库行：状态点 + 名称 + 状态徽章；单击选中，双击开设置
-    fn repo_row(&self, r: &RepoEntry, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let path = r.path.clone();
-        let toggle_path = path.clone();
-        let hov_path = path.clone();
-        let name = self.title(&path);
-        let status = self
-            .view(&path)
-            .map(|v| v.status.clone())
-            .unwrap_or_default();
-        let b = bucket_of(&status);
-        let selected = self.selected.as_deref() == Some(path.as_str());
-        let hovered = self.hovered.as_deref() == Some(path.as_str());
-
-        let mut row = h_flex()
-            .id(SharedString::from(format!("repo-{path}")))
-            .w_full()
-            .h(px(38.0))
-            .px(px(10.0))
-            .rounded(px(R_LG))
+            .find(|(_, l)| l.running)
+            .map(|(p, _)| p.clone());
+        // 跑批量时这一格报批次进度而不是"运行中 · 某仓库"：
+        // 批量横跨多个仓库，报一个仓库名会让人以为只动了一个
+        let batch = self.batch_note();
+        let left = h_flex()
             .items_center()
-            .gap(px(GAP))
-            // 悬停给一层极淡的底色：整行可点，鼠标放上去必须看得出能点
-            .when(hovered && !selected, |r| r.bg(t.colors.list_hover))
+            .gap(px(GAP_TIGHT))
             .child(
                 div()
-                    .w(px(7.0))
-                    .h(px(7.0))
+                    .w(px(6.0))
+                    .h(px(6.0))
                     .flex_shrink_0()
                     .rounded_full()
-                    .bg(dot_color(b, t)),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(FS_BODY))
-                    .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
-                    .text_color(if selected {
-                        t.colors.foreground
-                    } else {
-                        body(t)
-                    })
-                    .child(name),
-            )
-            .child(div().flex_1());
-        if selected {
-            row = row.bg(warm(t));
-        }
-        // 状态徽章：可更新 / 已分叉（暖橙），待推送（蓝灰）
-        let badge: Option<(String, Hsla, Hsla)> = match b {
-            Bucket::Behind => Some(("可更新".into(), orange(t), orange_bg(t))),
-            Bucket::Forked => Some(("已分叉".into(), orange(t), orange_bg(t))),
-            Bucket::Ahead => Some((
-                format!("待推送 {}", status.ahead),
-                t.colors.accent,
-                blue_bg(t),
-            )),
-            _ => None,
-        };
-        if let Some((text, fg, bg)) = badge {
-            let text: String = text.into();
-            row = row.child(
-                h_flex()
-                    .h(px(18.0))
-                    .px(px(6.0))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .bg(bg)
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(FS_META))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(fg)
-                            .child(text),
-                    ),
-            );
-        }
-        row.on_click(cx.listener(move |this, _, _, cx| this.select(path.clone(), cx)))
-            // 双击开「仓库设置」：改名 / 改归属 / 移除
-            .on_double_click(cx.listener(move |this, _, window, cx| {
-                this.open_edit_dlg(toggle_path.clone(), window, cx)
-            }))
-            .on_hover({
-                let this = cx.entity();
-                move |hovered, _, cx| {
-                    this.update(cx, |this, cx| {
-                        if *hovered {
-                            this.hovered = Some(hov_path.clone());
-                        } else if this.hovered.as_deref() == Some(hov_path.as_str()) {
-                            this.hovered = None;
-                        }
-                        cx.notify();
-                    });
-                }
-            })
-    }
-}
-
-fn group_header(text: &str, t: &Theme) -> Div {
-    // 左内边距与仓库行的 10px 对齐：之前 px(2)，标题比行内容凸出去一截
-    h_flex().w_full().px(px(10.0)).pt(px(4.0)).child(
-        div()
-            .text_size(px(FS_META))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(tier4(t))
-            .child(text.to_string()),
-    )
-}
-
-// ================= 主区路由 =================
-
-fn empty_main(t: &Theme) -> AnyElement {
-    v_flex()
-        .flex_1()
-        .min_h_0()
-        .h_full()
-        .items_center()
-        .justify_center()
-        .bg(t.colors.background)
-        .child(
-            div()
-                .text_size(px(FS_BODY))
-                .text_color(tier3(t))
-                .child("选一个仓库"),
-        )
-        .into_any_element()
-}
-
-// ================= Screen 2：总览批量同步 =================
-
-impl Shell {
-    /// 总览页：标题统计 + 四张状态卡 + 分组表格 + 底部批量条。
-    /// 数据全部来自已有 views 状态缓存（侧栏扫描的那份），不另扫一遍。
-    fn overview_page(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        // 行数据：归属分组 + 桶判定（口径与侧栏、ForkInfo 一致）
-        let rows: Vec<(&RepoEntry, &RepoView)> = self
-            .repos
-            .iter()
-            .map(|r| (r, self.views.get(&r.path).unwrap_or(&EMPTY_VIEW)))
-            .collect();
-        let mine: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, (e, _))| !e.is_third_party)
-            .map(|(i, _)| i)
-            .collect();
-        let third: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, (e, _))| e.is_third_party)
-            .map(|(i, _)| i)
-            .collect();
-
-        // 四张统计卡：最新 / 落后云端 / 已分叉 / 未提交（未提交是独立维度，
-        // 与其余三档可重叠——设计稿如此，别强行互斥）
-        let count = |f: &dyn Fn(&RepoView) -> bool| rows.iter().filter(|(_, v)| f(v)).count();
-        let synced_n = count(&|v| bucket_of(&v.status) == Bucket::Synced);
-        let behind_n = count(&|v| bucket_of(&v.status) == Bucket::Behind);
-        let fork_n = count(&|v| bucket_of(&v.status) == Bucket::Forked);
-        let dirty_n = count(&|v| v.status.dirty);
-
-        // 批量队列：只收同类动作的行（分叉是「查看」，不收——
-        // 备份变基会改写历史，只能进那个仓库的向导里点）
-        let todo_paths = |pull: bool| -> Vec<String> {
-            rows.iter()
-                .filter(|(_, v)| {
-                    let b = bucket_of(&v.status);
-                    if pull {
-                        b == Bucket::Behind
-                    } else {
-                        b == Bucket::Ahead
-                    }
-                })
-                .map(|(e, _)| e.path.clone())
-                .collect()
-        };
-        let pull_paths = todo_paths(true);
-        let push_paths = todo_paths(false);
-        let batch_running = self.batch.as_ref().map(|b| b.running).unwrap_or(false);
-
-        let head = h_flex()
-            .w_full()
-            .justify_between()
-            .items_start()
-            .child(
-                v_flex()
-                    .gap(px(GAP_TIGHT))
-                    .child(
-                        div()
-                            .text_size(px(FS_HEAD))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(t.colors.foreground)
-                            .child("总览"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .text_color(tier3(t))
-                            .child(format!(
-                                "{} 个仓库 · 我的 {} · 第三方 {}",
-                                rows.len(),
-                                mine.len(),
-                                third.len()
-                            )),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap(px(GAP))
-                    .child(
-                        Button::new("ov-pull-all")
-                            .label(if pull_paths.is_empty() {
-                                "全部拉取".to_string()
-                            } else {
-                                format!("全部拉取 {}", pull_paths.len())
-                            })
-                            .icon(icon_md(AssetIcon::ArrowDown).text_color(t.colors.popover))
-                            .primary()
-                            .disabled(pull_paths.is_empty() || batch_running)
-                            .with_size(Size::Medium)
-                            .on_click(cx.listener({
-                                let paths = pull_paths.clone();
-                                move |this, _, _, cx| this.run_batch(true, paths.clone(), cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("ov-push-all")
-                            .label(if push_paths.is_empty() {
-                                "全部推送".to_string()
-                            } else {
-                                format!("全部推送 {}", push_paths.len())
-                            })
-                            .icon(icon_md(AssetIcon::ArrowUp).text_color(tier3(t)))
-                            .outline()
-                            .disabled(push_paths.is_empty() || batch_running)
-                            .with_size(Size::Medium)
-                            .on_click(cx.listener({
-                                let paths = push_paths.clone();
-                                move |this, _, _, cx| this.run_batch(false, paths.clone(), cx)
-                            })),
-                    ),
-            );
-
-        let cards = h_flex()
-            .w_full()
-            .gap(px(GAP))
-            .child(stat_card(synced_n, "最新", t.colors.success, t))
-            .child(stat_card(behind_n, "落后云端", orange(t), t))
-            .child(stat_card(fork_n, "已分叉", orange(t), t))
-            .child(stat_card(dirty_n, "未提交", t.colors.accent, t));
-
-        // 表格头
-        let col_branch = px(90.0);
-        let col_status = px(96.0);
-        let col_counts = px(90.0);
-        let col_synced = px(90.0);
-        let col_action = px(120.0);
-        let head_row = |name: &str| -> Div {
-            h_flex()
-                .w_full()
-                .items_center()
-                .px(px(12.0))
-                .h(px(32.0))
-                .gap(px(GAP))
-                .child(div().w(px(24.0))) // 复选框占位
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(FS_META))
-                        .text_color(tier4(t))
-                        .child(name.to_string()),
-                )
-                .child(div().w(col_branch).text_size(px(FS_META)).text_color(tier4(t)).child("分支"))
-                .child(div().w(col_status).text_size(px(FS_META)).text_color(tier4(t)).child("状态"))
-                .child(div().w(col_counts).text_size(px(FS_META)).text_color(tier4(t)).child("领先 · 落后"))
-                .child(div().w(col_synced).text_size(px(FS_META)).text_color(tier4(t)).child("上次同步"))
-                .child(div().w(col_action).text_size(px(FS_META)).text_color(tier4(t)).child("操作"))
-        };
-
-        // 返回 Stateful<Div>：行要能响应悬停（on_hover 只在 Stateful 上）
-        let row =
-            |(i, (e, v)): (usize, (&RepoEntry, &RepoView)), cx: &mut Context<Self>| -> Stateful<Div> {
-            let path = e.path.clone();
-            let hov_path = path.clone();
-            let b = bucket_of(&v.status);
-            let name = if e.alias.trim().is_empty() {
-                e.name.clone()
-            } else {
-                e.alias.trim().to_string()
-            };
-            let checked = self.ov_checked.contains(&path);
-            let pill_view = row_pill(v, e.is_third_party, t);
-
-            // 行尾动作：拉取 / 推送 / 查看按桶给；跑批量中禁用
-            let action: Option<Button> = match b {
-                Bucket::Behind => Some(
-                    Button::new(SharedString::from(format!("ov-act-pull-{i}")))
-                        .label("拉取")
-                        .outline()
-                        .disabled(batch_running)
-                        .with_size(Size::Small)
-                        .on_click(cx.listener({
-                            let path = path.clone();
-                            move |this, _, _, cx| {
-                                // 切到该仓库再跑：日志落进它的输出块（与旧版 pullFor 同语义）
-                                this.select(path.clone(), cx);
-                                this.run_sync(Op::Pull, cx);
-                            }
-                        })),
-                ),
-                Bucket::Ahead => Some(
-                    Button::new(SharedString::from(format!("ov-act-push-{i}")))
-                        .label("推送")
-                        .outline()
-                        .disabled(batch_running)
-                        .with_size(Size::Small)
-                        .on_click(cx.listener({
-                            let path = path.clone();
-                            move |this, _, _, cx| {
-                                this.select(path.clone(), cx);
-                                this.run_sync(Op::Push, cx);
-                            }
-                        })),
-                ),
-                Bucket::Forked | Bucket::Unknown => Some(
-                    Button::new(SharedString::from(format!("ov-act-view-{i}")))
-                        .label("查看")
-                        .ghost()
-                        .with_size(Size::Small)
-                        .on_click(cx.listener({
-                            let path = path.clone();
-                            move |this, _, _, cx| {
-                                this.select(path.clone(), cx);
-                                this.page = Page::Repos;
-                                cx.notify();
-                            }
-                        })),
-                ),
-                _ => None,
-            };
-
-            h_flex()
-                .w_full()
-                .items_center()
-                .px(px(12.0))
-                .h(px(36.0))
-                .gap(px(GAP))
-                .child(
-                    div().w(px(24.0)).flex_shrink_0().child(
-                        Checkbox::new(SharedString::from(format!("ov-cb-{i}")))
-                            .checked(checked)
-                            .on_click({
-                                let path = path.clone();
-                                let this = cx.entity();
-                                move |checked, _, app| {
-                                    this.update(app, |this, cx| {
-                                        if *checked {
-                                            this.ov_checked.insert(path.clone());
-                                        } else {
-                                            this.ov_checked.remove(&path);
-                                        }
-                                        cx.notify();
-                                    });
-                                }
-                            }),
-                    ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(FS_BODY))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(t.colors.foreground)
-                        .child(name),
-                )
-                .child(
-                    div()
-                        .w(col_branch)
-                        .text_size(px(FS_SEC))
-                        .font_family(t.mono_font_family.clone())
-                        .text_color(tier3(t))
-                        .child(if v.status.branch.is_empty() {
-                            "—".to_string()
-                        } else {
-                            v.status.branch.clone()
-                        }),
-                )
-                .child(div().w(col_status).child(pill_view))
-                .child(
-                    div()
-                        .w(col_counts)
-                        .text_size(px(FS_SEC))
-                        .font_family(t.mono_font_family.clone())
-                        .text_color(if v.status.ahead > 0 || v.status.behind > 0 {
-                            body(t)
-                        } else {
-                            tier4(t)
-                        })
-                        .child(format!("{} · {}", v.status.ahead, v.status.behind)),
-                )
-                .child(
-                    div()
-                        .w(col_synced)
-                        .text_size(px(FS_SEC))
-                        .text_color(tier3(t))
-                        .child({
-                            let ts = e.last_auto_check;
-                            if ts == 0 { "—".to_string() } else { rel_time(ts) }
-                        }),
-                )
-                .child(
-                    div().w(col_action).child(match action {
-                        Some(btn) => btn.into_any_element(),
-                        None => div().into_any_element(),
-                    }),
-                )
-                .id(SharedString::from(format!("ov-row-{i}")))
-                .when(self.hovered.as_deref() == Some(path.as_str()), |r| {
-                    r.bg(t.colors.list_hover)
-                })
-                .on_hover({
-                    let this = cx.entity();
-                    move |hovered, _, cx| {
-                        this.update(cx, |this, cx| {
-                            if *hovered {
-                                this.hovered = Some(hov_path.clone());
-                            } else if this.hovered.as_deref() == Some(hov_path.as_str()) {
-                                this.hovered = None;
-                            }
-                            cx.notify();
-                        });
-                    }
-                })
-        };
-
-        // 分组表格：组头 + 行；空组不画
-        let mut table = v_flex()
-            .w_full()
-            .flex_1()
-            .min_h_0()
-            .id("ov-table")
-            .overflow_y_scroll()
-            .rounded(px(R_LG))
-            .bg(t.colors.popover)
-            .border_1()
-            .border_color(t.colors.border)
-            .child(head_row("仓库名"));
-        if !mine.is_empty() {
-            table = table.child(group_header("我的仓库 · 重点关注", t));
-            for (i, idx) in mine.iter().enumerate() {
-                table = table
-                    .child(row((*idx, rows[*idx]), cx).when(i % 2 == 1, |r| r.bg(t.colors.list_even)));
-            }
-        }
-        if !third.is_empty() {
-            table = table.child(group_header("第三方仓库 · 跟踪更新", t));
-            for (i, idx) in third.iter().enumerate() {
-                table = table
-                    .child(row((*idx, rows[*idx]), cx).when(i % 2 == 1, |r| r.bg(t.colors.list_even)));
-            }
-        }
-        if rows.is_empty() {
-            table = table.child(
-                div()
-                    .p(px(32.0))
-                    .text_size(px(FS_BODY))
-                    .text_color(tier3(t))
-                    .child("还没有仓库。回到工作台添加一个吧。"),
-            );
-        }
-
-        // 底部批量条：勾选行按各自动作收束成一批；混选时逐个按行内动作跑
-        let checked_paths: Vec<String> = rows
-            .iter()
-            .filter(|(e, _)| self.ov_checked.contains(&e.path))
-            .map(|(e, _)| e.path.clone())
-            .collect();
-        let checked_pull: Vec<String> = checked_paths
-            .iter()
-            .filter(|p| {
-                rows.iter().any(|(e, v)| {
-                    &e.path == *p && bucket_of(&v.status) == Bucket::Behind
-                })
-            })
-            .cloned()
-            .collect();
-        let checked_push: Vec<String> = checked_paths
-            .iter()
-            .filter(|p| {
-                rows.iter().any(|(e, v)| {
-                    &e.path == *p && bucket_of(&v.status) == Bucket::Ahead
-                })
-            })
-            .cloned()
-            .collect();
-        let mut bottom_bar = h_flex()
-            .w_full()
-            .justify_between()
-            .items_center()
-            .child(
-                div().text_size(px(FS_SEC)).text_color(tier3(t)).child(
-                    match &self.batch {
-                        Some(b) if b.running => format!(
-                            "批量{}中 {}/{}…",
-                            if b.pull { "拉取" } else { "推送" },
-                            b.done,
-                            b.paths.len()
-                        ),
-                        Some(b) if b.note.is_some() => b.note.clone().unwrap(),
-                        _ => format!("勾选仓库后可批量同步；当前 {} 个待拉取、{} 个待推送", pull_paths.len(), push_paths.len()),
-                    },
-                ),
-            );
-        if !checked_paths.is_empty() {
-            bottom_bar = bottom_bar.child(
-                h_flex()
-                    .gap(px(GAP))
-                    .when(!checked_pull.is_empty(), |bar| {
-                        bar.child(
-                            Button::new("ov-batch-checked-pull")
-                                .label(format!("拉取所选 ({})", checked_pull.len()))
-                                .primary()
-                                .disabled(batch_running)
-                                .with_size(Size::Medium)
-                                .on_click(cx.listener({
-                                    let paths = checked_pull.clone();
-                                    move |this, _, _, cx| this.run_batch(true, paths.clone(), cx)
-                                })),
-                        )
-                    })
-                    .when(!checked_push.is_empty(), |bar| {
-                        bar.child(
-                            Button::new("ov-batch-checked-push")
-                                .label(format!("推送所选 ({})", checked_push.len()))
-                                .primary()
-                                .disabled(batch_running)
-                                .with_size(Size::Medium)
-                                .on_click(cx.listener({
-                                    let paths = checked_push.clone();
-                                    move |this, _, _, cx| this.run_batch(false, paths.clone(), cx)
-                                })),
-                        )
-                    }),
-            );
-        }
-
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .h_full()
-            .bg(t.colors.background)
-            .p(px(24.0))
-            .gap(px(GAP_LG))
-            .child(head)
-            .child(cards)
-            .child(table)
-            .child(bottom_bar)
-    }
-}
-
-/// 空视图：仓库还没有被扫到时（首帧、扫描中）给总览行兜底
-static EMPTY_VIEW: RepoView = RepoView {
-    status: RepoStatus {
-        is_repo: false,
-        branch: String::new(),
-        ahead: 0,
-        behind: 0,
-        dirty: false,
-        has_upstream: false,
-        remote_url: String::new(),
-    },
-    changed: 0,
-    detected: run_cmd::CmdDetect {
-        test_cmd: String::new(),
-        build_cmd: String::new(),
-        dev_cmd: String::new(),
-        install_cmd: String::new(),
-    },
-};
-
-/// 仓库弹窗的正文：路径 / 显示名 / 归属 + 错误提示。
-/// 每帧重画（Dialog 的 content builder 会被反复调用），所以只接引用。
-fn dlg_body(
-    t: &Theme,
-    editing: &Option<String>,
-    third: bool,
-    error: &Option<String>,
-    path_input: &Entity<InputState>,
-    name_input: &Entity<InputState>,
-    this: &Entity<Shell>,
-) -> Div {
-    let field = |label: &str, input: &Entity<InputState>| -> Div {
-        v_flex()
-            .w_full()
-            .gap(px(GAP_TIGHT))
-            .child(
-                div()
-                    .text_size(px(FS_META))
-                    .text_color(tier4(t))
-                    .child(label.to_string()),
-            )
-            .child(Input::new(input).w_full())
-    };
-    let path_field = match editing {
-        // 编辑时路径只读：换路径等于换仓库，不该在这个框里发生
-        Some(p) => v_flex()
-            .w_full()
-            .gap(px(GAP_TIGHT))
-            .child(
-                div()
-                    .text_size(px(FS_META))
-                    .text_color(tier4(t))
-                    .child("路径"),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .text_size(px(FS_SEC))
-                    .font_family(t.mono_font_family.clone())
-                    .text_color(tier3(t))
-                    .child(p.clone()),
-            ),
-        None => field("路径", path_input),
-    };
-
-    v_flex()
-        .w_full()
-        .gap(px(GAP_LG))
-        .child(path_field)
-        .child(field("显示名", name_input))
-        .child(
-            v_flex()
-                .w_full()
-                .gap(px(GAP_TIGHT))
-                .child(
-                    div()
-                        .text_size(px(FS_META))
-                        .text_color(tier4(t))
-                        .child("归属"),
-                )
-                .child(
-                    h_flex()
-                        .gap(px(GAP))
-                        .child(
-                            Button::new("dlg-mine")
-                                .label("我的仓库")
-                                .toggled(!third)
-                                .on_click({
-                                    let this = this.clone();
-                                    move |_, _, cx| {
-                                        this.update(cx, |this, cx| {
-                                            if let Some(d) = this.dlg.as_mut() {
-                                                d.third = false;
-                                            }
-                                            cx.notify();
-                                        });
-                                    }
-                                }),
-                        )
-                        .child(
-                            Button::new("dlg-third")
-                                .label("第三方仓库")
-                                .toggled(third)
-                                .on_click({
-                                    let this = this.clone();
-                                    move |_, _, cx| {
-                                        this.update(cx, |this, cx| {
-                                            if let Some(d) = this.dlg.as_mut() {
-                                                d.third = true;
-                                            }
-                                            cx.notify();
-                                        });
-                                    }
-                                }),
-                        ),
-                ),
-        )
-        .when_some(error.clone(), |b, e| {
-            b.child(
-                div()
-                    .w_full()
-                    .text_size(px(FS_SEC))
-                    .text_color(t.colors.danger)
-                    .child(e),
-            )
-        })
-}
-
-/// 初始化向导正文：说明 + 路径 + 排除项勾选列表。
-/// 常见构建产物 / 依赖目录默认勾上（进 `enter_init` 时预勾），用户可改。
-fn init_body(
-    t: &Theme,
-    init: &InitState,
-    error: &Option<String>,
-    this: &Entity<Shell>,
-) -> Div {
-    let dir_name = std::path::Path::new(&init.path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| init.path.clone());
-
-    let mut list = v_flex()
-        .id("init-excludes")
-        .w_full()
-        .max_h(px(180.0))
-        .overflow_y_scroll()
-        .gap(px(2.0))
-        .p(px(8.0))
-        .rounded(px(R_LG))
-        .bg(t.colors.background)
-        .border_1()
-        .border_color(t.colors.border);
-    if init.items.is_empty() {
-        list = list.child(
-            div()
-                .text_size(px(FS_SEC))
-                .text_color(tier4(t))
-                .child("（空文件夹）"),
-        );
-    }
-    for (ix, it) in init.items.iter().enumerate() {
-        let name = it.name.clone();
-        let checked = init.excludes.contains(&name);
-        list = list.child(
-            h_flex()
-                .w_full()
-                .h(px(26.0))
-                .px(px(6.0))
-                .items_center()
-                .gap(px(GAP))
-                .child(
-                    Checkbox::new(SharedString::from(format!("init-cb-{ix}")))
-                        .checked(checked)
-                        .on_click({
-                            let this = this.clone();
-                            let name = name.clone();
-                            move |checked, _, cx| {
-                                this.update(cx, |this, cx| {
-                                    if let Some(i) = this.dlg.as_mut().and_then(|d| d.init.as_mut())
-                                    {
-                                        if *checked {
-                                            i.excludes.insert(name.clone());
-                                        } else {
-                                            i.excludes.remove(&name);
-                                        }
-                                    }
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(px(FS_SEC))
-                        .text_color(body(t))
-                        .child(name.clone()),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_size(px(FS_META))
-                        .text_color(tier4(t))
-                        .child(if it.is_dir { "文件夹" } else { "文件" }.to_string()),
-                ),
-        );
-    }
-
-    v_flex()
-        .w_full()
-        .gap(px(GAP_LG))
-        .child(
-            div()
-                .w_full()
-                .text_size(px(FS_BODY))
-                .line_height(px(20.0))
-                .text_color(tier3(t))
-                .child(format!(
-                    "「{dir_name}」还不是 git 仓库。初始化后自动生成首次提交；勾选不想纳入版本管理的项，会写入 .gitignore："
-                )),
-        )
-        .child(
-            div()
-                .w_full()
-                .text_size(px(FS_SEC))
-                .font_family(t.mono_font_family.clone())
-                .text_color(tier4(t))
-                .child(init.path.clone()),
-        )
-        .child(list)
-        .when_some(error.clone(), |b, e| {
-            b.child(
-                div()
-                    .w_full()
-                    .text_size(px(FS_SEC))
-                    .text_color(t.colors.danger)
-                    .child(e),
-            )
-        })
-}
-
-/// 初始化向导底栏：取消 / 初始化（跑起来时按钮转圈）
-fn init_footer(t: &Theme, init: &InitState, this: &Entity<Shell>) -> Div {
-    let _ = t;
-    h_flex()
-        .w_full()
-        .justify_end()
-        .items_center()
-        .gap(px(GAP))
-        .child(
-            Button::new("init-cancel")
-                .label("取消")
-                .ghost()
-                .disabled(init.working)
-                .on_click({
-                    let this = this.clone();
-                    move |_, window, cx| {
-                        this.update(cx, |this, cx| {
-                            this.dlg = None;
-                            cx.notify();
-                        });
-                        window.close_dialog(cx);
-                    }
-                }),
-        )
-        .child(
-            Button::new("init-go")
-                .label("初始化")
-                .primary()
-                .loading(init.working)
-                .on_click({
-                    let this = this.clone();
-                    move |_, _, cx| {
-                        this.update(cx, |this, cx| this.run_init(cx));
-                    }
-                }),
-        )
-}
-
-/// 弹窗底栏：编辑模式左侧「移除仓库」，右侧取消 / 保存。
-fn dlg_footer(
-    this: &Entity<Shell>,
-    editing: &Option<String>,
-    path_input: &Entity<InputState>,
-    name_input: &Entity<InputState>,
-) -> Div {
-    let mut footer = h_flex().w_full().justify_between().items_center();
-    match editing {
-        Some(p) => {
-            footer = footer.child(
-                Button::new("dlg-remove")
-                    .label("移除仓库")
-                    .outline()
-                    .on_click({
-                        let this = this.clone();
-                        let p = p.clone();
-                        move |_, window, cx| {
-                            this.update(cx, |this, cx| this.remove_repo_at(p.clone(), cx));
-                            window.close_dialog(cx);
-                        }
-                    }),
-            );
-        }
-        None => footer = footer.child(div()),
-    }
-    footer.child(
-        h_flex()
-            .gap(px(GAP))
-            .child(
-                Button::new("dlg-cancel")
-                    .label("取消")
-                    .ghost()
-                    .on_click({
-                        let this = this.clone();
-                        move |_, window, cx| {
-                            this.update(cx, |this, cx| {
-                                this.dlg = None;
-                                cx.notify();
-                            });
-                            window.close_dialog(cx);
-                        }
+                    .bg(match (&batch, running.is_some()) {
+                        // 跑完的批次报结论时不该还亮着"运行中"的橙点
+                        (Some(_), false) => t.colors.success,
+                        _ if running.is_some() => orange(t),
+                        _ => t.colors.success,
                     }),
             )
-            .child(
-                Button::new("dlg-save")
-                    .label(if editing.is_some() { "保存" } else { "添加" })
-                    .primary()
-                    .on_click({
-                        let this = this.clone();
-                        let editing = editing.clone();
-                        let path_input = path_input.clone();
-                        let name_input = name_input.clone();
-                        move |_, window, cx| {
-                            // 值要在 App 上读成 String 再交给 Shell 落盘
-                            let raw_path = path_input.read(cx).value().to_string();
-                            let raw_name = name_input.read(cx).value().to_string();
-                            let ok = this.update(cx, |this, cx| {
-                                this.commit_dlg(editing.clone(), raw_path, raw_name, cx)
-                            });
-                            if ok {
-                                window.close_dialog(cx);
-                            }
-                        }
-                    }),
-            ),
-    )
-}
-
-/// 统计卡：大数字 + 标签，数字按语义着色
-/// 分叉卡差异区的提交清单块。空列表要点明"没有"而不是留白（与旧版 forkGuide 一致）。
-fn fork_commit_block(is_local: bool, commits: &[String], t: &Theme) -> Div {
-    let n = commits.len();
-    let title = match (is_local, n) {
-        (true, 0) => "本地没有未推送的提交".to_string(),
-        (true, _) => format!("本地未推送的提交（{n}）"),
-        (false, 0) => "云端没有新提交".to_string(),
-        (false, _) => format!("云端新增的提交（{n}）"),
-    };
-    v_flex()
-        .w_full()
-        .gap(px(GAP_TIGHT))
-        .child(
-            div()
-                .text_size(px(FS_SEC))
-                .text_color(tier3(t))
-                .child(title),
-        )
-        .children(commits.iter().map(|c| {
-            div()
-                .font_family(t.mono_font_family.clone())
-                .text_size(px(FS_META))
-                .text_color(body(t))
-                .child(c.clone())
-        }))
-}
-
-fn stat_card(n: usize, label: &str, color: Hsla, t: &Theme) -> Div {
-    v_flex()
-        .flex_1()
-        .gap(px(2.0))
-        .p(px(16.0))
-        .rounded(px(R_LG))
-        .bg(t.colors.popover)
-        .border_1()
-        .border_color(t.colors.border)
-        .child(
-            div()
-                .text_size(px(FS_NUM))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if n > 0 { color } else { tier4(t) }),
-        )
-        .child(div().text_size(px(FS_SEC)).text_color(tier3(t)).child(label.to_string()))
-}
-
-/// 总览行状态 pill：分叉 > 落后/可更新 > 未提交 > 待推送 > 最新。
-/// 「落后 / 可更新」按归属分文案（我的：落后；第三方：可更新），语义同侧栏徽标。
-fn row_pill(v: &RepoView, third: bool, t: &Theme) -> Div {
-    let s = &v.status;
-    let b = bucket_of(s);
-    let (text, fg, bg) = if b == Bucket::Forked {
-        ("已分叉", orange(t), orange_bg(t))
-    } else if b == Bucket::Behind {
-        (if third { "可更新" } else { "落后" }, orange(t), orange_bg(t))
-    } else if s.dirty {
-        ("未提交", t.colors.accent, blue_bg(t))
-    } else if b == Bucket::Ahead {
-        ("待推送", t.colors.accent, blue_bg(t))
-    } else if b == Bucket::Unknown {
-        ("待扫描", tier3(t), track(t))
-    } else {
-        ("最新", t.colors.success, track(t))
-    };
-    pill(text, fg, bg, t)
-}
-
-// ================= Screen 3：我的仓库工作台 =================
-
-impl Shell {
-    /// 我的工作台：头 / 常用命令卡 / 底排（磁盘 + Git）/ 状态条（侧栏常驻在壳层）
-    fn workbench_page(&self, path: &str, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = self.view(path);
-        let status = view.map(|v| v.status.clone()).unwrap_or_default();
-        let changed = view.map(|v| v.changed).unwrap_or(0);
-        let b = bucket_of(&status);
-
-        let title_row = h_flex()
-            .items_center()
-            .gap(px(GAP))
-            .child(
-                div()
-                    .text_size(px(FS_HEAD))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(t.colors.foreground)
-                    .child(self.title(path)),
-            )
-            .child(self.branch_badge(&status.branch, t))
-            .when(changed > 0, |row| {
-                row.child(pill(
-                    &format!("未提交 {changed} 文件"),
-                    t.colors.accent,
-                    blue_bg(t),
-                    t,
-                ))
-            })
-            .when(
-                b == Bucket::Forked || b == Bucket::Behind,
-                |row| {
-                    row.child(pill(
-                        if b == Bucket::Forked { "已分叉" } else { "可更新" },
-                        orange(t),
-                        orange_bg(t),
-                        t,
-                    ))
+            .child(meta_text(
+                match (&batch, &running) {
+                    (Some(b), _) => b.clone(),
+                    (None, Some(path)) => format!("运行中 · {}", self.title(path)),
+                    (None, None) => format!("{} 个仓库", self.repos.len()),
                 },
-            )
-            .when(b == Bucket::Ahead, |row| {
-                row.child(pill(
-                    &format!("待推送 {}", status.ahead),
-                    t.colors.accent,
-                    blue_bg(t),
-                    t,
-                ))
-            });
-
-        let head = h_flex()
-            .w_full()
-            .justify_between()
-            .items_start()
-            .gap(px(GAP_LG))
-            .child(
-                v_flex()
-                    .gap(px(GAP_TIGHT))
-                    .child(title_row)
-                    .child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .text_color(tier3(t))
-                            .child(format!("我的仓库 · 本地路径 {path}")),
-                    ),
-            )
-            .child(self.head_actions(t, cx));
-
-        // 常用命令卡
-        let slots: Vec<Slot> = {
-            let mut v = vec![Slot::Test, Slot::Dev, Slot::Build, Slot::Install];
-            if let Some(e) = self.entry(path) {
-                for i in 0..e.pinned_cmds.len().min(MAX_PINNED_CMDS) {
-                    v.push(Slot::Pinned(i));
-                }
-            }
-            v
-        };
-        let rows: Vec<AnyElement> = slots
-            .into_iter()
-            .map(|slot| {
-                let label = match slot {
-                    Slot::Pinned(i) => self
-                        .entry(path)
-                        .and_then(|e| e.pinned_cmds.get(i))
-                        .map(|c| {
-                            if c.label.trim().is_empty() {
-                                run_cmd::derive_pinned_label(&c.cmd)
-                            } else {
-                                c.label.trim().to_string()
-                            }
-                        })
-                        .unwrap_or_else(|| format!("命令 {}", i + 1)),
-                    _ => slot.default_label().to_string(),
-                };
-                self.cmd_row(path, slot, label, t, cx).into_any_element()
-            })
-            .collect();
-
-        let cmd_card = v_flex()
-            .w_full()
-            // 设计稿：命令卡与底排分摊主区剩余高度（fill_container），不是按内容收缩
-            .flex_1()
-            .min_h_0()
-            .gap(px(GAP_TIGHT))
-            .p(px(16.0))
-            .rounded(px(R_XL))
-            .bg(t.colors.popover)
-            .border_1()
-            .border_color(t.colors.border)
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap(px(GAP))
-                    .child(
-                        div()
-                            .text_size(px(FS_BODY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(t.colors.foreground)
-                            .child("常用命令"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(FS_META))
-                            .text_color(tier4(t))
-                            .child("一键运行 · 输出实时回显 · 可钉住自定义命令（上限 3）"),
-                    )
-                    .child(
-                        Button::new("cmd-edit")
-                            .label("编辑")
-                            .ghost()
-                            .with_size(Size::Small),
-                    ),
-            )
-            .children(rows)
-            .child(self.output_block(t));
-        // 底排：磁盘占用卡 + Git 附带卡
-        let bottom = h_flex()
-            .w_full()
-            .flex_1()
-            .min_h_0()
-            .gap(px(GAP_LG))
-            .child(self.space_card(t, cx))
-            .child(self.git_card(path, &status, changed, t, cx));
-
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .h_full()
-            .bg(t.colors.background)
-            .p(px(24.0))
-            .gap(px(GAP_LG))
-            .child(head)
-            .children(self.fork_card(t, cx))
-            .child(cmd_card)
-            .child(bottom)
-            .child(self.status_bar(t, path))
-    }
-
-    /// 分叉恢复向导卡：本地与云端历史分叉（或刚变基完备份还在）时出现在头部下方，
-    /// 把「ff 拉取失败」这种死胡同变成一组有出口的动作。
-    /// 按钮逻辑与旧版 forkGuide 一致：仓库卡在用户自己的变基/合并里时只解释、
-    /// 一个动作都不给；「撤销变基」会丢弃变基后的新提交，必须二次确认。
-    fn fork_card(&self, t: &Theme, cx: &mut Context<Self>) -> Option<Div> {
-        let busy = self.out.running;
-        let (title, summary, blocked) = if let Some(fk) = &self.fork {
-            let mut parts = vec![
-                format!("本地有 {} 个提交未推送", fk.ahead),
-                format!("云端有 {} 个新提交", fk.behind),
-            ];
-            if fk.dirty {
-                parts.push("工作区还有未提交变更".into());
-            }
-            (
-                "本地与云端已分叉".to_string(),
-                format!("{}。", parts.join("，")),
-                fk.blocked_reason.clone(),
-            )
-        } else if let Some(b) = &self.fork_backup {
-            (
-                "上次变基的备份还在".to_string(),
-                format!("本地提交已经重放到云端提交之上。觉得不对可以回到变基前（备份分支 {b}）。"),
-                None,
-            )
-        } else {
-            return None;
-        };
-
-        // 动作行：变基（脏工作区 = 带暂存版）+ 撤销（二次确认）+ 差异开关
-        let mut actions = h_flex().flex_wrap().items_center().gap(px(GAP));
-        if blocked.is_none() {
-            if let Some(fk) = &self.fork {
-                let (label, hint, stash) = if fk.dirty {
-                    (
-                        "暂存并变基到云端",
-                        "先把改动暂存起来再变基，完成后自动恢复；本地提交会被重放到云端提交之上，动手前会建好备份分支",
-                        true,
-                    )
-                } else {
-                    (
-                        "备份并变基到云端",
-                        "把本地提交重放到云端提交之上；动手前会建好备份分支，冲突会自动中止并复原",
-                        false,
-                    )
-                };
-                actions = actions.child(
-                    Button::new("fk-rebase")
-                        .label(label)
-                        .tooltip(SharedString::from(hint))
-                        .primary()
-                        .with_size(Size::Small)
-                        .disabled(busy)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.run_sync(Op::Rebase(stash), cx)
-                        })),
-                );
-            }
-            if let Some(_b) = &self.fork_backup {
-                if self.fork_confirm {
-                    actions = actions
-                        .child(
-                            Button::new("fk-undo-yes")
-                                .label("确认撤销？")
-                                .danger()
-                                .with_size(Size::Small)
-                                .disabled(busy)
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.run_sync(Op::UndoRebase, cx)),
-                                ),
-                        )
-                        .child(
-                            Button::new("fk-undo-no")
-                                .label("取消")
-                                .ghost()
-                                .with_size(Size::Small)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.fork_confirm = false;
-                                    cx.notify();
-                                })),
-                        );
-                } else {
-                    actions = actions.child(
-                        Button::new("fk-undo")
-                            .label("撤销变基")
-                            .tooltip(format!(
-                                "回到变基前的状态（备份分支 {}），会丢弃变基之后新产生的提交",
-                                self.fork_backup.clone().unwrap_or_default()
-                            ))
-                            .danger()
-                            .with_size(Size::Small)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.fork_confirm = true;
-                                cx.notify();
-                            })),
-                    );
-                }
-            }
-            if self.fork.is_some() {
-                actions = actions.child(
-                    Button::new("fk-diff")
-                        .label(if self.fork_diff { "收起差异" } else { "只看差异" })
-                        .ghost()
-                        .with_size(Size::Small)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.fork_diff = !this.fork_diff;
-                            cx.notify();
-                        })),
-                );
-            }
-        }
-
-        // 差异区：两列提交清单 + 一句说明（旧版 fork-diff 原样平移）
-        let diff = self.fork.as_ref().filter(|_| self.fork_diff).map(|fk| {
-            v_flex()
-                .w_full()
-                .gap(px(GAP))
-                .child(fork_commit_block(
-                    true,
-                    &fk.local_commits,
-                    t,
-                ))
-                .child(fork_commit_block(
-                    false,
-                    &fk.remote_commits,
-                    t,
-                ))
-                .child(
-                    div()
-                        .text_size(px(FS_META))
-                        .text_color(tier4(t))
-                        .child(format!(
-                            "变基会把本地提交重放到 {} 之上，提交内容不变但历史会改写；动手前后端会先把\"变基前\"的位置固定在备份分支上",
-                            if fk.upstream.is_empty() { "云端".into() } else { fk.upstream.clone() }
-                        )),
-                )
-        });
-
-        Some(
-            v_flex()
-                .w_full()
-                .gap(px(GAP))
-                .p(px(16.0))
-                .rounded(px(R_XL))
-                .bg(orange_bg(t))
-                .border_1()
-                .border_color(t.colors.border)
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap(px(GAP))
-                        .child(div().text_color(orange(t)).child(icon_md(AssetIcon::GitMerge)))
-                        .child(
-                            div()
-                                .text_size(px(FS_BODY))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(t.colors.foreground)
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(FS_SEC))
-                                .text_color(orange_text(t))
-                                .child(summary),
-                        ),
-                )
-                .children(blocked.as_deref().map(|reason| {
-                    div()
-                        .text_size(px(FS_SEC))
-                        .text_color(body(t))
-                        .child(reason.to_string())
-                }))
-                .when(blocked.is_none(), |card| card.child(actions))
-                .children(diff),
-        )
-    }
-
-    /// 头部右侧：拉取 / 推送（弱）+ 分组线 + 四个图标动作
-    fn head_actions(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
-        let pulling = self.out.running && self.out.op == Some(Op::Pull);
-        let pushing = self.out.running && self.out.op == Some(Op::Push);
-        h_flex()
-            .flex_shrink_0()
-            .items_center()
-            .gap(px(GAP))
-            .child(
-                Button::new("wb-pull")
-                    .label("拉取")
-                    .icon(icon_md(AssetIcon::ArrowDown).text_color(tier3(t)))
-                    .outline()
-                    .loading(pulling)
-                    .with_size(Size::Medium)
-                    .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
-            )
-            .child(
-                Button::new("wb-push")
-                    .label("推送")
-                    .icon(icon_md(AssetIcon::ArrowUp).text_color(tier3(t)))
-                    .outline()
-                    .loading(pushing)
-                    .with_size(Size::Medium)
-                    .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Push, cx))),
-            )
-            .child(div().w(px(1.0)).h(px(20.0)).bg(t.colors.border))
-            .child(
-                Button::new("act-folder")
-                    .icon(icon_md(AssetIcon::FolderOpen).text_color(tier3(t)))
-                    .ghost()
-                    .with_size(Size::Medium),
-            )
-            .child(
-                Button::new("act-cloud")
-                    .icon(icon_md(AssetIcon::Globe).text_color(tier3(t)))
-                    .ghost()
-                    .with_size(Size::Medium),
-            )
-            .child(
-                Button::new("act-doc")
-                    .icon(icon_md(AssetIcon::BookOpen).text_color(tier3(t)))
-                    .ghost()
-                    .with_size(Size::Medium),
-            )
-            .child(
-                Button::new("act-timer")
-                    .icon(icon_md(AssetIcon::Clock).text_color(tier3(t)))
-                    .ghost()
-                    .with_size(Size::Medium),
-            )
-    }
-
-    /// 分支徽章：Surface 底 + 分支图标
-    fn branch_badge(&self, branch: &str, t: &Theme) -> Div {
-        let text = if branch.is_empty() || branch == "HEAD" {
-            "游离 HEAD".to_string()
-        } else {
-            branch.to_string()
-        };
-        h_flex()
-            .h(px(22.0))
-            .px(px(8.0))
-            .rounded(px(R_MD))
-            .bg(t.colors.muted)
-            .items_center()
-            .gap(px(GAP_TIGHT))
-            .text_color(tier3(t))
-            .child(icon_md(AssetIcon::GitBranch))
-            .child(div().text_size(px(FS_SEC)).child(text))
-    }
-
-    /// 命令卡里的一行：圆形播放钮 + 槽位名 + 命令文本 + 上次结果
-    fn cmd_row(
-        &self,
-        path: &str,
-        slot: Slot,
-        label: String,
-        t: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let cmd = self.effective_cmd(path, slot);
-        let rec = self
-            .entry(path)
-            .and_then(|e| e.cmd_runs.get(&slot.key()))
-            .cloned();
-        let running = self.out.running && self.out.op == Some(Op::Cmd(slot));
-
-        let mut row = h_flex()
-            .id(SharedString::from(format!("cmd-row-{}", slot.key())))
-            .w_full()
-            .h(px(40.0))
-            .px(px(12.0))
-            .rounded(px(R_MD))
-            .items_center()
-            .gap(px(GAP_LG))
-            .child(
-                // 22px 墨色圆 + 白色播放三角；运行中换成加载图标
-                div()
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .bg(t.colors.primary)
-                    .items_center()
-                    .justify_center()
-                    .text_color(t.colors.popover)
-                    .child(if running {
-                        icon_sm(AssetIcon::LoaderCircle)
-                    } else {
-                        icon_sm(AssetIcon::Play)
-                    }),
-            )
-            .child(
-                div()
-                    .w(px(76.0))
-                    .flex_shrink_0()
-                    .text_size(px(FS_BODY))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(body(t))
-                    .child(label),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(FS_SEC))
-                    .font_family(t.mono_font_family.clone())
-                    .text_color(tier3(t))
-                    .child(if cmd.is_empty() {
-                        "未识别到命令".to_string()
-                    } else {
-                        cmd
-                    }),
-            );
-        if running {
-            row = row.bg(t.colors.muted).child(pill(
-                &format!("运行中 · 已输出 {} 行", self.out.lines.len()),
-                t.colors.accent,
-                blue_bg(t),
                 t,
             ));
-        } else if let Some(r) = &rec {
-            let when = rel_time(r.at);
-            row = row.child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(FS_META))
-                    .text_color(if r.ok { tier4(t) } else { t.colors.danger })
-                    .child(format!(
-                        "{}{}{}",
-                        if r.ok { "成功" } else { "失败" },
-                        if when.is_empty() { "" } else { " · " },
-                        when
-                    )),
-            );
-        }
-        row.on_click(cx.listener(move |this, _, _, cx| this.run_slot(slot, cx)))
-    }
 
-    /// 深色输出块：墨底终端，跟白卡片形成对比
-    fn output_block(&self, t: &Theme) -> impl IntoElement {
-        let ink = t.colors.primary;
-        let text = t.colors.background;
-        let dim = tier4(t);
-
-        let mut block = v_flex()
-            .id("out-block")
-            .w_full()
-            // 卡片撑高后，输出块吃掉命令行以下的空间；内容多时块内滚动
-            .flex_1()
-            .min_h(px(96.0))
-            .overflow_y_scroll()
-            .p(px(12.0))
-            .gap(px(GAP_TIGHT))
-            .rounded(px(R_LG))
-            .bg(ink)
-            .font_family(t.mono_font_family.clone())
-            .text_size(px(FS_META))
-            .text_color(text);
-
-        if self.out.lines.is_empty() {
-            block = block.child(
-                div()
-                    .text_color(dim)
-                    .child("点任一行的圆形按钮，输出会实时回显在这里"),
-            );
-        } else {
-            let lines: Vec<Div> = self
-                .out
-                .lines
-                .iter()
-                .map(|l| div().text_color(text).child(l.clone()))
-                .collect();
-            block = block.children(lines);
-        }
-        if let Some(e) = &self.out.error {
-            block = block.child(div().text_color(t.colors.danger).child(e.clone()));
-        }
-        block
-    }
-
-    /// 磁盘占用卡：头 / 构成条 / 图例 / 清理条
-    fn space_card(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
-        let rep = self.space.report.clone();
-
-        let total_text = if self.space.scanning {
-            "扫描中…".to_string()
-        } else if let Some(e) = &self.space.error {
-            e.clone()
-        } else {
-            match &rep {
-                Some(r) => format!("共 {}", space::human_size(r.total)),
-                None => "尚未扫描".to_string(),
-            }
+        // 中区：当前选中路径。总览页没有"当前仓库"这个对象，就说这屏是什么
+        let center = match (self.page, self.selected.as_deref()) {
+            (Page::Repos, Some(path)) => meta_text(path, t),
+            (Page::Repos, None) => meta_text("未选中仓库", t),
+            (Page::Overview, _) => meta_text("总览", t),
         };
 
-        // 构成段：按大小取前 3 个一级条目，其余并成「其他」（设计稿三行图例）
-        let palette = [
-            t.colors.accent,
-            orange(t),
-            edge(t),
-            t.colors.chart_2,
-            t.colors.chart_5,
-            tier4(t),
-        ];
-        let mut segs: Vec<(Hsla, u64, String, String)> = Vec::new();
-        if let Some(r) = &rep {
-            for (i, d) in r.dirs.iter().take(3).enumerate() {
-                if d.size == 0 {
-                    continue;
-                }
-                let remark = if d.is_cache {
-                    " · 构建缓存"
-                } else if d.name == ".git" {
-                    " · 版本库"
-                } else {
-                    ""
-                };
-                segs.push((
-                    palette[i],
-                    d.size,
-                    d.name.clone(),
-                    format!("{} — {}{}", d.name, space::human_size(d.size), remark),
-                ));
-            }
-            let rest: u64 = r.dirs.iter().skip(3).map(|d| d.size).sum();
-            if rest > 0 {
-                segs.push((
-                    track(t),
-                    rest,
-                    "其他".into(),
-                    format!("其他 {} 项 — {}", r.dirs.len().saturating_sub(3), space::human_size(rest)),
-                ));
-            }
-        }
-
-        let cache_total = rep
-            .as_ref()
-            .map(|r| r.dirs.iter().filter(|d| d.is_cache).map(|d| d.size).sum())
-            .unwrap_or(0u64);
-        let cache_names = rep
-            .as_ref()
-            .map(|r| {
-                r.dirs
-                    .iter()
-                    .filter(|d| d.is_cache && d.size > 0)
-                    .map(|d| d.name.clone())
-                    .collect::<Vec<_>>()
-                    .join("/")
-            })
-            .unwrap_or_default();
-
-        let mut card = v_flex()
-            .flex_1()
-            .min_h_0()
-            .gap(px(GAP))
-            .p(px(16.0))
-            .rounded(px(R_XL))
-            .bg(t.colors.popover)
-            .border_1()
-            .border_color(t.colors.border)
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap(px(GAP))
-                    .child(
-                        div()
-                            .text_size(px(FS_BODY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(t.colors.foreground)
-                            .child("磁盘占用"),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .text_color(tier3(t))
-                            .child(total_text),
-                    )
-                    .child(
-                        Button::new("space-rescan")
-                            .label(if self.space.scanning { "扫描中…" } else { "重新扫描" })
-                            .ghost()
-                            .with_size(Size::Small)
-                            .loading(self.space.scanning)
-                            .on_click(cx.listener(|this, _, _, cx| this.scan_space(cx))),
-                    ),
-            );
-
-        // 构成条 + 图例
-        if !segs.is_empty() {
-            let mut bar = h_flex()
-                .w_full()
-                .h(px(8.0))
-                .rounded(px(R_SM))
-                .overflow_hidden()
-                .gap(px(2.0))
-                .bg(track(t));
-            for (color, size, _, _) in &segs {
-                bar = bar.child(div().h_full().rounded(px(R_SM)).bg(*color).flex_grow(*size as f32));
-            }
-            card = card.child(bar);
-
-            let mut legend = v_flex().w_full().gap(px(GAP_TIGHT));
-            for (color, _, _, text) in &segs {
-                legend = legend.child(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .gap(px(GAP))
-                        .child(
-                            div()
-                                .w(px(8.0))
-                                .h(px(8.0))
-                                .flex_shrink_0()
-                                .rounded(px(R_SM))
-                                .bg(*color),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(FS_SEC))
-                                .text_color(body(t))
-                                .child(text.clone()),
-                        ),
-                );
-            }
-            card = card.child(legend);
-        } else {
-            card = card.child(if self.space.scanning {
-                v_flex()
-                    .w_full()
-                    .gap(px(GAP_TIGHT))
-                    .child(skeleton_bar(None, t))
-                    .child(skeleton_bar(Some(px(160.0)), t))
-                    .into_any_element()
-            } else {
-                div()
-                    .text_size(px(FS_SEC))
-                    .text_color(tier3(t))
-                    .child("扫描完成后在这里展示目录构成".to_string())
-                    .into_any_element()
-            });
-        }
-
-        // 清理条：暖橙底 + 深橙文字 + 墨色一键清理
-        if cache_total > 0 {
-            card = card.child(
-                h_flex()
-                    .w_full()
-                    .p(px(10.0))
-                    .rounded(px(R_LG))
-                    .bg(orange_bg(t))
-                    .items_center()
-                    .gap(px(GAP))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(FS_SEC))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(orange_text(t))
-                            .child(format!(
-                                "构建缓存 {}/ 可清理约 {}",
-                                cache_names,
-                                space::human_size(cache_total)
-                            )),
-                    )
-                    .child(
-                        Button::new("clean-all")
-                            .label(if self.space.cleaning { "清理中…" } else { "一键清理" })
-                            .primary()
-                            .with_size(Size::Medium)
-                            .loading(self.space.cleaning)
-                            .on_click(cx.listener(|this, _, _, cx| this.clean_all(cx))),
-                    ),
-            );
-        } else if rep.is_some() && !self.space.scanning {
-            card = card.child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap(px(GAP_TIGHT))
-                    .text_color(t.colors.success)
-                    .child(icon_sm(AssetIcon::CircleCheck))
-                    .child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .text_color(tier3(t))
-                            .child("没有可清理的构建缓存"),
-                    ),
-            );
-        }
-        card
-    }
-
-    /// Git 附带卡（设计稿固定 300 宽）：同步概况 / 未提交 / 弱按钮 / 查看详情
-    fn git_card(&self, path: &str, s: &RepoStatus, changed: u32, t: &Theme, cx: &mut Context<Self>) -> Div {
-        let b = bucket_of(s);
-        let desc = match b {
-            Bucket::Synced => "与云端基本一致",
-            Bucket::Dirty => "与云端基本一致",
-            Bucket::Ahead => "领先云端，可推送",
-            Bucket::Behind => "云端有更新",
-            Bucket::Forked => "本地与云端分叉",
-            Bucket::Unknown => "不是 git 仓库",
-        };
-        v_flex()
-            .w(px(300.0))
-            .flex_shrink_0()
-            .gap(px(GAP))
-            .p(px(16.0))
-            .rounded(px(R_XL))
-            .bg(t.colors.popover)
-            .border_1()
-            .border_color(t.colors.border)
-            .child(
-                div()
-                    .text_size(px(FS_SEC))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(tier3(t))
-                    .child("Git · 附带功能"),
-            )
-            .child(
-                h_flex()
-                    .items_baseline()
-                    .gap(px(GAP))
-                    .child(
-                        div()
-                            .text_size(px(FS_TITLE))
-                            .font_family(t.mono_font_family.clone())
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(t.colors.foreground)
-                            .child(format!("↑{} ↓{}", s.ahead, s.behind)),
-                    )
-                    .child(div().text_size(px(FS_META)).text_color(tier4(t)).child(desc)),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(GAP))
-                    .child(
-                        div()
-                            .w(px(7.0))
-                            .h(px(7.0))
-                            .rounded_full()
-                            .bg(if changed > 0 {
-                                t.colors.accent
-                            } else {
-                                t.colors.success
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .text_color(body(t))
-                            .child(if changed > 0 {
-                                format!("{changed} 个文件待提交")
-                            } else {
-                                "工作区干净".to_string()
-                            }),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(GAP))
-                    .child(
-                        Button::new("git-pull")
-                            .label("拉取")
-                            .secondary()
-                            .with_size(Size::Medium)
-                            .disabled(self.out.running)
-                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
-                    )
-                    .child(
-                        Button::new("git-push")
-                            .label("推送")
-                            .secondary()
-                            .with_size(Size::Medium)
-                            .disabled(self.out.running)
-                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Push, cx))),
-                    ),
-            )
-            .child(div().w_full().h(px(1.0)).bg(track(t)))
-            .child(
-                div()
-                    .text_size(px(FS_SEC))
-                    .text_color(t.colors.accent)
-                    .child("查看提交历史与文件变更"),
-            )
-            .child(
-                div()
-                    .text_size(px(FS_META))
-                    .text_color(tier4(t))
-                    .child(format!(
-                        "上次运行 {} · 定时 {}",
-                        self.entry(path)
-                            .and_then(|e| e.cmd_runs.values().max_by_key(|r| r.at))
-                            .map(|r| rel_time(r.at))
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| "—".into()),
-                        self.entry(path)
-                            .map(auto_sync_text)
-                            .unwrap_or_else(|| "未开启".into())
-                    )),
-            )
-    }
-
-    /// 主区底部状态条：左侧运行状态点，右侧定时同步
-    fn status_bar(&self, t: &Theme, path: &str) -> Div {
-        let running = self.out.running;
-        h_flex()
-            .w_full()
-            .h(px(26.0))
-            .flex_shrink_0()
+        let right = h_flex()
             .items_center()
             .gap(px(GAP_LG))
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(GAP_TIGHT))
-                    .child(
-                        div()
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded_full()
-                            .bg(if running { orange(t) } else { t.colors.success }),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .text_color(tier3(t))
-                            .child(if running {
-                                "命令运行中".to_string()
-                            } else {
-                                format!("就绪 · {} 个仓库", self.repos.len())
-                            }),
-                    ),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .text_size(px(FS_SEC))
-                    .text_color(tier4(t))
-                    .child(format!(
-                        "定时同步：{}",
-                        self.entry(path)
-                            .map(auto_sync_text)
-                            .unwrap_or_else(|| "未开启".into())
-                    )),
-            )
-    }
-}
-
-/// 圆角胶囊徽章：蓝灰「未提交 / 待推送 / 运行中」与暖橙「可更新」
-fn pill(text: &str, fg: Hsla, bg: Hsla, _t: &Theme) -> Div {
-    div()
-        .h(px(20.0))
-        .px(px(8.0))
-        .rounded_full()
-        .bg(bg)
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .text_size(px(FS_META))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(fg)
-                .child(text.to_string()),
-        )
-}
-
-fn auto_sync_text(e: &RepoEntry) -> String {
-    if !e.daily_time.is_empty() {
-        format!("每天 {}", e.daily_time)
-    } else if e.auto_sync_mins > 0 {
-        format!("每 {} 分钟", e.auto_sync_mins)
-    } else {
-        "未开启".into()
-    }
-}
-
-// ================= Screen 1：第三方仓库档案页 =================
-
-impl Shell {
-    /// 侧栏 + 主区：头 / 信息页签 / 内容卡（README + 同步面板）/ 状态条
-    fn profile_page(&self, path: &str, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = self.view(path);
-        let status = view.map(|v| v.status.clone()).unwrap_or_default();
-        let changed = view.map(|v| v.changed).unwrap_or(0);
-        let b = bucket_of(&status);
-
-        let title_row = h_flex()
-            .items_center()
-            .gap(px(GAP))
-            .child(
-                div()
-                    .text_size(px(FS_HEAD))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(t.colors.foreground)
-                    .child(self.title(path)),
-            )
-            .child(self.branch_badge(&status.branch, t))
-            .when(
-                b == Bucket::Forked || b == Bucket::Behind,
-                |row| {
-                    row.child(pill(
-                        if b == Bucket::Forked { "已分叉" } else { "可更新" },
-                        orange(t),
-                        orange_bg(t),
-                        t,
-                    ))
+            .child(meta_text(
+                match self.selected.as_deref() {
+                    Some(path) => self
+                        .entry(path)
+                        .map(auto_sync_text)
+                        .unwrap_or_else(|| "定时同步：未开启".into()),
+                    None => "定时同步：未开启".into(),
                 },
-            )
-            .when(changed > 0, |row| {
-                row.child(pill(
-                    &format!("未提交 {changed} 文件"),
-                    t.colors.accent,
-                    blue_bg(t),
-                    t,
-                ))
-            });
+                t,
+            ))
+            .child(self.rescan_hint(t, cx));
 
-        let head = h_flex()
-            .w_full()
-            .justify_between()
-            .items_start()
-            .gap(px(GAP_LG))
-            .child(
-                v_flex()
-                    .gap(px(GAP_TIGHT))
-                    .child(title_row)
-                    .child(
-                        div()
-                            .text_size(px(FS_BODY))
-                            .text_color(tier3(t))
-                            .child(format!("本地路径 {path}")),
-                    ),
-            )
-            .child(
-                // 右侧动作：四个图标 + 分组线 + 检测更新（次）+ 拉取更新（主）
-                h_flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(GAP))
-                    .child(
-                        Button::new("pf-folder")
-                            .icon(icon_md(AssetIcon::FolderOpen).text_color(tier3(t)))
-                            .ghost()
-                            .with_size(Size::Medium),
-                    )
-                    .child(
-                        Button::new("pf-cloud")
-                            .icon(icon_md(AssetIcon::Globe).text_color(tier3(t)))
-                            .ghost()
-                            .with_size(Size::Medium),
-                    )
-                    .child(
-                        Button::new("pf-doc")
-                            .icon(icon_md(AssetIcon::BookOpen).text_color(tier3(t)))
-                            .ghost()
-                            .with_size(Size::Medium),
-                    )
-                    .child(
-                        Button::new("pf-timer")
-                            .icon(icon_md(AssetIcon::Clock).text_color(tier3(t)))
-                            .ghost()
-                            .with_size(Size::Medium),
-                    )
-                    .child(div().w(px(1.0)).h(px(20.0)).bg(t.colors.border))
-                    .child(
-                        Button::new("pf-check-update")
-                            .label("检测更新")
-                            .outline()
-                            .loading(self.out.running && self.out.op == Some(Op::Check))
-                            .with_size(Size::Medium)
-                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Check, cx))),
-                    )
-                    .child(
-                        Button::new("pf-pull-update")
-                            .label("拉取更新")
-                            .primary()
-                            .loading(self.out.running && self.out.op == Some(Op::Pull))
-                            .with_size(Size::Medium)
-                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
-                    ),
-            );
-
-        // 信息页签：标签 + 值。技术栈 / 最近提交 / 本地来自本地扫描；
-        // Stars 要远端 API（GitHub / Gitee），等克隆 / 新建仓库接入时一起做。
-        let chip = |label: &str, value: &str| -> Div {
-            h_flex()
-                .h(px(30.0))
-                .px(px(10.0))
-                .rounded(px(R_MD))
-                .bg(t.colors.popover)
-                .border_1()
-                .border_color(t.colors.border)
-                .items_center()
-                .gap(px(GAP_TIGHT))
-                .child(
-                    div()
-                        .text_size(px(FS_META))
-                        .text_color(tier4(t))
-                        .child(label.to_string()),
-                )
-                .child(
-                    div()
-                        .text_size(px(FS_SEC))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(body(t))
-                        .child(value.to_string()),
-                )
-        };
-        // 技术栈：语言占比前二，跟设计稿「TypeScript 63% · Vue 32%」一个格式
-        let stack_text = if self.profile.scanning {
-            "…".to_string()
-        } else {
-            match self.profile.langs.len() {
-                0 => "—".to_string(),
-                1 => format!("{} {:.0}%", self.profile.langs[0].language, self.profile.langs[0].percent),
-                _ => self.profile.langs[..2]
-                    .iter()
-                    .map(|l| format!("{} {:.0}%", l.language, l.percent))
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-            }
-        };
-        let last_commit_text = if self.profile.last_commit_ts == 0 {
-            "—".to_string()
-        } else {
-            rel_time(self.profile.last_commit_ts)
-        };
-        let local_size_text = match &self.space.report {
-            Some(r) => space::human_size(r.total),
-            None => "—".to_string(),
-        };
-        let chips = h_flex()
-            .w_full()
-            .gap(px(GAP))
-            .child(chip("技术栈", &stack_text))
-            .child(chip("Stars", "—"))
-            .child(chip("最近提交", &last_commit_text))
-            .child(chip("本地", &local_size_text))
-            .child(
-                h_flex()
-                    .h(px(30.0))
-                    .px(px(10.0))
-                    .gap(px(GAP))
-                    .rounded(px(R_MD))
-                    .bg(t.colors.popover)
-                    .border_1()
-                    .border_color(t.colors.border)
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(FS_META))
-                            .text_color(tier4(t))
-                            .child("近 30 天活跃度"),
-                    )
-                    .child(self.activity_chart(t)),
-            );
-
-        // 内容卡：README 预览 + 分隔 + 同步面板。
-        // README 数据来自本地仓库根目录（标题 + 首段简介，core 提炼好）；
-        // 没扫完 / 没有 README 时给骨架条占位。
-        let name = self.title(path);
-        let readme = self.profile.readme.clone();
-        let readme_title = readme
-            .as_ref()
-            .map(|r| r.title.clone())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| name.clone());
-        let content_card = h_flex()
-            .w_full()
-            .flex_1()
-            .min_h_0()
-            .rounded(px(R_XL))
-            .bg(t.colors.popover)
-            .border_1()
-            .border_color(t.colors.border)
-            .overflow_hidden()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .id("readme-pane")
-                    .overflow_y_scroll()
-                    .p(px(20.0))
-                    .gap(px(GAP_LG))
-                    .child(
-                        div()
-                            .text_size(px(FS_META))
-                            .font_family(t.mono_font_family.clone())
-                            .text_color(tier4(t))
-                            .child("README"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(FS_TITLE))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(t.colors.foreground)
-                            .child(readme_title),
-                    )
-                    .children(match &readme {
-                        Some(r) if !r.intro.is_empty() => vec![div()
-                            .w_full()
-                            .text_size(px(FS_BODY))
-                            .line_height(px(22.0))
-                            .text_color(tier3(t))
-                            .child(r.intro.clone())
-                            .into_any_element()],
-                        Some(_) => vec![div()
-                            .w_full()
-                            .text_size(px(FS_BODY))
-                            .line_height(px(22.0))
-                            .text_color(tier3(t))
-                            .child("这份仓库的 README 没有可展示的简介段落。")
-                            .into_any_element()],
-                        None => {
-                            if self.profile.scanning {
-                                vec![skeleton_bar(None, t), skeleton_bar(Some(px(420.0)), t)]
-                            } else {
-                                vec![div()
-                                    .w_full()
-                                    .text_size(px(FS_BODY))
-                                    .line_height(px(22.0))
-                                    .text_color(tier3(t))
-                                    .child("仓库根目录没有找到 README 文件。")
-                                    .into_any_element()]
-                            }
-                        }
-                    })
-                    .child(
-                        div()
-                            .pt(px(4.0))
-                            .text_size(px(FS_META))
-                            .text_color(tier4(t))
-                            .child("语言构成"),
-                    )
-                    .child(self.lang_bar(t)),
-            )
-            .child(div().w(px(1.0)).h_full().flex_shrink_0().bg(t.colors.border))
-            .child(self.sync_panel(t, cx));
-
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .h_full()
-            .bg(t.colors.background)
-            .p(px(24.0))
-            .gap(px(GAP_LG))
-            .child(head)
-            .child(chips)
-            .child(content_card)
-            .child(self.profile_status_bar(t))
+        StatusBar::new()
+            .h(px(STATUS_BAR_H))
+            .left(left)
+            .child(center)
+            .right(right)
+            .into_any_element()
     }
 
-    /// 活跃度迷你柱图：最近 8 个有提交的日子的提交数。
-    /// 没提交的日子不补 0 柱——柱子数量本身就说明「这 30 天里几天在干活」；
-    /// 扫描中 / 空仓库画一根矮的轨道色柱，别让 chip 里空一块。
-    fn activity_chart(&self, t: &Theme) -> Div {
-        const BARS: usize = 8;
-        let counts: Vec<u32> = self
-            .profile
-            .activity
-            .iter()
-            // 后端按时间倒序（新的在前），迷你图也习惯新的在右：反转一下
-            .rev()
-            .take(BARS)
-            .map(|d| d.count)
-            .collect();
-        let max = counts.iter().copied().max().unwrap_or(0).max(1) as f32;
-        let n = counts.len();
+    /// 「上次扫描 · 刚刚」：静态文字 + 点击重扫。做成文字而不是一颗图标按钮，
+    /// 是因为"数据多旧"本身就是用户想知道的事，单独一个刷新图标把这句话藏起来了。
+    fn rescan_hint(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let text = if self.scanning {
+            "扫描中…".to_string()
+        } else if self.last_scan_ts == 0 {
+            "尚未扫描".to_string()
+        } else {
+            format!("上次扫描 · {}", rel_time(self.last_scan_ts))
+        };
         h_flex()
-            .w(px(64.0))
-            .h(px(16.0))
-            .items_end()
-            .gap(px(2.0))
-            .children((0..BARS).map(|i| {
-                let h = match counts.get(i) {
-                    Some(&c) => 6.0 + (c as f32 / max) * 10.0,
-                    None => 6.0,
-                };
-                div()
-                    .flex_1()
-                    .h(px(h))
-                    .rounded(px(R_SM))
-                    .bg(if i < n { t.colors.accent } else { track(t) })
-            }))
-    }
-
-    /// 语言构成条：按字节占比分段，取前 6 色，循环取规范板的 chart 色板。
-    fn lang_bar(&self, t: &Theme) -> Div {
-        let palette = [
-            t.colors.chart_1,
-            t.colors.chart_2,
-            orange(t),
-            t.colors.chart_4,
-            t.colors.chart_5,
-            edge(t),
-        ];
-        let langs = &self.profile.langs;
-        if langs.is_empty() {
-            // 扫描中 / 空仓库：一根轨道色条，占位即可
-            return h_flex()
-                .w_full()
-                .h(px(8.0))
-                .rounded(px(R_SM))
-                .overflow_hidden()
-                .bg(track(t))
-                .child(div().h_full().rounded(px(R_SM)).bg(track(t)));
-        }
-        let mut bar = h_flex()
-            .w_full()
-            .h(px(8.0))
+            .id("status-rescan")
+            .h(px(20.0))
+            .px(px(GAP_TIGHT))
             .rounded(px(R_SM))
-            .overflow_hidden()
-            .gap(px(2.0))
-            .bg(track(t));
-        for (i, l) in langs.iter().enumerate() {
-            bar = bar.child(
-                div()
-                    .h_full()
-                    .rounded(px(R_SM))
-                    .bg(palette[i % palette.len()])
-                    .flex_grow(l.percent.max(0.5)),
-            );
-        }
-        bar
-    }
-
-    /// 拉取同步面板（380 宽）：实时进度、日志与最终状态（透明拉取的核心展示区）
-    fn sync_panel(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
-        let busy = self.out.running;
-        let running_op = self.out.op;
-        // 日志区：无内容给占位提示；有内容逐行回显，末行结果按成败着色
-        let mut log_area = v_flex()
-            .id("pull-log")
-            .w_full()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .p(px(10.0))
-            .gap(px(GAP_TIGHT))
-            .rounded(px(R_LG))
-            .bg(t.colors.popover)
-            .border_1()
-            .border_color(t.colors.border);
-        if self.out.lines.is_empty() {
-            log_area = log_area.child(
-                div()
-                    .text_size(px(FS_SEC))
-                    .font_family(t.mono_font_family.clone())
-                    .text_color(tier4(t))
-                    .child("透明拉取：进度、日志与最终状态会显示在这里"),
-            );
-        } else {
-            let last = self.out.lines.len().saturating_sub(1);
-            for (i, line) in self.out.lines.iter().enumerate() {
-                let color = if i == last {
-                    if line.starts_with('✓') {
-                        t.colors.success
-                    } else if line.starts_with('✗') {
-                        t.colors.danger
-                    } else {
-                        tier3(t)
-                    }
-                } else {
-                    tier3(t)
-                };
-                log_area = log_area.child(
-                    div()
-                        .text_size(px(FS_META))
-                        .font_family(t.mono_font_family.clone())
-                        .text_color(color)
-                        .child(line.clone()),
-                );
-            }
-        }
-
-        v_flex()
-            .w(px(380.0))
-            .h_full()
-            .flex_shrink_0()
-            .bg(t.colors.background)
-            .p(px(16.0))
-            .gap(px(GAP_LG))
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(FS_BODY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(t.colors.foreground)
-                            .child("同步"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(FS_META))
-                            .text_color(if busy { orange_text(t) } else { tier4(t) })
-                            .child(if busy {
-                                "同步中…".to_string()
-                            } else if self.out.lines.is_empty() {
-                                "未执行".to_string()
-                            } else {
-                                "已完成".to_string()
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(FS_SEC))
-                    .text_color(tier3(t))
-                    .child(match (busy, running_op) {
-                        (true, Some(Op::Pull)) => "正在拉取云端更新…".to_string(),
-                        (true, Some(Op::Push)) => "正在推送本地提交…".to_string(),
-                        (true, Some(Op::Check)) => "正在检查云端更新…".to_string(),
-                        (true, _) => "正在同步…".to_string(),
-                        (false, _) => "点击下方按钮开始同步".to_string(),
-                    }),
-            )
-            .child({
-                let bar = div()
-                    .w_full()
-                    .h(px(6.0))
-                    .rounded(px(R_SM))
-                    .bg(track(t))
-                    .overflow_hidden();
-                if busy {
-                    // git 的进度给不出可信百分比，跑来回扫动的 indeterminate 条：
-                    // 固定不动的一段会让人以为程序卡住了
-                    bar.child(
-                        div()
-                            .h_full()
-                            .rounded(px(R_SM))
-                            .bg(t.colors.accent)
-                            .with_animation(
-                                "sync-bar",
-                                Animation::new(Duration::from_millis(1400))
-                                    .repeat()
-                                    .with_easing(ease_in_out),
-                                |this, delta| this.w(relative(0.15 + delta * 0.7)),
-                            ),
-                    )
-                } else {
-                    bar.child(div().w(px(0.0)).h_full())
-                }
-            })
-            .child(log_area)
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(GAP))
-                    .child(
-                        Button::new("sync-pull")
-                            .label("拉取")
-                            .secondary()
-                            .loading(busy && running_op == Some(Op::Pull))
-                            .with_size(Size::Medium)
-                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Pull, cx))),
-                    )
-                    .child(
-                        Button::new("sync-push")
-                            .label("推送")
-                            .secondary()
-                            .loading(busy && running_op == Some(Op::Push))
-                            .with_size(Size::Medium)
-                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Push, cx))),
-                    )
-                    .child(
-                        Button::new("sync-check")
-                            .label("检测更新")
-                            .ghost()
-                            .loading(busy && running_op == Some(Op::Check))
-                            .with_size(Size::Medium)
-                            .on_click(cx.listener(|this, _, _, cx| this.run_sync(Op::Check, cx))),
-                    ),
-            )
-    }
-
-    fn profile_status_bar(&self, t: &Theme) -> Div {
-        h_flex()
-            .w_full()
-            .h(px(26.0))
-            .flex_shrink_0()
             .items_center()
-            .gap(px(GAP_LG))
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(GAP_TIGHT))
-                    .child(
-                        div()
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded_full()
-                            .bg(if self.scanning {
-                                orange(t)
-                            } else {
-                                t.colors.success
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .text_color(tier3(t))
-                            .child(if self.scanning {
-                                "扫描中".to_string()
-                            } else {
-                                "就绪".to_string()
-                            }),
-                    ),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .text_size(px(FS_SEC))
-                    .text_color(tier4(t))
-                    .child("上次操作：—"),
-            )
+            .gap(px(GAP_TIGHT))
+            .cursor_pointer()
+            .child(icon_sm(AssetIcon::RefreshCw).text_color(if self.scanning {
+                tier4(t)
+            } else {
+                tier3(t)
+            }))
+            .child(meta_text(text, t))
+            .when(!self.scanning, |it| {
+                it.hover(move |style| style.bg(t.colors.list_hover))
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                if !this.scanning {
+                    this.refresh_status(cx);
+                }
+            }))
+            .into_any_element()
     }
-}
-
-/// README 骨架条（数据接入前的占位）
-/// 骨架占位条：用官方 Skeleton——它自带 2 秒循环的呼吸动画，
-/// 静态的灰条看不出"正在加载"，只会像渲染坏了。
-fn skeleton_bar(w: Option<gpui_kit::Pixels>, _t: &Theme) -> AnyElement {
-    let mut bar = Skeleton::new().h(px(10.0)).rounded(px(R_MD));
-    bar = match w {
-        Some(w) => bar.w(w).flex_shrink_0(),
-        None => bar.w_full(),
-    };
-    bar.into_any_element()
-}
-
-fn vline(t: &Theme) -> Div {
-    div().w(px(1.0)).h_full().flex_shrink_0().bg(t.colors.border)
 }

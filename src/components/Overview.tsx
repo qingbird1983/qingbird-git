@@ -11,11 +11,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../store";
 import {
+  BATCH_LABEL,
   BUCKET_LABEL,
   RING_ORDER,
   bucketColor,
   buildRows,
   buildTodo,
+  batchPlan,
   countBuckets,
   overviewSummary,
   ringGradient,
@@ -38,6 +40,9 @@ export default function Overview() {
   const scanAll = useApp((s) => s.scanAll);
   const pullFor = useApp((s) => s.pullFor);
   const pushFor = useApp((s) => s.pushFor);
+  const batch = useApp((s) => s.batch);
+  const runBatch = useApp((s) => s.runBatch);
+  const stopBatch = useApp((s) => s.stopBatch);
   const select = useApp((s) => s.select);
   const setView = useApp((s) => s.setView);
   const log = useApp((s) => s.log);
@@ -49,6 +54,10 @@ export default function Overview() {
   const todo = useMemo(() => buildTodo(rows), [rows]);
   const counts = useMemo(() => countBuckets(rows), [rows]);
   const sum = useMemo(() => overviewSummary(rows), [rows]);
+  // 能一键跑完的队列。分叉与失联不在里面（batchPlan 只收同类动作的行），
+  // 没有对应行时是 null，按钮就不出现
+  const pullPlan = useMemo(() => batchPlan(todo, "pull"), [todo]);
+  const pushPlan = useMemo(() => batchPlan(todo, "push"), [todo]);
 
   // 状态缓存不全（第一次进 / 刚加了仓库）就补扫一次。scan_all 是纯本地读，不联网。
   useEffect(() => {
@@ -89,7 +98,7 @@ export default function Overview() {
   };
 
   // 网络操作在后端是进程级互斥（OP_LOCK），同一时刻只可能有一个在跑
-  const locked = !!busy || !!cloning || !!running;
+  const locked = !!busy || !!cloning || !!running || !!batch;
   const legend = RING_ORDER.filter((b) => counts[b] > 0);
 
   return (
@@ -141,6 +150,50 @@ export default function Overview() {
           <div className="ov-card-hd">
             <span className="ov-card-t">待处理</span>
             <span className="ov-card-x">{todo.length} 项</span>
+            {/* 批次在跑时整组换成进度与停止：按钮留着用户就会去点第二个批次 */}
+            {batch ? (
+              <div className="ov-batch">
+                {/* 报"正在第几个"而不是"已完成几个"，否则开头一直是 0/N，看着像卡住 */}
+                <span className="ov-batch-p">
+                  {BATCH_LABEL[batch.action]}中 {Math.min(batch.done + 1, batch.total)}/{batch.total}
+                </span>
+                <button
+                  className="ov-bbtn stop"
+                  disabled={batch.stopped}
+                  onClick={() => void stopBatch()}
+                  title="停止后处理：打断当前这一个，剩下的不再开始"
+                >
+                  {batch.stopped ? "正在收尾" : "停止"}
+                </button>
+              </div>
+            ) : (
+              (pullPlan || pushPlan) && (
+                <div className="ov-batch">
+                  {pullPlan && (
+                    <button
+                      className="ov-bbtn acc"
+                      disabled={locked}
+                      onClick={() => void runBatch("pull", pullPlan.rows.map((r) => r.path))}
+                      title="依次拉取落后的仓库，遇工作区有改动的会跳过并继续"
+                    >
+                      <IconCloudDown size={11} />
+                      {pullPlan.label}
+                    </button>
+                  )}
+                  {pushPlan && (
+                    <button
+                      className="ov-bbtn"
+                      disabled={locked}
+                      onClick={() => void runBatch("push", pushPlan.rows.map((r) => r.path))}
+                      title="依次推送待推的仓库"
+                    >
+                      <IconCloudUp size={11} />
+                      {pushPlan.label}
+                    </button>
+                  )}
+                </div>
+              )
+            )}
           </div>
           {todo.length === 0 ? (
             <div className="ov-done">

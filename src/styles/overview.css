@@ -261,6 +261,61 @@
   cursor: default;
 }
 
+/* ---------- 一键批量：卡头右侧那颗组 ---------- */
+.ov-batch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ov-bbtn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 9px;
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  color: var(--fg2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+/* 批量拉取与行内拉取同一口径：应用推荐用户做的事才给强调色 */
+.ov-bbtn.acc {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.ov-bbtn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+.ov-bbtn.acc:hover:not(:disabled) {
+  color: var(--on-accent);
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+/* 停止是"别做了"，不该跟主操作抢强调色 */
+.ov-bbtn.stop {
+  color: var(--fg3);
+}
+.ov-bbtn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ov-batch-p {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--fg2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .ov-done {
   flex: 1;
   display: flex;

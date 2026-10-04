@@ -12,6 +12,11 @@ pub struct RepoStatus {
     pub behind: u32,
     pub dirty: bool,
     pub has_upstream: bool,
+    /// 上游分支全名，如 `origin/main`。空 = 没有上游
+    ///
+    /// 这一条不额外跑命令：`read_status` 本来就要问 git 上游是谁
+    /// （判断 `has_upstream`），那时候把 stdout 留下来即可
+    pub upstream: String,
     pub remote_url: String,
 }
 
