@@ -97,10 +97,7 @@ impl Shell {
             .gap(px(GAP))
             // 1 · 总占用 + 一级目录构成。「重新扫描」挂在这一段的表头上——
             // 它扫的就是这一段，原先孤零零摆在整页最下面
-            .child(card_with(
-                CardHeader::new("磁盘占用").right(rescan_button(t, cx)),
-                t,
-                vec![
+            .child(card_with(space_header(st, t, cx), t, vec![
                     h_flex()
                         .w_full()
                         .items_baseline()
@@ -617,6 +614,21 @@ fn rescan_button(t: &Theme, cx: &mut Context<Shell>) -> AnyElement {
         .accessibility_label("重新扫描磁盘占用")
         .on_click(cx.listener(|this, _, _, cx| this.scan_space(cx)))
         .into_any_element()
+}
+
+/// 「磁盘占用」那张卡的表头：标题 + **多旧** + 重新扫描。
+///
+/// 阶段 16 起这一段可能是**从库里读出来的旧数**（先灌缓存、再后台重扫）。
+/// 不写清楚它多旧，昨天那份数字和刚算出来的那份**长得一模一样**——
+/// 用户只会当成"这就是现在的占用"，而实际上 `target/` 可能已经长了一倍。
+/// **缓存不标时间就等于假装新鲜**，这句 note 就是那个"假装"的解药。
+fn space_header(st: &SpaceState, t: &Theme, cx: &mut Context<Shell>) -> CardHeader {
+    let mut h = CardHeader::new("磁盘占用");
+    let note = scanned_note(st.scanning, st.scanned_at);
+    if !note.is_empty() {
+        h = h.note(format!("扫描于 {note}"), false);
+    }
+    h.right(rescan_button(t, cx))
 }
 
 /// 一级目录构成条。空段不画：0 字节的目录占一段宽度只会让图例看着撒谎

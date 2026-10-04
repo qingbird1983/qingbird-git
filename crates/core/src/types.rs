@@ -1,10 +1,10 @@
 //! 前后端 IPC 共享的数据结构（状态、进度、操作结果）。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::git;
 
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RepoStatus {
     pub is_repo: bool,
     pub branch: String,

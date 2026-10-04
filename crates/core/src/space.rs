@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::git;
 use crate::repos::{self, LOCAL_TIMEOUT};
@@ -40,7 +40,7 @@ const BIG_FILE_MIN: u64 = 10 * 1024 * 1024;
 /// "最大的文件"最多列几条，够用户定位膨胀来源即可
 const BIG_FILE_KEEP: usize = 10;
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BigFile {
     /// 相对仓库根目录的路径（分隔符统一成 `/`），展示用
     pub name: String,
@@ -49,7 +49,7 @@ pub struct BigFile {
     pub size: u64,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IgnoreSuggestion {
     /// 顶层目录名
     pub name: String,
@@ -58,7 +58,7 @@ pub struct IgnoreSuggestion {
     pub tracked: bool,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SpaceReport {
     /// 仓库文件夹总占用（字节）
     pub total: u64,
@@ -236,7 +236,7 @@ pub fn scan_repo_space(path: &str) -> Result<SpaceReport, String> {
 ///
 /// `rel` 既是展示用的相对路径，**也是树节点的 id**——界面上展开一棵子树
 /// 靠的就是它，不用另建一张 id → 路径的表
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DirEntry {
     /// 相对仓库根，分隔符统一 `/`；根目录下的项就是它自己的名字
     pub rel: String,

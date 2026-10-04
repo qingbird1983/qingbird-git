@@ -17,6 +17,7 @@ mod palette;
 mod panels;
 mod readme_tab;
 mod repo_head;
+mod scan_cache;
 mod scheduler;
 mod shell;
 mod sidebar;

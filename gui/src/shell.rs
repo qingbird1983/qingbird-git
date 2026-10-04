@@ -66,7 +66,7 @@ impl Render for Shell {
         // 总览的行快照每帧同步一次。委托只存索引读 `ov_rows`，
         // 靠这一行保证它永远是最新的——两处各自更新必然会差一帧
         if self.page == Page::Overview {
-            self.sync_ov_rows(cx);
+            self.sync_ov_rows();
             // 列宽跟着窗口走。放在行快照之后：它要读上一帧表格实测的可用宽度，
             // 与行数无关，但同一帧里做完两件事比跨帧清楚
             self.sync_ov_col_widths(window, cx);
@@ -935,9 +935,21 @@ impl Shell {
         .detach();
         // 目录树**没有**官方 TreeState 可挂：懒加载的文件夹在扫之前
         // `is_folder()` 恒为 false，基座点不开（理由与查证见 `state.rs::TreeNode`）
-        this.refresh_status(cx);
-        this.scan_space(cx);
-        this.scan_profile(cx);
+        // **先把缓存灌满**（阶段 16）：侧栏徽标、总览统计一上来就有内容。
+        // 然后只对当前选中的那个仓库真去问 git——打开 Locowrk 那种 98 GB 的
+        // 仓库时，靠缓存页面立刻稳，那个仓库自己在后台刷。
+        //
+        // ⚠️ 三个后台扫描都**先灌缓存再刷**（见 `ops.rs` 里的两处
+        // `scan_cache::load_cache`）。所以这里照常起任务是安全的：
+        // 库里有数就先摆数、库里没数才出骨架屏，两条路都试过了。
+        // 17 个仓库全刷一遍才是"启动慢"，所以只刷选中的这一个
+        // （用户 2026-10-05 拍板的这一档）
+        this.load_caches(cx);
+        if let Some(sel) = this.selected.clone() {
+            this.refresh_one(sel.clone(), cx);
+            this.scan_space(cx);
+            this.scan_profile(cx);
+        }
         // 启动时的选中项是构造时就定下的，**没有走过 `select`**，所以这条链上
         // 灌地址条与同步设置草稿的那两步得在这里自己补。不补的话第一屏的
         // 地址条停在占位符上、「同步设置」页签显示的是上一份（其实是空）草稿，
@@ -1158,19 +1170,44 @@ impl Shell {
 
     /// 重扫所有仓库的 git 状态。每个仓库要派生 4~5 条 git 命令，串起来好几秒，
     /// 所以整个扫描丢进后台线程池，仓库之间并发，界面不等着。
+    ///
+    /// **只在"用户主动要求扫全部"时用**（⌘K 重扫、状态条点一下、托盘扫描全部、
+    /// 批量同步跑完）。启动与切仓库走 [`Self::refresh_one`]——否则打开
+    /// Locowrk 那种 98 GB 的仓库就要等它重扫一遍，页面稳不下来。
     pub(crate) fn refresh_status(&mut self, cx: &mut Context<Self>) {
+        let paths: Vec<String> = self.repos.iter().map(|r| r.path.clone()).collect();
+        self.refresh_many(paths, true, cx);
+    }
+
+    /// 只重扫**一个**仓库。切仓库、单个操作跑完都走这里。
+    ///
+    /// ⚠️ **不要设 `self.scanning`**：那个标志会让状态条显示"尚未扫描"，
+    /// 而一个仓库的后台刷新**不该让整屏看起来在等**。全量 `refresh_many`
+    /// 才设。
+    pub(crate) fn refresh_one(&mut self, path: String, cx: &mut Context<Self>) {
+        if path.is_empty() {
+            return;
+        }
+        self.refresh_many(vec![path], false, cx);
+    }
+
+    /// 真正的扫描实现。`all` = 这是不是"扫全部"（决定要不要亮"尚未扫描"）。
+    fn refresh_many(&mut self, paths: Vec<String>, all: bool, cx: &mut Context<Self>) {
         self.seq += 1;
         let seq = self.seq;
         // 丢掉上一次的句柄（= 取消），免得两轮结果打架
         self.scan = None;
-        self.scanning = true;
+        if all {
+            self.scanning = true;
+        }
         cx.notify();
 
-        let paths: Vec<String> = self.repos.iter().map(|r| r.path.clone()).collect();
         if paths.is_empty() {
-            self.scanning = false;
-            // 一个仓库都没有时状态条不该一直挂着"尚未扫描"——这轮本身就是成功的空扫描
-            self.last_scan_ts = qingbird_core::store::now_secs();
+            if all {
+                self.scanning = false;
+                // 一个仓库都没有时状态条不该一直挂着"尚未扫描"——这轮本身就是成功的空扫描
+                self.last_scan_ts = qingbird_core::store::now_secs();
+            }
             return;
         }
         let sel = self.selected.clone();
@@ -1226,18 +1263,27 @@ impl Shell {
                 if this.seq != seq {
                     return; // 已经有更新的一轮在跑了，这批过期
                 }
-                this.scanning = false;
+                if all {
+                    this.scanning = false;
+                }
                 // 状态条要显示"上次扫描"，得在真的扫完时记时间，
                 // 不能在发起扫描时记——那会把失败的一轮也报成"刚刚扫过"
-                this.last_scan_ts = qingbird_core::store::now_secs();
+                if all {
+                    this.last_scan_ts = qingbird_core::store::now_secs();
+                }
                 for (path, status, changes, last_commit) in scan {
-                    let v = this.views.entry(path).or_insert_with(RepoView::blank);
+                    let v = this.views.entry(path.clone()).or_insert_with(RepoView::blank);
                     v.status = status;
                     v.changed = changes.len() as u32;
                     v.changes = changes;
                     v.last_commit_ts = last_commit;
+                    // **扫完就落库**（阶段 16）。刷新过的那个仓库状态一定是最新的，
+                    // 不落库的话下次启动又要从头问一遍 git
+                    this.persist_view_cache(&path);
                 }
-                this.fork = fork;
+                if fork.is_some() {
+                    this.fork = fork;
+                }
                 cx.notify();
             })
             .ok();
@@ -1287,8 +1333,19 @@ impl Shell {
         let _ = repos::remove_repo(&path);
         self.repos = repos::list_repos();
         self.views.remove(&path);
+        // 库里那一行也要删，否则**孤儿行会一直攒着**：仓库移出列表了，
+        // 它的体积和 README 还躺在缓存里，而这个路径将来可能被重新加回来
+        // （同一个仓库被加两次时旧数会直接冒出来，看起来像"没重新扫"）
+        qingbird_core::scan_cache::drop_cache(&path);
         if self.selected.as_deref() == Some(path.as_str()) {
             self.selected = self.repos.first().map(|r| r.path.clone());
+            // ⚠️ 一个仓库都不剩时上面两次 `scan_space` / `scan_profile` 会
+            // 直接 return，**被移走那个仓库的体积与 README 还留在屏幕上**。
+            // 这里显式清空
+            if self.selected.is_none() {
+                self.space = SpaceState::default();
+                self.profile = ProfileState::default();
+            }
             self.scan_space(cx);
             self.scan_profile(cx);
             // 与 `select` 同一套收尾：换人之后地址条 / 草稿 / 历史都得重灌，

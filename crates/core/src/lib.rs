@@ -18,6 +18,7 @@ pub mod net;
 pub mod proxy;
 pub mod repos;
 pub mod run_cmd;
+pub mod scan_cache;
 pub mod scheduler;
 pub mod space;
 pub mod store;

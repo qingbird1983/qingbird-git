@@ -407,45 +407,14 @@ impl Shell {
     /// 每一帧都重算：数据量就是仓库数（几十），压一遍是微秒级，
     /// 而"只在变化时更新"要自己判断什么算变化——判断错了就是表格少一行，
     /// 而少一行是那种用户不会报、只会自己绕开的 bug
-    pub(crate) fn sync_ov_rows(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_ov_rows(&mut self) {
         let rows: Vec<OvRow> = self
             .repos
             .iter()
             .map(|e| {
                 let v = self.views.get(&e.path).unwrap_or(&EMPTY_VIEW);
                 let b = bucket_of(&v.status);
-                let (kind, _, _) =
-                    crate::sidebar::badge_tone(b, v.changed, e.is_third_party, cx.theme());
-                // 未提交与分档可重叠：分档先给出"要做什么"，未提交作为补充说明
-                let status = match kind {
-                    BadgeKind::None => {
-                        if v.changed > 0 {
-                            format!("未提交 {}", v.changed)
-                        } else {
-                            "已同步".into()
-                        }
-                    }
-                    BadgeKind::Behind => {
-                        if v.changed > 0 {
-                            format!(
-                                "{} · 未提交 {}",
-                                if e.is_third_party {
-                                    "可更新"
-                                } else {
-                                    "落后"
-                                },
-                                v.changed
-                            )
-                        } else if e.is_third_party {
-                            "可更新".into()
-                        } else {
-                            "落后".into()
-                        }
-                    }
-                    BadgeKind::Ahead => "待推送".into(),
-                    BadgeKind::Forked => "已分叉".into(),
-                    BadgeKind::Dirty => format!("未提交 {}", v.changed),
-                };
+                let status = ov_status_text(b, v.changed, e.is_third_party);
                 OvRow {
                     path: e.path.clone(),
                     name: if e.alias.trim().is_empty() {
@@ -684,6 +653,104 @@ fn short_day(date: &str) -> String {
     let m = it.next().unwrap_or("");
     let d = it.next().unwrap_or("");
     format!("{}/{}", m.trim_start_matches('0'), d)
+}
+
+// ================= 「状态」列那句话 =================
+
+/// 总览表格「状态」列写什么。**纯函数**，所以能单测。
+///
+/// ⚠️ 抽出来是被一次实机抓帧逼的：阶段 16 起启动只刷选中的那一个仓库，
+/// 于是**启动那一刻其余每一行都是没扫过的**，而这一列原来会把
+/// `Bucket::Unknown` 落进「已同步」——那不是"没消息"，是**谎报干净**，
+/// 而且恰好是用户最不愿意听错的一句。
+///
+/// 判据原先藏在 `sync_ov_rows` 里、和取色缠着，编译器与单测都拦不住
+/// （`cargo check` 零错、`bucket_of` 的单测全绿，因为它判得**没错**，
+/// 错的是显示那一侧没接住 `Unknown`）。
+pub(crate) fn ov_status_text(b: Bucket, changed: u32, third: bool) -> String {
+    // 没扫过：措辞用 `bucket_word`——那句是**全站唯一一份**（⌘K 搜索同源）
+    if b == Bucket::Unknown {
+        return bucket_word(b).to_string();
+    }
+    // 未提交与分档可重叠：分档先给出"要做什么"，未提交作为补充说明
+    match crate::sidebar::badge_kind_of(b, changed) {
+        BadgeKind::None => "已同步".into(),
+        BadgeKind::Behind => match (changed > 0, third) {
+            (true, _) => format!("{} · 未提交 {changed}", if third { "可更新" } else { "落后" }),
+            (false, true) => "可更新".into(),
+            (false, false) => "落后".into(),
+        },
+        BadgeKind::Ahead => "待推送".into(),
+        BadgeKind::Forked => "已分叉".into(),
+        BadgeKind::Dirty => format!("未提交 {changed}"),
+    }
+}
+
+// ================= 「状态」列的单测 =================
+
+#[cfg(test)]
+mod status_tests {
+    use super::ov_status_text;
+    use crate::sidebar::badge_kind_of;
+    use crate::state::Bucket;
+
+    /// **「没扫过」不许写成「已同步」。**
+    ///
+    /// 阶段 16 起启动只刷选中的那一个仓库，于是启动那一刻其余每一行都是
+    /// 没扫过的。这条错在实机抓帧里才看见：`cargo check` 零错、
+    /// `bucket_of` 的单测全绿（它判得**没错**，错的是显示那侧没接住
+    /// `Unknown`）。所以判据必须被单独钉住。
+    #[test]
+    fn an_unscanned_repo_never_reads_as_synced() {
+        assert_eq!(ov_status_text(Bucket::Unknown, 0, false), "待扫描");
+        assert_eq!(ov_status_text(Bucket::Unknown, 0, true), "待扫描");
+        // `changed` 也不该把它变成别的结论：没扫过就是没扫过，
+        // 那个数是从哪来的都不知道
+        assert_eq!(ov_status_text(Bucket::Unknown, 3, false), "待扫描");
+    }
+
+    /// 扫过且干净的才轮到「已同步」。**别把上一条改回去**
+    #[test]
+    fn a_scanned_clean_repo_says_synced() {
+        assert_eq!(ov_status_text(Bucket::Synced, 0, false), "已同步");
+    }
+
+    /// 归属只改「落后」那句的措辞，不改它「落后」这件事
+    #[test]
+    fn behind_is_worded_by_ownership() {
+        assert_eq!(ov_status_text(Bucket::Behind, 0, false), "落后");
+        assert_eq!(ov_status_text(Bucket::Behind, 0, true), "可更新");
+        assert_eq!(ov_status_text(Bucket::Behind, 2, false), "落后 · 未提交 2");
+        assert_eq!(ov_status_text(Bucket::Behind, 2, true), "可更新 · 未提交 2");
+    }
+
+    /// 档位判定与显示那句话必须**同一份**：状态列写着「未提交 3」，
+    /// 侧栏徽标却是空胶囊的话，同一仓库两屏两种说法
+    #[test]
+    fn the_wording_and_the_badge_agree_on_every_bucket() {
+        for b in [
+            Bucket::Synced,
+            Bucket::Dirty,
+            Bucket::Ahead,
+            Bucket::Behind,
+            Bucket::Forked,
+            Bucket::Unknown,
+        ] {
+            let kind = badge_kind_of(b, 0);
+            let text = ov_status_text(b, 0, false);
+            assert!(!text.is_empty(), "{:?} 空话", b);
+            match kind {
+                crate::sidebar::BadgeKind::None => {
+                    assert!(
+                        text == "已同步" || text == "待扫描",
+                        "{:?} 无动作却写了 {text}",
+                        b
+                    )
+                }
+                _ => assert_ne!(text, "已同步", "{:?} 有事要办却说已同步", b),
+            }
+        }
+    }
 }
 
 // ================= 列宽的单测 =================

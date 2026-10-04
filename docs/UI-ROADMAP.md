@@ -1848,7 +1848,7 @@ qingbird-md-rust 就要 43 秒），空间页会长时间停在骨架屏。这�
 | 阶段 | 做什么 | 依赖 | 状态 |
 |---|---|---|---|
 | 15 | 拉取/推送日志恢复逐行输出（**功能退化**，不是优化） | 无 | `✅ 已完成` |
-| 16 | 启动秒开：SQLite 缓存 + 只刷当前选中的仓库 | 15 独立 | `- [ ]` |
+| 16 | 启动秒开：SQLite 缓存 + 只刷当前选中的仓库 | 15 独立 | `✅ 已完成`（`op_history` 那一半待拍板，见下） |
 | 17 | 第三方仓库「多出来的文件」清理 | 无 | `- [ ]` |
 | 18 | 说明页中英切换闪烁 | 无 | `- [ ]` |
 
@@ -1948,15 +1948,122 @@ remote: Total 4 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)
 | `scan_cache` | 启动秒开的扫描结果 | 每仓库一行，**覆盖**写 |
 | `op_history` | 这个仓库被更新过什么 | **追加**，永不覆盖 |
 
-- [ ] **16-1** core 新增 `history.rs`：SQLite 封装 + 建表 + 迁移兜底
-      （库打不开时**降级成"没缓存"而不是崩**——它是加速器不是依赖）
-- [ ] **16-2** README 正文**单独存文本文件，不进库**（大段纯文本进数据库
-      只让读写都变慢）
-- [ ] **16-3** 启动读缓存上屏（页面**立刻稳定**），后台**只刷当前选中的仓库**，
+- [x] **16-1** core 新增 **`scan_cache.rs`**（不是 `history.rs`——那个名字
+      已被"提交历史"模块占了，`write` 工具当时明写了
+      `overwrote existing file` 是我漏看）：SQLite 封装 + 建表 + 降级兜底
+      （库打不开 / 表损坏 / 磁盘满一律**降级成"没缓存"而不是崩**——它是
+      加速器不是依赖）
+- [x] **16-2** ~~README 正文单独存文本文件，不进库~~ → **判断反转，统一进库**。
+      当初的理由是「大段纯文本进数据库只让读写都变慢」，**那个理由不成立**：
+      读写一样快，却要多一套文件生命周期（建目录、清孤儿、并发写、编码处理）。
+      统一进库，少一处会出错的地方
+- [x] **16-3** 启动读缓存上屏（页面**立刻稳定**），后台**只刷当前选中的仓库**，
       其余等你点到哪个刷哪个——用户已拍板这一档
-- [ ] **16-4** 缓存带「扫描于 X 时间」，过期不假装新鲜
+- [x] **16-4** 缓存带「扫描于 X 时间」，过期不假装新鲜。
+      落在**空间页**与**说明页**两处卡头的 `note` 槽上（与「切换文档失败」
+      同属一个槽，所以是「否则」而不是两句并存）
 - **出口**：`cargo check --workspace` 零错零警；同一批仓库连续启动两次，
       第二次**秒开**且内容与第一次一致；删掉库文件后应用照常启动（降级）
+
+#### 16 的连带改动（一开始没想到，落地时才发现）
+
+缓存一旦上屏，「正在扫」与「没内容」就**不再是同一件事**了。原来三处判据
+写成"光看 `scanning`"，会把**刚显示出来的缓存顶掉**——秒开做得出来又立刻
+缩回去，白做：
+
+| 位置 | 改成 | 不改的后果 |
+|---|---|---|
+| `readme_tab::readme_body` | `scanning && readme_text.is_none()` | 正文塌成骨架屏，切页签那一下像"内容没了" |
+| `panels::space_summary_line` | `scanning && rep.is_none()` | 徽标在"占用 12 GB"与"扫描中…"之间来回闪 |
+| `repo_head::activity_chip` | `scanning && activity.is_empty()` | 图表画着柱子、旁边写着"统计中…" |
+
+另外**两个后台扫描各自的灌库时机不一样**：`scan_space` 与 `scan_profile`
+谁先跑完是不定的，所以落库**拆成两个口**（`persist_space_cache` /
+`persist_profile_cache`），各写各的槽。合成一个的话先跑完的那个会拿另一个
+**还没更新的**槽（可能还留着上个仓库的）一起写进库里。
+
+#### 16 留了一半：`op_history` 还没有调用方（待拍板）
+
+`op_history` 表与 `record_op` / `op_history` 两个函数**已经写好、也有单测**，
+但**界面上一处都没调**。用户当初选 SQLite 的原话是「记录这个仓库历史、
+更新了什么」，所以这一半不是可有可无的尾巴。
+
+**没有顺手接上的原因**：记录下来之后**摆在哪**是个要拍板的问题，
+不是实现细节——
+
+- 摆哪儿：同步卡的「上次操作」一行 / 检视抽屉多一页签 / ⌘K 里一个读出口？
+- 记哪些：只记用户主动发起的（core 的注释已经这么定，理由是后台自动同步
+  自己会跑，全记一个月几万条噪音），还是连自动同步也记？
+- 哪些仓库：第三方那一批要不要排除？
+
+⚠️ **别让"表建好了、函数有单测"当成这一半做完了**——`dead_code` lint 抓不到
+「只被写者自己读」的槽（`pub fn` 在 lib crate 里静默通过），而**写下来却
+没人读**正是这个项目的教训（D35）。等拍板后一并补上读出口。
+
+#### 16 的出口实测（2026-10-05，`$TEMP` 合成仓库，**用户 17 个真实仓库一个没碰**）
+
+工具是新增的 `scripts/startup_probe.py`：启动后**按「窗口出现」为基准**逐帧抓
+（不是按进程启动——GPUI 建窗要 ~0.9–1.5 秒，那段还没画，跟秒开无关），
+每一帧都跟"最后一帧（已稳定）"求逐像素差。
+
+| 轮次 | 库里 | 100 ms | 250 ms | 800 ms | 1500 ms |
+|---|---|---|---|---|---|
+| 冷 | 空 | 3476 px（0.32%） | 3476 | 3476 | **0** |
+| 热 | 有 | 482 px（0.04%） | **0** | 0 | 0 |
+
+（合成仓库含一个 **2 万文件**的大仓库，否则差别小到抓帧看不出主次）
+
+**跨轮对照才是那个数**：热 @100 ms 与冷 @1500 ms（已稳定）逐像素只差
+**458 px（0.04%）**，且差异全部落在 `x19–41, y8–30` —— 标题栏那枚
+**应用图标位图**（异步加载，100 ms 时还没画出来），**不在内容区**。
+
+⇒ **出口达标**：第二次启动在 100 ms 内就与稳定态逐像素一致（除异步图标）。
+
+另外验掉的：
+
+- **删掉 `cache.db` 后照常启动**（冷启动那一轮就是），降级成骨架屏
+- **库损坏不崩**：`scan_cache::tests::a_corrupt_database_degrades_instead_of_panicking`
+  （往 `cache.db` 塞非 SQLite 字节，读返 `None`、写返 `false`、不 panic）
+- **库内容**：`scan_cache` 1 行（只有选中的那个仓库——这正是 16-3 那一档），
+  带 space / langs / readme / scanned_at，中文与 emoji 往返正常
+- 三轮抓帧下来**用户真实 config 指纹前后一致**（`qbguard` 每轮核对）
+
+#### 16 顺带查实并修掉的一个缺陷：「没扫过」被写成「已同步」
+
+阶段 16 让「启动只刷选中的那一个」成立，于是**启动那一刻其余每一行都是没扫过的**。
+总览表格「状态」列原来把 `Bucket::Unknown` 落进 `BadgeKind::None` 兜底臂，
+于是给它们写「**已同步**」——那不是"没消息"，是**谎报干净**，
+而且恰好是用户最不愿意听错的一句。
+
+`cargo check` 零错、`bucket_of` 的单测全绿（它判得**没错**，
+错的是显示那侧没接住 `Unknown`），**只有抓帧看得见**。
+
+收法：判据抽成纯函数 `ov_status_text`（能单测），
+`badge_tone` 的档位判定抽成 `badge_kind_of`（不碰主题），
+`Bucket::Unknown` 在 `badge_tone` 里单给**中性灰**——
+它进不了「需要动手」那一列，不该穿行动色，而同一行状态点已经是灰的
+（`dot_color` 的 Unknown 档）。侧栏那一格仍走 `BadgeKind::None` 不画徽标，
+与「徽标只放要动手的数字」那条规矩一致。新增 4 条单测（gui 34 → 38）。
+
+### ⚠️ 顺手查实、**本阶段不修**的一个缺陷（留给后续阶段或新开一条）
+
+**总览页那张「提交活跃度」图，本地时间 0:00–8:00 之间看不到今天的提交。**
+
+根因在 `overview.rs::local_date_key` 的注释与实现对不上：
+
+- 注释写「本地时区的 `YYYY-MM-DD`」「不能用 `toISOString`，那是 UTC 日期」
+- 实现是 `secs.div_euclid(86_400)`，**epoch 直接除 86400 给的是 UTC 日期**。
+  偏移量不为 0 时（git 那边按 `%ad` 带 `+0800` 传进来）凑巧对，
+  **偏移量为 0（"今天"）时给的是 UTC 的今天**
+
+于是 UTC+8 的凌晨：`fill_days` 的窗口右端是 **UTC 昨天**，
+而今天的提交被标成**本地今天**，落不进窗口 → 那一天恒为 0。
+
+实测（2026-10-05 04:34 +08:00，合成仓库当天提交 3 次）：
+x 轴标签从 9/21 到 **10/04**（本该到 10/05），整张图一根柱子都没有。
+
+**没顺手改的理由**：修它要先回答「本地 UTC 偏移从哪来」
+（系统？git？启动时探一次？），那是另一个设计决定，不该在阶段 16 里顺手定。
 
 ### 阶段 17：第三方仓库「多出来的文件」清理
 
@@ -2107,4 +2214,5 @@ remote: Total 4 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)
 | 2026-10-05 | 12 补 11 + 补测试覆盖 | **为删除旧实现（Q6）铺路**。用户拍板分两轮：先补测试覆盖 + 改 README，下一轮再删。① 查清依赖：`crates/` + `gui/` 里**没有一处引用 `src-tauri` 或 `src/`**，仓库也**没有 `.github`**（没有 CI 靠 Tauri 构建），`tauri.conf.json` 只被它自己用 → 删是安全的。② **README 全错**：第 30/36/42 行还写着 `pnpm tauri dev` / `pnpm tauri build` / `cd src-tauri && cargo test`。改写成 `cargo build --workspace` + `cargo test -p qingbird-{core,gui}`，并补上目录表与"界面怎么验"一节（点名四个脚本）。③ **补 6 组单测覆盖旧测试钉住、且现在仍然归我们管的规则**（gui 19 → **32**）：`bucket_of` 分档优先级（分叉优先于落后/待推/未提交）、`bucket_word` 每一档都有中文说法、`BatchKind::wants` 的 Q3 三档筛选口径（**第三方一律不进推送队列**）、`batch_summary`（**「跳过 0 个」这种废话不出现**，顺序固定在成功之后；`done < total` 报进度，`done == total` 算跑完）、`step_repo_index`（**到头停头不绕回**；没选中时 ↓ 从头 ↑ 从尾）、`batch_line`（没有可跑的仓库时把原因写进标签）。④ **两处顺手收口**：`state.rs::batch_summary` 与 `palette.rs::batch_line` 原来挂在 `Shell` 上得一整个 Shell 才调得了，**抽成自由函数**（这也是它们能单测的前提）；`palette_model` 末尾的 `debug_assert_eq!(acts.len(), groups.len())` **只查了组数对齐，没查组内条目数**——加一个条目忘了配动作，那个断言照样过、⌘K 静默执行错的动作，补了三处 `debug_assert_eq!(items.len(), acts.len())`。⑤ **三键顺序收成一个声明**：`state.rs::SYNC_SLOTS` / `SYNC_SLOT_LABELS`（拉取·推送·检测），同步卡改成读它（`cargo check` 那两条 "never used" 告警就是这么消掉的），`bind_keys` 与同步卡两处留指向它的注释。⑥ `docs/shots/` 只留 `current.png`，删掉 8 张记着已经不存在的旧 React 界面的截图。**没照抄的**：`commands.test.mjs` 的模糊匹配规则（**已经是基座 `CommandState` 的行为**）、`overview.test.mjs` 的 `buildTodo` / `ringGradient` / `countBuckets`（**随改版设计性删掉了**——待处理列表没了、圆环删了）、`hotkeys.test.mjs` 的键位判定（**官方 Action + `bind_keys` 接管了**）——给已经不存在的实现补测试等于测空气。⑦ **抓帧流程一直在写用户的真实 config，本轮查实并堵死**：核对时发现真实 `config.json` 的 mtime 停在 `2026/10/5 1:49:48`——正是上一轮抓帧的时段，且 `inspector_open` 已从 false 被写成 true（`Copy-Item` 保留 mtime，所以副本的时间戳反而成了证据）。根因不是"忘了设 `$env:APPDATA`"这一件事，而是**隔离靠人记得**：`steps.py` 用 `Popen([EXE])` 启动、继承调用方 shell 的环境变量，脚本自身**没有任何隔离入口**；`uia_probe.py` / `a11y_stress.py` 同样只设了 `RUST_BACKTRACE`。修法收进新模块 `scripts/qbguard.py`（**三个脚本共用，不各写一遍**）：`QB_APPDATA` 指向副本时覆盖 `APPDATA`，不设就打醒目警告，收尾再按 `mtime+size+sha256` 指纹核对真实 config 并在不一致时直接报出来。本轮两次抓帧指纹前后一致（`bcbc1ef3…`），确认隔离生效 | ✅ `cargo check --workspace` 零错零警；gui 32 / core 141 全绿；同步卡在隔离环境下抓帧核对：「我的」拉取·推送·检测三键齐全、顺序正确，第三方推送位仍是空格子占位 |
 | 2026-10-05 | 12 补 12 + 删旧实现 | **Q6 第二轮：旧 Tauri 2 + React 实现整体退役删除**（用户批准，同日执行）。① **删**：`src/`（64 文件）、`src-tauri/`（42 文件）、`public/`（3）、`index.html`、`vite.config.ts`、`tsconfig.json` + `tsconfig.node.json`、`package.json` + `pnpm-lock.yaml`（`test:web` 一并退役）、`scripts/gen-icons.mjs`（它调 `@tauri-apps/cli`、产出目标是 `src-tauri/icons/` 与 `src/assets/`，两个都没了才失效），外加三个本地产物 `node_modules/`（**88.8 MB**）、`dist/`、`debug.log`（旧 WebView2 的 crashpad 日志，全是「拒绝访问 0x5」）。跟踪文件 **206 → 90**。② **清单修正一处**：`assets/` 原写着要删，实查里面只有 `icon-source.png`——1024px 的**图标源图**，而 `gui/assets/app-icon.png` 是它的 128px 展开 → **保留**。删了将来改图标就没有源了（gen-icons.mjs 退役后，改图标就是直接替换 `gui/assets/` 下那一张）。③ **删前逐条查引用**，结论是**零代码依赖**：`crates/` + `gui/` 里对旧实现的提及**全在注释里**（`history.rs`「合并提交走 `git diff <hash>^ <hash>`」、`repos.rs`「日期键按本地时区」、`net.rs`「`Channel` 改回调闭包」这类溯源，**留着有价值**，指向的目录没了也不影响读者理解）；`app_assets.rs` 的 `include_bytes!` 指向 `gui/assets/` 而非 `src-tauri/`（当初拷进来就是为了不把构建绑在准备删的目录上）；两个 `Cargo.toml` 都没有 node 依赖、`gui/` 下无 `build.rs`；`Cargo.lock` 里的 `tauri-winrt-notification` 是 `notify-rust` 的传递依赖，与旧实现无关。④ **修掉三处会变错的文档**：`Cargo.toml` 末尾那条「src-tauri 保持独立工作区」、`.gitignore` 的 `src-tauri/target` 与 `src-tauri/gen/schemas`、`.vscode/extensions.json` 推荐的 `tauri-apps.tauri-vscode` 插件。⑤ **AGENTS.md 大改**：「项目说明」从「Tauri 2 + React · 迁移中」改成已换成 GPUI；「目录规则」删掉「src/ 与 src-tauri/src/ 是只读迁移源」；「常用命令」**整节重写**（原来教人 `pnpm install` / `pnpm tauri dev` / `cd src-tauri && cargo test` / `pnpm test:web`——那个目录已经没了）；并**删掉整节「架构要点（旧实现，只读参考）」99 行**。删之前逐条核过它记的结论在新代码里都有**更详细、带代码位置**的版本（`history.rs` 的 `diff_args` 纯函数 + 单测、`repos.rs` 直接让 git `--date=format-local` 算时区、`shell.rs:980` 与 `panels.rs:222` 的「1·2·3 按屏幕位置对位」、`ops.rs:505` 的「遇脏工作区跳过不自动 stash」、`state.rs:789` 的「跳过 0 个不出现」+ 单测），而「三列布局 / minWidth 1080 预算」那类界面规格早已彻底失效——留着一份指向空目录的「只读参考」只会让人白跑一趟。⑥ `docs/UI-DESIGN.md` 里那段阶段 11 的复查台账**没改正文**，只在开头加一句「`src-tauri` 指当时的迁移源，该目录已退役」——结论历史上都是真的，逐条改路径反而容易改错 | ✅ `cargo check --workspace` **零错零警**；core **141** / gui **32** 全绿；`cargo build --workspace` 成功出 exe（63,598,080 字节），**删掉 88.8 MB 依赖后构建不受影响** |
 | 2026-10-05 | 15 + 日志退化 | **拉取/推送日志恢复逐行输出**（用户报的功能退化，不是优化）。① **能力没丢，路由丢了**：`git::run_git_stream` 逐行流式回调（按 `\r` 与 `\n` 都切分）一直都在，但 `net.rs::progress_hooks` 的 forward 是 `if let Some(ev) = parse_progress(line)`——**认不出的行直接丢掉**。而 `parse_progress` 用 `strip_prefix` **从行首**匹配 7 个前缀，git 输出**远端侧**进度时前面带 ` remote: `，前缀一挡**一条都认不出来**。`types.rs::combined()` 组装日志时又按同一份（同样不完整）白名单**滤了第二遍**。实测一次真实 `git clone --progress` 的 104 行里**近 55 行带该前缀**。② `parse_progress` 改为先剥 `remote: ` 再匹配、白名单补全（`Unpacking objects` / `Checking out files` / `Writing` / `Total`…），且**认不出的行不再返回 None**——照常返回、stage/detail 留空但**带上 git 原文**。③ `ProgressEvent` 加 `raw: String` 与 `to_log: bool`。**分档判据是百分比**：`< 100` 的刷新行只喂进度条（`Receiving objects: 45%` 每秒十几条，全进日志会把记录冲掉），`= 100` 或无百分比的一次性事件行进日志。④ GUI `on_progress` **优先上 git 原文**——原来拼的是 `· 接收对象 已传输 1.2 MiB` 这样的**二次转述**，信息在翻译里被磨掉一层。⑤ **顺带修两个只在实机上才暴露的问题**：（a）**代理竞速时两路输出混作两段**——`race_direct_vs_proxy` 让直连与代理走**同一个裸 channel**、接收时不区分来源，用户看到同一段原文**原样出现两遍**却没有任何交代；收法是消息带路标签、每路首次出现时插一条 `—— 直连 ——` 分隔行（**不给 raw 加前缀**：那是 git 的话不是我们的；没配代理时写「代理路」别留空地址）。（b）**克隆对话框靠 `split_once(" · ")` 从展示文本里反解阶段词**——输出换成原文后那个分隔符不存在了，阶段会整个退化成整行；改成 `events: Vec<(String, String)>` 成对存。⑥ 补一个**用真实 git 输出形状的 fixture 测试**（`real_clone_output_shape_is_fully_recognised`），连行尾那些 git 用来覆盖同一行的**尾随空格**一起钉住 | ✅ `cargo check --workspace` 零错零警；core **141 → 145**、gui 32 全绿。实机验收在 `$TEMP` 下自建 **bare 仓库走 `file://`**（`--depth 1` 才真的走 pack 传输——本地路径 clone 是硬链接拷贝，一条进度行都不出），**不联网、不碰用户任何真实仓库**。点「检测」后日志区逐行显示 `remote: …` 原文、两路有分隔标记、**进度刷新行一条都没出现**（不刷屏）、完成行全在；拉取那轮还验到 `fatal: Cannot fast-forward…` **原样上屏**（旧版是被静默吞掉的）。真实 config 指纹抓帧前后一致（`1074690f…`） |
+| 2026-10-05 | 16 + 启动秒开 | **SQLite 缓存 + 只刷当前选中的仓库**（用户拍板用 SQLite，理由是要「记录这个仓库历史、更新了什么」——数据从"覆盖写一条"变成**持续追加**，JSON 会越攒越大）。① **推翻我自己的建议**：最初建议不上（数据量小、纯读缓存 5–15 ms 就够、加它会引入这个纯 Rust 栈**唯一的 C 依赖**）。那次评估只覆盖了「读缓存」一种访问模式，**没算上持续追加**。② core 新增 **`scan_cache.rs`**（**不叫 `history.rs`——那个名字已被"提交历史"模块占了**，`write` 工具当时明写了 `overwrote existing file` 是我漏看）：两张表（`scan_cache` 覆盖写 / `op_history` 追加）+ `rusqlite 0.40` 开 `bundled` 静态编 sqlite3.c。**它是加速器不是依赖**：库打不开 / 表损坏 / 磁盘满一律降级（读返 `None`、写返 `false`），**一次都不让它 panic**。③ **判断反转一条**：「README 单独存文本文件不进库」的理由（大段纯文本进库读写会变慢）**不成立**——读写一样快却要多一套文件生命周期，统一进库。④ GUI 侧 `scan_cache.rs` 管「读缓存填状态 / 扫完写回缓存」的映射；**三个后台扫描一律「先灌缓存再刷」**，于是页面立刻稳。⑤ **`scanning` 与「还没内容」不再是同一件事**，三处判据原来写成"光看 `scanning`"，会把**刚显示出来的缓存顶掉**（秒开做得出来又立刻缩回去）：`readme_body` / `space_summary_line` / `activity_chip` 三处都改成 `scanning && 还没有内容`。⑥ **落库拆成两个口**（`persist_space_cache` / `persist_profile_cache`）：两个扫描谁先跑完是不定的，合成一个的话先跑完的会把另一个**还没更新的**槽（可能还留着上个仓库的）一起写进库。⑦ **16-4「过期不假装新鲜」**：空间页与说明页卡头的 `note` 槽写「扫描于 刚刚 / 刷新中…」，判据抽成纯函数 `scanned_note`（能单测）。⑧ **顺手修一个抓帧才看得见的谎**：16-3 让「启动只刷选中那一个」成立，于是启动那一刻**其余每一行都是没扫过的**，而总览「状态」列把 `Bucket::Unknown` 落进 `BadgeKind::None` 兜底臂，写成「**已同步**」——那是**谎报干净**。`cargo check` 零错、`bucket_of` 单测全绿（它判得**没错**，错的是显示那侧没接住 `Unknown`）。判据抽成纯函数 `ov_status_text`，`badge_tone` 的档位判定抽成 `badge_kind_of`，`Unknown` 单给**中性灰**（它进不了「需要动手」那一列，不该穿行动色）。⑨ 新增 `scripts/startup_probe.py`（按**窗口出现**为基准逐帧抓并与稳定态求差——GPUI 建窗要 ~0.9–1.5 秒，按进程启动计时会把"还没画"算成"慢"） | ✅ `cargo check --workspace` 零错零警；core **145 → 152**、gui 32 → **38** 全绿。实机在 `$TEMP` 造 4 个合成仓库（含一个 **2 万文件**的大仓库，否则差别小到看不出主次），**用户 17 个真实仓库一个没碰**。热启动在**窗口出现后 100 ms** 就与稳定态逐像素一致，与冷启动的稳定帧跨轮对照只差 **458 px（0.04%）** 且全部落在标题栏那枚**异步加载的应用图标**上、不在内容区；删掉 `cache.db` 照常启动（降级成骨架屏）；库损坏读返 `None` 写返 `false` 不崩；库内容只有选中的那个仓库（正是 16-3 那一档），中文与 emoji 往返正常；三轮抓帧真实 config 指纹前后一致。**顺带查实一个本阶段不修的缺陷**：`local_date_key(0)` 用 epoch 直接除 86400 给的是 **UTC 日期**，而 git 侧带 `+0800` 给的是本地日期 → **UTC+8 凌晨 0–8 点今天的提交在总览活跃度图上永远看不见**（实测 04:34 时 x 轴止于 10/04 而当天有 3 次提交）；修它要先定「本地 UTC 偏移从哪来」，不在本阶段顺手决定 |
 

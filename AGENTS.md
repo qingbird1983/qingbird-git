@@ -274,7 +274,7 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
   于是"记得设"这种约定迟早会漏。**现在一律设 `$env:QB_APPDATA` 指向副本**：
   `scripts/qbguard.py` 会覆盖 `APPDATA`、不设就打警告、收尾再按
   `mtime+size+sha256` 核对真实 config 并在不一致时报警（`steps.py` /
-  `uia_probe.py` / `a11y_stress.py` 都走它，**别再各写一遍**）；
+  `uia_probe.py` / `a11y_stress.py` / `startup_probe.py` 都走它，**别再各写一遍**）；
   ③ **窗口未获焦时第一击只用于激活窗口**，脚本要补一次空点击，
   否则"点了没反应"会被误判成功能坏了。
   ④ **用户 17 个真实仓库一律不许动，验收只在 `$TEMP` 现造的合成仓库上做**。
@@ -297,6 +297,28 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
   点了个空处还差点当成功能坏了（靠 `diff` 只有 0.02% 才发现是没点中）；
   ③ **往返验证拿"逐像素相同"当判据**：点中文键 → 点正文里的 `English` 链接回来，
   与初始帧 `diff` = 0 像素，这才叫通。
+  ⚠️ 阶段 16 又踩了一次同款：从 `crop` 放大的图上反算页签 x，目测 603、
+  实测 **551**，偏了 52px，连点三次都点不中（其中一次还把别的页签点开了，
+  差点当成功能坏了）。**量文字位置用逐列扫暗像素，别从放大图反算**——
+  `crop` 的缩放倍数在显示时被缩放过一次，肉眼按倍数算回去必错。
+  `frame.py crop <src> <x0> <y0> <x1> <y1> <倍数> <out>`（**x1/y1 是绝对坐标，不是宽高**）
+- **量「启动多快」用 `scripts/startup_probe.py`**，别用「最后那张帧」当判据——
+  最后那张只证明「扫完了能显示」，**证不了「打开就显示」**。它按**窗口出现**
+  为基准逐帧抓（不是进程启动：GPUI 建窗要 ~0.9–1.5 秒，那段还没画，
+  跟秒开无关，按进程计时会把"还没建窗"算成"慢"），每帧跟稳定态求逐像素差。
+  ⚠️ 合成仓库**必须有一个文件很多的**（阶段 16 用了 2 万文件），
+  否则冷热两轮都是几百毫秒就稳，差别小到抓帧看不出主次
+- **GBK 控制台会编不出 `✓` / `→`**：`print("…未被触碰 ✓")` 抛
+  `UnicodeEncodeError`，**炸在收尾那一句**，前面抓的帧全白跑而报错还指向
+  一个看着无关的地方。`qbguard.py` 已在 import 时把 stdout/stderr
+  `reconfigure(encoding="utf-8", errors="replace")`，**新脚本 import 它就顺手拿到**
+- **「没扫过」不许写成「已同步」**（阶段 16 抓帧查实）。阶段 16 起启动只刷选中的
+  那一个仓库，于是**启动那一刻其余每一行都是没扫过的**；而总览「状态」列把
+  `Bucket::Unknown` 落进 `BadgeKind::None` 兜底臂 → 写「已同步」。
+  **`cargo check` 零错、`bucket_of` 的单测全绿**（它判得**没错**，错的是显示那侧
+  没接住 `Unknown`）——**只有抓帧看得见**。收法：判据抽成**纯函数**
+  （`ov_status_text`）才单测得掉，中性态给**中性灰**不许穿行动色。
+  ⚠️ 凡是新增「按某状态分档显示」的地方，先问一句**没数据的那档显示什么**
 - **目测出来的「不齐」先量再改**：`scripts/rowpitch.py` 在指定横向范围内做**逐行
   像素剖面**，切出每段凸起的中心再算相邻行距。空间页树那一轮我目测以为行距有
   27/28/31 三种、打算去调，实测**统一 28.0**（开头那个 28.5 是首行被滚动视口裁掉
@@ -346,6 +368,7 @@ core（纯业务，不认识 gpui，单测 98 个都在这）：
 | `crates/core/src/sync.rs` | 三键 + 提交推送 + `begin_user_op` 互斥锁 |
 | `crates/core/src/clone.rs` | 克隆（`CloneOutcome` + 五类错误中文化） |
 | `crates/core/src/history.rs` | 提交列表 / 详情 / patch + 三个纯解析函数 |
+| `crates/core/src/scan_cache.rs` | **阶段 16 的缓存层**：`scan_cache`（覆盖写）+ `op_history`（追加）两张表。⚠️ **别叫它 `history.rs`**——那个名字已被上一行的提交历史占了，`write` 工具当时明写了 `overwrote existing file` 是我漏看。**它是加速器不是依赖**：库打不开/表损坏/磁盘满一律降级（读返 `None`、写返 `false`），一次都不 panic |
 | `crates/core/src/space.rs` `run_cmd.rs` `fork.rs` `proxy.rs` `scheduler.rs` `store.rs` `types.rs` | 磁盘 / 一键命令 / 变基 / 代理探测 / **后台自动同步的到期判定与执行** / 配置持久化 / 共享类型 |
 
 GUI（`gui/src`）：
@@ -362,6 +385,7 @@ GUI（`gui/src`）：
 | `history_tab.rs` `readme_tab.rs` `space_tab.rs` `sync_tab.rs` | 四个详情页签 |
 | `changes.rs` `sync_ring.rs` `widgets.rs` | 变更清单 / 同步环（自研三处之一）/ 跨屏小部件 |
 | `ops.rs` | 后台编排：跑命令、三键、扫描、**批量同步**、提交并推送、同步设置 |
+| `scan_cache.rs` | **阶段 16 的界面侧接线**：读缓存填 `views`/`space`/`profile`、扫完写回缓存。⚠️ 三个后台扫描一律**先灌缓存再刷**；判据是 `scanning && 还没有内容`，写成光看 `scanning` 会把刚上屏的缓存顶掉 |
 | `tray.rs` | **托盘图标 + 三项菜单 + 左键唤起 / 窗口没了就重开**（Q11）。窗口选项也从这里出，首次开窗与托盘重开共用同一份 |
 | `scheduler.rs` | **进程级定时器**（Q8）。`App::spawn` 不绑窗口，窗口关着也照跑；每轮 `try_begin_op` 与用户操作互斥 |
 | `dialogs/` | `repo` `init` `fork` `clone` `cmds` `commit` `settings` `batch_log` 八个官方 `Dialog` |

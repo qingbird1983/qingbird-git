@@ -8,6 +8,7 @@
 
 use crate::git;
 use crate::store::{self, CmdRunRecord, PinnedCmd, RepoEntry};
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -330,7 +331,7 @@ pub fn detect_cmds(path: &str) -> CmdDetect {
 }
 
 /// 自动识别出来的四条命令（界面拿来预填，用户可改后保存）
-#[derive(Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct CmdDetect {
     pub test_cmd: String,
     pub build_cmd: String,

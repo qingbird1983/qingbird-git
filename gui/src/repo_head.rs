@@ -125,7 +125,10 @@ impl Shell {
             .filter(|d| d.count > 0)
             .count();
         let commits: u32 = self.profile.activity.iter().map(|d| d.count).sum();
-        let note = if self.profile.scanning {
+        let note = if self.profile.scanning && self.profile.activity.is_empty() {
+            // ⚠️ 与 `panels::space_summary_line` 同一处修正（阶段 16）：
+            // **有数据就别再报"统计中"**。库里那份已经上屏时还说统计中，
+            // 图表上明明画着柱子了
             "统计中…".to_string()
         } else if commits == 0 {
             "近 30 天没有提交".to_string()

@@ -546,6 +546,25 @@ fn bucket_badge(status: &RepoStatus, changed: u32, third: bool, t: &Theme) -> Ba
     }
 }
 
+/// 分档徽标落在哪一档。**纯逻辑**：不碰主题，所以能单测。
+///
+/// 单独抽出来的理由不是"为了分层"，是**「状态」列那句话曾经把
+/// 「没扫过」写成「已同步」**（阶段 16）——判据藏在 `badge_tone` 里、
+/// 和取色缠在一起，就没法单独钉住。
+pub(crate) fn badge_kind_of(b: Bucket, changed: u32) -> BadgeKind {
+    match b {
+        Bucket::Behind => BadgeKind::Behind,
+        Bucket::Forked => BadgeKind::Forked,
+        Bucket::Ahead => BadgeKind::Ahead,
+        // 没扫过不是"没消息"，它落进 `None` 只是因为「没有要动手的事」，
+        // 显示那一侧另有分支（`ov_status_text`）
+        Bucket::Unknown => BadgeKind::None,
+        // 未提交与上面几档可重叠，是独立维度，所以放在后面兜底
+        _ if changed > 0 => BadgeKind::Dirty,
+        _ => BadgeKind::None,
+    }
+}
+
 /// 分档徽标落在哪一档。**全站唯一一处**写这个判定。
 ///
 /// 文案由调用方拼而不是这里给：侧栏那一格只有 200px，要带数字（"待推送 3"），
@@ -560,20 +579,26 @@ pub(crate) fn badge_tone(
     t: &Theme,
 ) -> (BadgeKind, Hsla, Hsla) {
     let tone = |kind: BadgeKind, fg: Hsla, bg: Hsla| (kind, fg, bg);
-    match b {
-        Bucket::Behind => {
-            // 「可更新」与「落后」同色，只是文案按归属分——第三方不是我的项目，
-            // 说它"落后"像在挑刺
+    let kind = badge_kind_of(b, changed);
+    match kind {
+        // 「可更新」与「落后」同色，只是文案按归属分——第三方不是我的项目，
+        // 说它"落后"像在挑刺
+        BadgeKind::Behind => {
             let _ = third;
-            tone(BadgeKind::Behind, orange(t), orange_bg(t))
+            tone(kind, orange(t), orange_bg(t))
         }
         // 分叉是红（Q7）：徽标、状态点、同步环、分叉条四处必须同一色，
         // 同一屏里出现"环是红的、条是橙的"会让人以为那是两件事
-        Bucket::Forked => tone(BadgeKind::Forked, t.colors.danger, red_bg(t)),
-        Bucket::Ahead => tone(BadgeKind::Ahead, t.colors.accent, blue_bg(t)),
-        // 未提交与上面几档可重叠，是独立维度，所以放在后面兜底
-        _ if changed > 0 => tone(BadgeKind::Dirty, t.colors.accent, blue_bg(t)),
-        _ => tone(BadgeKind::None, t.colors.accent, blue_bg(t)),
+        BadgeKind::Forked => tone(kind, t.colors.danger, red_bg(t)),
+        BadgeKind::Ahead => tone(kind, t.colors.accent, blue_bg(t)),
+        BadgeKind::Dirty => tone(kind, t.colors.accent, blue_bg(t)),
+        // `None` 有两条来路，显示必须分开：
+        // **没扫过** → 中性灰。它进不了「需要动手」那一列，不该穿行动色；
+        // 同一行里状态点是灰的（`dot_color` 的 Unknown 档 = border），
+        // 胶囊若是蓝的，一行两种语气。形状仍是 `None`，
+        // 侧栏那一格因此什么都不画，与「徽标只放要动手的数字」一致
+        BadgeKind::None if b == Bucket::Unknown => tone(kind, tier3(t), track(t)),
+        BadgeKind::None => tone(kind, t.colors.accent, blue_bg(t)),
     }
 }
 

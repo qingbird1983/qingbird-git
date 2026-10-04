@@ -6,6 +6,7 @@
 use crate::git;
 use crate::store::{self, AppConfig, RepoEntry};
 use crate::types::RepoStatus;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -392,7 +393,7 @@ where
 // ---------- 档案页数据源（Screen 1，全部本地可取） ----------
 
 /// 某一天的提交数
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ActivityDay {
     /// YYYY-MM-DD，按**本地时区**
     pub date: String,
@@ -497,10 +498,9 @@ pub fn last_commit_ts(repo_path: &str) -> u64 {
 
 /// 项目语言构成（类似 GitHub 语言条）：按扩展名统计代码文件字节占比。
 /// 用 `git ls-files -co --exclude-standard` 取文件列表，自动跳过 .gitignore 忽略的文件。
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LangStat {
-    pub language: String,
-    pub percent: f32,
+    pub language: String,    pub percent: f32,
 }
 
 /// 扩展名 → 语言名（对齐 GitHub Linguist 的常见分类；配置/数据类文件不计入）。
@@ -768,7 +768,7 @@ fn find_readme(repo_path: &str) -> Option<std::path::PathBuf> {
 ///
 /// **参数是当前正在显示的那一份**，不是"主文档"——用户切到英文之后再点一次
 /// 就要切回来，所以判据必须是"此刻屏幕上这份是哪种语言"。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ReadmeAlt {
     /// 另一个语言那份的文件名（根目录下）
     pub file: String,

@@ -12,6 +12,7 @@ use qingbird_core::fork;
 use qingbird_core::git;
 use qingbird_core::repos::{self};
 use qingbird_core::run_cmd::{self, Slot};
+use qingbird_core::scan_cache;
 use qingbird_core::space;
 use qingbird_core::store;
 use qingbird_core::sync;
@@ -338,7 +339,12 @@ impl Shell {
 impl Shell {
     // ---------- 磁盘占用 ----------
 
-    /// 扫当前仓库的磁盘占用。大仓库可能好几秒，放后台，界面先画「扫描中」。
+    /// 扫当前仓库的磁盘占用。大仓库可能好几秒，放后台，界面先画上一次的结果。
+    ///
+    /// ⚠️ **先把库里那一份灌进来，再亮 `scanning`**（阶段 16）。
+    /// 反过来写就是"先把旧数扔掉、显示扫描中"——缓存一秒都没起作用，
+    /// 正好和做它的目的一样。空间页那条判据
+    /// `scanning && report.is_none()` 也正是这个前提：报告还在就不出骨架屏。
     pub(crate) fn scan_space(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.selected.clone() else {
             return;
@@ -346,19 +352,21 @@ impl Shell {
         self.space_seq += 1;
         let seq = self.space_seq;
         self.space_task = None;
-        // 重扫不打掉「已释放 X」的提示：清理完会立刻重扫，note 得活着
-        let note = self.space.note.clone();
-        self.space = SpaceState {
-            scanning: true,
-            note,
-            ..SpaceState::default()
-        };
+        match scan_cache::load_cache(&path) {
+            Some(c) => self.apply_selected_cache(&c, cx),
+            // 没有缓存：整份清空走骨架屏，与从没扫过一模一样
+            None => self.space = SpaceState::default(),
+        }
+        self.space.scanning = true;
+        self.space.error = None;
         cx.notify();
 
+        // 后台线程要用一份自己的 `path`，回来还要按路径落库
+        let repo = path.clone();
         self.space_task = Some(cx.spawn(async move |this, cx| {
             let r = cx
                 .background_executor()
-                .spawn(async move { space::scan_repo_space(&path) })
+                .spawn(async move { space::scan_repo_space(&repo) })
                 .await;
             this.update(cx, |this, cx| {
                 if this.space_seq != seq {
@@ -368,9 +376,14 @@ impl Shell {
                 match r {
                     Ok(rep) => {
                         this.space.report = Some(rep);
+                        this.space.scanned_at = store::now_secs();
+                        this.space.error = None;
                         // 根层直接吃刚扫出来的 `dirs`（那一层的递归体积刚算过），
                         // 并借 `tree_reset` 里的 `tree_seq` 自增作废在途的子层扫描
                         this.tree_reset(cx);
+                        // **扫完落库**：下次启动直接吃这一份，不必再数一遍
+                        // （98 GB 的仓库这是唯一能接受的开销）
+                        this.persist_space_cache(&path);
                     }
                     Err(e) => this.space.error = Some(e),
                 }
@@ -402,34 +415,42 @@ impl Shell {
         };
         let third = self.selected_is_third();
         let seq = self.profile_seq;
-        self.profile = ProfileState {
-            scanning: true,
-            ..ProfileState::default()
-        };
+        // ⚠️ 与 `scan_space` 同一个道理：**先把库里的那份灌进来**。
+        // 否则 `ProfileState { scanning: true, ..Default }` 一执行，
+        // 缓存里的语言条 / README 就被扔了——而「说明」页签那条判据
+        // （`profile.scanning` 就出骨架屏）本来是留给"真没内容"的
+        match scan_cache::load_cache(&path) {
+            Some(c) => self.apply_selected_cache(&c, cx),
+            None => self.profile = ProfileState::default(),
+        }
+        self.profile.scanning = true;
+        self.profile.readme_error = None;
         cx.notify();
 
+        // 后台线程要一份自己的 `path`（`path` 得留着回来落库）
+        let repo = path.clone();
         self.profile_task = Some(cx.spawn(async move |this, cx| {
             let r = cx
                 .background_executor()
                 .spawn(async move {
                     let activity = if third {
-                        repos::commit_activity(&path, PROFILE_ACTIVITY_DAYS)
+                        repos::commit_activity(&repo, PROFILE_ACTIVITY_DAYS)
                     } else {
                         Vec::new()
                     };
                     (
-                        repos::repo_languages(&path),
+                        repos::repo_languages(&repo),
                         activity,
                         // 原文与文件名各调一次 `find_readme`（同一个只读文件探查），
                         // 换来界面上能说清"渲染的是 README.md 还是 README.rst"
-                        repos::read_readme_text(&path),
-                        repos::readme_file_name(&path),
+                        repos::read_readme_text(&repo),
+                        repos::readme_file_name(&repo),
                         // 「另一个语言」那一份。**判据是刚读到的这个文件名**——
                         // 用户切到英文之后再点一次要切回来，靠它重算。
-                        // 跟 `readme_file` 一起在这儿问：`path` 是被移进这个
+                        // 跟 `readme_file` 一起在这儿问：`repo` 是被移进这个
                         // 后台任务的，回到 update 闭包里就拿不到了
-                        repos::readme_file_name(&path)
-                            .and_then(|f| repos::readme_alt(&path, &f)),
+                        repos::readme_file_name(&repo)
+                            .and_then(|f| repos::readme_alt(&repo, &f)),
                     )
                 })
                 .await;
@@ -453,7 +474,10 @@ impl Shell {
                     readme_alt,
                     readme_error: None,
                     scanning: false,
+                    scanned_at: store::now_secs(),
                 };
+                // 档案数据落库，下次启动不用再遍历一遍 `git ls-files`
+                this.persist_profile_cache(&path);
                 cx.notify();
             })
             .ok();

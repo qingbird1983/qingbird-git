@@ -146,6 +146,13 @@ pub(crate) struct SpaceState {
     /// 上次清理的结果（「已释放 1.6 GB」）
     pub(crate) note: Option<String>,
     pub(crate) error: Option<String>,
+    /// 这一份占用是**什么时候**算出来的，秒级时间戳，0 = 还没算过。
+    ///
+    /// 阶段 16 起这一栏可能是**从库里读出来的旧数**（启动 / 切仓库时先灌
+    /// 缓存，再后台刷新）。有它才能在表头上写「扫描于 3 小时前」——
+    /// **没有它，一份昨天的数字和一份刚算出来的数字长得一模一样**，
+    /// 用户无从知道该信哪个
+    pub(crate) scanned_at: u64,
 
     // ---- 目录树（2026-10-05 阶段 13）----
     /// 树的根层。**由 `scan_repo_space` 的 `dirs` 直接喂进来**，不重新扫——
@@ -219,6 +226,10 @@ pub(crate) struct ProfileState {
     /// 而"点了没反应"比报错更让人以为功能坏了，所以这句话要摆在表头上
     pub(crate) readme_error: Option<String>,
     pub(crate) scanning: bool,
+    /// 档案数据（语言 / 活跃度 / README）是**什么时候**读出来的。
+    /// 与 [`SpaceState::scanned_at`] 同一个理由：从库里读出来的旧数据
+    /// 必须能让用户看出它旧
+    pub(crate) scanned_at: u64,
 }
 
 /// 「历史」页签的状态。
@@ -887,8 +898,10 @@ pub(crate) fn dot_color(b: Bucket, t: &Theme) -> Hsla {
     }
 }
 
-/// 分档的一个词。**只给搜索用**——界面上显示的那句话由各处自己按版面拼
-/// （侧栏 200px 要带数字，总览表格旁边就有独立数字列）。
+/// 分档的一个词。**它这句措辞的唯一出处有两个消费者**：⌘K 搜索（按
+/// 「落后」「分叉」这类词找仓库）与总览表格「状态」列里「没扫过」那一行。
+/// 界面上其余那句（带数字、带归属口吻的）由各处按版面自己拼——
+/// 侧栏 200px 要带数字，总览表格旁边就有独立数字列。
 /// 放在这里是让 ⌘K 能按「落后」「分叉」这类词搜到仓库：
 /// 官方的 `CommandItem` 只做子串包含匹配，用户打「分叉」时
 /// 标签里没有这个词就一条都搜不出来
@@ -916,6 +929,23 @@ pub(crate) fn rel_time(ts: u64) -> String {
         3_600..=86_399 => format!("{} 小时前", d / 3_600),
         86_400..=172_799 => "昨天".into(),
         _ => format!("{} 天前", d / 86_400),
+    }
+}
+
+/// 「这份数据是什么时候的」那句话。**空串 = 不该显示**（没扫过 / 不知道），
+/// 调用方拿到空串就别往 `CardHeader::note` 里塞——那个槽会照画一个空
+/// `div` 出来，白占一个 `GAP_TIGHT` 的间距。
+///
+/// 抽成纯函数是为了能单测：`scanning` 与 `scanned_at` 两条分支正是
+/// 阶段 16 最要紧的判据（后台刷新时缓存已经在屏幕上了，这时**不能**
+/// 报"扫描中"把内容顶掉），走 `CardHeader` 就没法测。
+pub(crate) fn scanned_note(scanning: bool, scanned_at: u64) -> String {
+    if scanning {
+        "刷新中…".to_string()
+    } else if scanned_at > 0 {
+        rel_time(scanned_at)
+    } else {
+        String::new()
     }
 }
 
@@ -1057,5 +1087,25 @@ mod tests {
             "批量推送 · 2 成功",
             "done == total 就是跑完了，哪怕 running 是 false"
         );
+    }
+
+    /// 阶段 16 那句话的两条分支。**「没扫过」必须是空串而不是"尚未扫描"**——
+    /// 真没扫过时表头另有一条提示（"这个仓库还没有扫描过磁盘占用"），
+    /// 这里再写一遍就成了同一屏两句话。
+    #[test]
+    fn scanned_note_says_nothing_when_nothing_was_ever_scanned() {
+        assert_eq!(scanned_note(false, 0), "");
+        // 正在扫但从没有过数据：这一刻屏幕上只有骨架屏，
+        // 说"刷新中"是在骗人
+        assert_eq!(scanned_note(true, 0), "刷新中…");
+    }
+
+    /// 正在扫**且屏上已经有数**时，报的是"刷新中"而不是把时间抹掉。
+    /// 两者都要有内容，但后者会让人以为这是一份刚算出来的数
+    #[test]
+    fn scanned_note_prefers_the_refreshing_wording_while_scanning() {
+        let now = qingbird_core::store::now_secs();
+        assert_eq!(scanned_note(true, now), "刷新中…");
+        assert_eq!(scanned_note(false, now), "刚刚");
     }
 }

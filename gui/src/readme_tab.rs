@@ -172,9 +172,13 @@ impl Shell {
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // 还没扫完：骨架条。README 可能上千行，扫之前先摆着，
-        // 别让页签先闪一下空态再被内容顶掉
-        if self.profile.scanning {
+        // 还没扫完**且真的没有正文**：骨架条。README 可能上千行，
+        // 扫之前先摆着，别让页签先闪一下空态再被内容顶掉。
+        //
+        // ⚠️ 判据多一个 `readme_text.is_none()`（阶段 16）：后台刷新时
+        // 库里那份已经在屏幕上了，这时候塌成骨架屏等于把刚显示出来的
+        // 正文收回去——切换页签那一瞬间看着像"内容没了"
+        if self.profile.scanning && self.profile.readme_text.is_none() {
             return v_flex()
                 .flex_1()
                 .min_h_0()
@@ -269,6 +273,15 @@ impl Shell {
         // 没拿到"，不是一句说明
         if let Some(msg) = self.profile.readme_error.clone() {
             hdr = hdr.note(msg, true);
+        } else {
+            // 阶段 16：这段正文可能是**从库里读出来的旧文**（先灌缓存、
+            // 再后台重读一遍文件）。不标时间，昨天那份文档和刚读出来的
+            // 那份**长得一模一样**——用户按着旧文档写代码，绕一大圈。
+            // 与错误同属一个槽，所以是「否则」而不是各自独立一句
+            let note = scanned_note(self.profile.scanning, self.profile.scanned_at);
+            if !note.is_empty() {
+                hdr = hdr.note(format!("读取于 {note}"), false);
+            }
         }
         // 中英两颗键只在真的有两份时才出现。摆一颗切不过去的键比不摆更糟——
         // 用户会以为功能坏了

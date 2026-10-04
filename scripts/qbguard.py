@@ -19,6 +19,18 @@
 
 import hashlib
 import os
+import sys
+
+# PowerShell 5.1 的控制台是 GBK，**编不出 `✓` / `→` 这类字符**，# 而收尾那句「真实 config 未被触碰 ✓」正好带一个。于是整个验收脚本
+# 在**跑完全部步骤之后**死在最后一句 print 上——前面抓的帧白跑，
+# 而报错信息（`UnicodeEncodeError`）还指向一个看起来无关的地方。
+# 统一把 stdout/stderr 切到 UTF-8 + 替换：编不出的字符降级成 '?'，
+# 而不是把脚本炸掉。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass  # 老解释器没有 reconfigure，认了
 
 REAL_CFG = os.path.join(
     os.environ["APPDATA"], "com.qingbird.git", "config.json")

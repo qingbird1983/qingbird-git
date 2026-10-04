@@ -493,7 +493,10 @@ impl Shell {
             .map(|r| r.dirs.iter().filter(|d| d.is_cache).map(|d| d.size).sum())
             .unwrap_or(0u64);
 
-        if self.space.scanning {
+        // ⚠️ 判据是 `scanning && 还没有数`，**不是光看 `scanning`**（阶段 16）。
+        // 后台刷新时库里那份已经在屏幕上了，这时候报"扫描中…"等于
+        // 刚闪出来的数字立刻缩回去——缓存做的那点秒开全白费。
+        if self.space.scanning && rep.is_none() {
             "扫描中…".to_string()
         } else if let Some(e) = &self.space.error {
             e.clone()
