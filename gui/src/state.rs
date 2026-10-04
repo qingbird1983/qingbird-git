@@ -290,6 +290,25 @@ pub(crate) struct ProfileState {
     /// 必须 `'static`，抓不到 `&mut Window`），弹通知那条路在那儿是断的。
     /// 而"点了没反应"比报错更让人以为功能坏了，所以这句话要摆在表头上
     pub(crate) readme_error: Option<String>,
+    /// 根目录下**每一份**说明文档的正文（文件名 → 正文，阶段 18）
+    ///
+    /// **有它，中英两颗键才是同步切换**：点一下就在内存里换掉，
+    /// 不派生后台任务、不碰 `scanning`、表头那一句时间也不会闪。
+    /// 没有它的话每次切换都要重读一遍盘，而磁盘上明明就摆着
+    pub(crate) readme_docs: HashMap<String, SharedString>,
+    /// 候选表（名字 + 语言 + 排序档），与 `readme_docs` 同一次扫出来
+    ///
+    /// 留着它是为了切换时**也能脱离磁盘算**「另一份是哪一份」——
+    /// 判据问的是 core 那个 `alt_of`，界面不自己写第二份规则
+    pub(crate) readme_index: Vec<qingbird_core::repos::ReadmePart>,
+    /// 正在**读一份还没握在手里的**说明文档（README 正文里点相对链接
+    /// 切到第三份文档才会走这条路，阶段 18）
+    ///
+    /// ⚠️ **它不能借用 `scanning`**：那个标志是**整份档案扫描**在用的，
+    /// 仓库头的活跃度芯片与语言构成条都读它。借去用的话，点一次中英切换
+    /// 会让那两个毫不相干的地方一起说「统计中…」，读完了再一起说不是——
+    /// **一个标志两件事**，与 D35 那条是同一类
+    pub(crate) readme_loading: bool,
     pub(crate) scanning: bool,
     /// 档案数据（语言 / 活跃度 / README）是**什么时候**读出来的。
     /// 与 [`SpaceState::scanned_at`] 同一个理由：从库里读出来的旧数据
@@ -1052,6 +1071,27 @@ pub(crate) fn scanned_note(scanning: bool, scanned_at: u64) -> String {
     }
 }
 
+/// 「说明」页签表头那一句（阶段 18）
+///
+/// **返回的就是最终要上屏的那一句**（`读取于 刚刚`），不是一个还要调用方
+/// 拼前缀的半成品——「正在读」那一档根本没有"读取于"这个前缀，
+/// 拼出来是「读取于 读取中…」。抽成纯函数还有第二个理由：这道闪烁
+/// 就是这一句在闪，而**闪没闪只有它能钉**（抓帧只证明某帧长什么样，
+/// 证明不了它没有中间态）。
+pub(crate) fn readme_note(loading: bool, scanning: bool, scanned_at: u64) -> String {
+    if loading {
+        // 只在**真要读一份手里没有的文档**时出现（README 正文里点相对链接
+        // 切到第三份）。中英两颗键走内存同步切换，**永远不该走到这一档**
+        return "读取中…".to_string();
+    }
+    let n = scanned_note(scanning, scanned_at);
+    if n.is_empty() {
+        String::new()
+    } else {
+        format!("读取于 {n}")
+    }
+}
+
 /// 空视图：仓库还没有被扫到时（首帧、扫描中）给总览行兜底
 pub(crate) static EMPTY_VIEW: RepoView = RepoView {
     last_commit_ts: 0,
@@ -1210,6 +1250,36 @@ mod tests {
         let now = qingbird_core::store::now_secs();
         assert_eq!(scanned_note(true, now), "刷新中…");
         assert_eq!(scanned_note(false, now), "刚刚");
+    }
+
+    /// ⚠️ **这条是阶段 18 那道闪烁的判据**：中英两颗键走的是**内存同步切换**，
+    /// 三个标志一个都不许动 ⇒ 这句话必须与切换前**逐字相同**。
+    /// 曾经它第一行就 `scanning = true`，于是表头先闪一下「读取中…」再换回来
+    /// （实机抓帧量到：点完第一帧只变了 280 像素，包围盒 (585,209)-(631,221)，
+    /// 正好就是这一句）
+    #[test]
+    fn readme_note_never_flashes_while_switching_in_memory() {
+        let now = qingbird_core::store::now_secs();
+        // 切换前后：同一个 `scanning`、同一个 `scanned_at`、没有 loading
+        let before = readme_note(false, false, now);
+        let after = readme_note(false, false, now);
+        assert_eq!(before, after, "同步切换不许改动这一句");
+        assert_eq!(before, "读取于 刚刚");
+    }
+
+    /// 三个标志各管一件事，**优先级不能串**：
+    /// `loading` 是"正在读一份手里没有的文档"，`scanning` 是"整份档案在刷新"。
+    /// 串了的话点一次中英切换会让仓库头的活跃度芯片一起说「统计中…」
+    #[test]
+    fn readme_note_keeps_the_three_flags_apart() {
+        let now = qingbird_core::store::now_secs();
+        // 正在读 → 说的是"读取中"，不能套上"读取于"这个前缀
+        assert_eq!(readme_note(true, false, now), "读取中…");
+        assert_eq!(readme_note(true, true, now), "读取中…");
+        // 档案在刷新 → 说的是"刷新中"，与正在读那份文档不是一回事
+        assert_eq!(readme_note(false, true, now), "读取于 刷新中…");
+        // 什么都没扫过 → 不摆这句话（表头那个槽会照画一个空 div 出来）
+        assert_eq!(readme_note(false, false, 0), "");
     }
 
     /// 落库的键 ↔ 界面的说法，**两个方向都要对**。

@@ -92,6 +92,15 @@ impl Shell {
         };
         p.langs = c.langs.clone();
         p.activity = c.activity.clone();
+        // 候选表与**每一份的正文**（阶段 18）。两者都无条件灌：
+        // 中英切换要的是"目标那份已经在内存里"，判据要的是同一张表。
+        // 缺了它们，切语言就得回后台读盘——那道闪烁就是这么来的
+        p.readme_index = c.readme_index.clone();
+        p.readme_docs = c
+            .readme_docs
+            .iter()
+            .map(|(k, v)| (k.clone(), SharedString::from(v.clone())))
+            .collect();
         if let (Some(file), Some(text)) = (c.readme.as_ref(), c.readme_text.as_ref()) {
             p.readme_file = Some(file.clone());
             p.readme_text = Some(SharedString::from(text.clone()));
@@ -161,6 +170,16 @@ impl Shell {
             .as_ref()
             .map(|s| s.to_string());
         c.readme_alt = self.profile.readme_alt.clone();
+        // 候选表 + 每一份正文（阶段 18）。存全了，下次启动**第一次**点中英
+        // 切换也是同步的——否则只有"这一会话里切过一次"才不闪，
+        // 重启后第一下照旧闪一遍，那等于没修
+        c.readme_index = self.profile.readme_index.clone();
+        c.readme_docs = self
+            .profile
+            .readme_docs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_string()))
+            .collect();
         c.scanned_at = self.profile.scanned_at;
         scan_cache::save_cache(path, &c);
     }

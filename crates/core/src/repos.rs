@@ -7,7 +7,7 @@ use crate::git;
 use crate::store::{self, AppConfig, RepoEntry};
 use crate::types::RepoStatus;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 /// 本地 git 命令（status / log 等）超时。与 src-tauri 侧同值：
@@ -728,16 +728,23 @@ pub fn is_readme_name(name: &str) -> bool {
     readme_parts(name).is_some()
 }
 
-/// 一份说明文档候选
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ReadmeCand {
-    name: String,
-    /// 判出来的语言
-    zh: bool,
+/// 候选表里的一条
+///
+/// **公开出来是为了让「另一份是哪一份」能脱离磁盘算**（`alt_of`）：
+/// 界面切语言时正文已经在内存里，判据也该一起在内存里——不碰磁盘
+/// 才谈得上"同步切换"。字段与内部的排序规则一一对应，**不要在别处
+/// 另写一遍挑哪一份的规则**，那才是两处迟早漂的地方
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ReadmePart {
+    /// 根目录下的文件名
+    pub name: String,
+    /// 判出来的语言（`true` 中文 / `false` 英文）
+    pub zh: bool,
     /// 作者在**文件名**里写明了语言（`README_zh.md`）。比读正文猜可靠，
     /// 所以同一语言有多份时它排前面
-    explicit: bool,
-    rank: u8,
+    pub explicit: bool,
+    /// 排序档，越小越优先
+    pub rank: u8,
 }
 
 /// 扫仓库根目录，把能当说明文档的文件列出来，**默认那一份排在最前**
@@ -745,11 +752,11 @@ struct ReadmeCand {
 /// 判语言分两步：先看文件名后缀；没有后缀的（`README.md` 本身到底是中文还是
 /// 英文，只有读一遍才知道）再读开头 4000 字判一次。**只读没有后缀的那几份**，
 /// 带后缀的靠文件名就够了，不必为了判语言去读它
-fn readme_cands(repo_path: &str) -> Vec<ReadmeCand> {
+fn readme_cands(repo_path: &str) -> Vec<ReadmePart> {
     let Ok(rd) = std::fs::read_dir(repo_path) else {
         return Vec::new();
     };
-    let mut cands: Vec<ReadmeCand> = Vec::new();
+    let mut cands: Vec<ReadmePart> = Vec::new();
     for entry in rd.flatten() {
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
@@ -765,7 +772,7 @@ fn readme_cands(repo_path: &str) -> Vec<ReadmeCand> {
                 (text_is_zh(&text), false)
             }
         };
-        cands.push(ReadmeCand {
+        cands.push(ReadmePart {
             name,
             zh,
             explicit,
@@ -774,6 +781,17 @@ fn readme_cands(repo_path: &str) -> Vec<ReadmeCand> {
     }
     cands.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.name.cmp(&b.name)));
     cands
+}
+
+/// 仓库根目录下的说明文档候选表（默认那一份排在最前）
+///
+/// 界面把它**连同每一份的正文一起缓存**：切换语言时那份正文早就在内存里，
+/// 不该再白走一趟后台读盘——那正是阶段 18 那道闪烁的来源
+pub fn readme_index(repo_path: &str) -> Vec<ReadmePart> {
+    if !valid_repo(repo_path) {
+        return Vec::new();
+    }
+    readme_cands(repo_path)
 }
 
 /// 在仓库根目录找 README：不区分大小写，.md 优先于无后缀 / .txt，
@@ -796,11 +814,13 @@ pub struct ReadmeAlt {
     pub zh: bool,
 }
 
-pub fn readme_alt(repo_path: &str, current: &str) -> Option<ReadmeAlt> {
-    if !valid_repo(repo_path) {
-        return None;
-    }
-    let cands = readme_cands(repo_path);
+/// 在**已经拿到的候选表**上算「另一语言那份」。**纯函数，不碰磁盘。**
+///
+/// 抽出来是因为它现在有两条调用路径：扫仓库时从磁盘取候选表，
+/// 界面切语言时从内存里取缓存的那份。**判据只有这一份实现**——
+/// 界面自己再写一遍"另一种语言是哪一份"，改了一处忘了另一处，
+/// 切过去就切不回来（或者切回来时挑了第三份同语言的）
+pub fn alt_of(cands: &[ReadmePart], current: &str) -> Option<ReadmeAlt> {
     // 当前这份是哪种语言。
     //
     // ⚠️ **必须从候选表里查，不能"文件名没写后缀就当英文"**：`README.md`
@@ -816,13 +836,41 @@ pub fn readme_alt(repo_path: &str, current: &str) -> Option<ReadmeAlt> {
     // 另一档里挑一份：**作者写明语言后缀的优先**（他明确表达过意图，
     // 比我们从正文猜的可靠），其次才是排序档
     let other = cands
-        .into_iter()
+        .iter()
         .filter(|c| c.zh != cur_zh && !c.name.eq_ignore_ascii_case(current))
         .min_by_key(|c| (!c.explicit, c.rank, c.name.clone()));
     other.map(|c| ReadmeAlt {
-        file: c.name,
+        file: c.name.clone(),
         zh: c.zh,
     })
+}
+
+/// 从磁盘取候选表再算「另一份」。界面上那份走内存版（`alt_of`）
+pub fn readme_alt(repo_path: &str, current: &str) -> Option<ReadmeAlt> {
+    if !valid_repo(repo_path) {
+        return None;
+    }
+    alt_of(&readme_cands(repo_path), current)
+}
+
+/// 读根目录下**每一份**说明文档的正文（文件名 → 正文）
+///
+/// 与 `read_readme_named` 的区别是它一次给全：界面要一次把「中文 / English」
+/// 两颗键背后的正文都握在手里，切的时候才能同步换。**每份都过
+/// `README_MAX_CHARS` 截断**——不然一份 45 MB 的 README 会整个进内存、
+/// 再整个进 SQLite 缓存
+pub fn readme_docs(repo_path: &str) -> BTreeMap<String, String> {
+    if !valid_repo(repo_path) {
+        return BTreeMap::new();
+    }
+    readme_cands(repo_path)
+        .into_iter()
+        .filter_map(|c| {
+            let full = std::path::Path::new(repo_path).join(&c.name);
+            let text = std::fs::read_to_string(full).ok()?;
+            clamp_readme(text).map(|t| (c.name, t))
+        })
+        .collect()
 }
 
 /// README 原文的上限。`TextView::markdown` 要把整篇解析成布局，
@@ -1491,6 +1539,105 @@ mod readme_tests {
         let back = readme_alt(p, "README_en.md").expect("切过去就该能切回来");
         assert_eq!(back.file, "README.md");
         assert!(back.zh, "README.md 正文是中文");
+    }
+
+    /// ⚠️ **这条是阶段 18 的地基**：「另一份是哪一份」现在有两条路——
+    /// 扫仓库时从磁盘取候选表（`readme_alt`），切换语言时从内存取缓存的那份
+    /// （`alt_of`）。**两条必须给出同一个答案**，否则会出现"扫的时候说有
+    /// 第二份、切的时候说没有"这类只在实机上才显形的分叉。
+    /// 所以这里拿同一个目录，把两条路的结果逐个比过去
+    #[test]
+    fn alt_of_on_a_cached_index_agrees_with_the_disk_lookup() {
+        let root = std::env::temp_dir().join(format!("qbg-readme-cached-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let p = root.to_str().unwrap();
+        // 三份，且**两份中文**：候选多于两颗键能覆盖的范围，那份多出来的
+        // 中文文档是"内存版会不会挑错"的照妖镜
+        std::fs::write(root.join("README.md"), "# 标题\n\n这是中文正文。\n").unwrap();
+        std::fs::write(root.join("README_zh.md"), "# 标题\n\n另一份中文。\n").unwrap();
+        std::fs::write(root.join("README_en.md"), "# Title\n\nEnglish body.\n").unwrap();
+        // 一份不认得的：`README_api.md` 不算说明文档，整张表里不该有它
+        std::fs::write(root.join("README_api.md"), "# API\n\nfragment\n").unwrap();
+
+        let index = readme_index(p);
+        let names: Vec<&str> = index.iter().map(|c| c.name.as_str()).collect();
+        // 同档（都是 .md + 语言后缀）按文件名排，所以 en 在 zh 前面
+        assert_eq!(names, vec!["README.md", "README_en.md", "README_zh.md"]);
+        assert!(
+            !names.contains(&"README_api.md"),
+            "不认得的后缀不算说明文档"
+        );
+
+        for cur in ["README.md", "README_zh.md", "README_en.md"] {
+            assert_eq!(
+                alt_of(&index, cur),
+                readme_alt(p, cur),
+                "内存版与磁盘版在 {cur} 上挑出了不同的一份"
+            );
+        }
+        // ⚠️ **往返不是回到原处，而是落到"作者写明语言"的那一份**。
+        // 三份候选里有两份中文，规则是"另一档里作者写明后缀的优先"，
+        // 于是 README.md → English → **README_zh.md**，而不是回到 README.md。
+        // 这是既有规则一直如此的行为（两版判据完全一致，见上面那条），
+        // 如实记在这里：只有**恰好两份**候选时中英往返才是闭合的，
+        // 而界面本来就只有两颗键——多出来那份同语言的文档谁也够不着
+        let a = alt_of(&index, "README.md").expect("有两档语言就该给切换");
+        assert_eq!(a.file, "README_en.md");
+        let b = alt_of(&index, &a.file).expect("切过去就该能切回来");
+        assert_eq!(b.file, "README_zh.md", "作者写明 _zh 的那份优先");
+        assert!(b.zh);
+        let c = alt_of(&index, &b.file).expect("再切一次");
+        assert_eq!(c.file, "README_en.md");
+
+        // 恰好两份时往返闭合——这才是界面上那颗键的日常情形
+        let pair = [
+            ReadmePart {
+                name: "README.md".into(),
+                zh: true,
+                explicit: false,
+                rank: 0,
+            },
+            ReadmePart {
+                name: "README_en.md".into(),
+                zh: false,
+                explicit: true,
+                rank: 4,
+            },
+        ];
+        let p1 = alt_of(&pair, "README.md").unwrap();
+        assert_eq!(p1.file, "README_en.md");
+        assert_eq!(alt_of(&pair, &p1.file).unwrap().file, "README.md");
+    }
+
+    /// 切换语言时正文要一次握在手里，所以 `readme_docs` 得把**每一份**都给全，
+    /// 少给一份就等于那颗键还得回后台读盘——那正是要消掉的闪烁。
+    /// 顺带钉住超长那份也过截断（否则 45 MB 的 README 会整个进 SQLite 缓存）
+    #[test]
+    fn readme_docs_gives_every_candidate_and_clamps_the_huge_one() {
+        let root = std::env::temp_dir().join(format!("qbg-readme-docs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let p = root.to_str().unwrap();
+        let zh = "# 标题\n\n中文正文。\n";
+        std::fs::write(root.join("README.md"), zh).unwrap();
+        std::fs::write(root.join("README_en.md"), "# Title\n\nEnglish.\n").unwrap();
+        let huge = "a".repeat(README_MAX_CHARS + 5000);
+        std::fs::write(root.join("README_zh.md"), &huge).unwrap();
+
+        let docs = readme_docs(p);
+        assert_eq!(docs.len(), 3, "三份候选都要有正文：{docs:?}");
+        assert_eq!(docs.get("README.md").map(String::as_str), Some(zh));
+        assert_eq!(
+            docs.get("README_en.md").map(String::as_str),
+            Some("# Title\n\nEnglish.\n")
+        );
+        let clipped = docs.get("README_zh.md").expect("超长那份也在表里");
+        assert!(
+            clipped.chars().count() <= README_MAX_CHARS + 40,
+            "超长那份必须截断，不能整个进缓存"
+        );
+        assert!(clipped.contains("已截断"), "截断了就要在文末说清楚");
     }
 
     /// 只有一份就没有切换键——`readme_alt` 返回 None，界面上那颗键不出现。

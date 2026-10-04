@@ -32,11 +32,12 @@
 //! 读写一样快，却要多一套文件生命周期（建目录、清孤儿、并发写、编码处理）。
 //! 统一进库，少一处会出错的地方。
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::repos::{ActivityDay, LangStat, ReadmeAlt};
+use crate::repos::{ActivityDay, LangStat, ReadmeAlt, ReadmePart};
 use crate::run_cmd::CmdDetect;
 use crate::space::SpaceReport;
 use crate::types::RepoStatus;
@@ -78,6 +79,20 @@ pub struct RepoCache {
     /// 只留文件名会把它丢掉，中英往返就废了（这正是阶段 18 要修的那条）
     #[serde(default)]
     pub readme_alt: Option<ReadmeAlt>,
+    /// 根目录下**每一份**说明文档的正文（文件名 → 正文，阶段 18）
+    ///
+    /// 存全是为了切换语言时**不碰磁盘**：正文早就在手里，切一下就该换掉，
+    /// 不该再白走一趟后台读盘——那正是这道闪烁的来源。每份都过
+    /// `README_MAX_CHARS` 截断，写进来的不会是整本大部头
+    #[serde(default)]
+    pub readme_docs: BTreeMap<String, String>,
+    /// 候选表（名字 + 判出来的语言 + 排序档）
+    ///
+    /// 存它是为了让「另一份是哪一份」也能脱离磁盘算（`repos::alt_of`）。
+    /// **判据只有 core 那一份**——界面拿缓存里这张表去问同一个函数，
+    /// 而不是自己再写一遍挑哪一份的规则
+    #[serde(default)]
+    pub readme_index: Vec<ReadmePart>,
     /// 这份快照是**什么时候**扫出来的。缓存必须带时间戳，
     /// 否则界面上没法告诉用户"这是多久前的数"
     #[serde(default)]

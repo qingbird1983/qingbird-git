@@ -18,6 +18,7 @@ use qingbird_core::space;
 use qingbird_core::store;
 use qingbird_core::sync;
 use qingbird_core::types::ProgressEvent;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -447,16 +448,26 @@ impl Shell {
                     (
                         repos::repo_languages(&repo),
                         activity,
-                        // 原文与文件名各调一次 `find_readme`（同一个只读文件探查），
-                        // 换来界面上能说清"渲染的是 README.md 还是 README.rst"
-                        repos::read_readme_text(&repo),
-                        repos::readme_file_name(&repo),
-                        // 「另一个语言」那一份。**判据是刚读到的这个文件名**——
-                        // 用户切到英文之后再点一次要切回来，靠它重算。
-                        // 跟 `readme_file` 一起在这儿问：`repo` 是被移进这个
-                        // 后台任务的，回到 update 闭包里就拿不到了
-                        repos::readme_file_name(&repo)
-                            .and_then(|f| repos::readme_alt(&repo, &f)),
+                        // 说明文档这一组（阶段 18）：**候选表与每一份的正文
+                        // 一次扫齐**。以前是"读一份主文档 + 问一次另一份是哪个
+                        // 文件"，于是切换时还得再读一次盘——那道闪烁就是这么来的。
+                        // 现在界面握着全部正文与整张表，切语言在内存里就能换完。
+                        // 顺手也把文件名说准了：界面上要能讲清渲染的是
+                        // README.md 还是 README.rst
+                        {
+                            let index = repos::readme_index(&repo);
+                            let docs = repos::readme_docs(&repo);
+                            // 候选表排最前的就是默认那一份
+                            let file = index.first().map(|c| c.name.clone());
+                            // 「另一个语言」那一份。**判据是刚认下的这个文件名**
+                            let alt = file.as_deref().and_then(|f| repos::alt_of(&index, f));
+                            let text = file
+                                .as_deref()
+                                .and_then(|f| docs.get(f))
+                                .cloned()
+                                .or_else(|| repos::read_readme_text(&repo));
+                            (index, docs, file, text, alt)
+                        },
                     )
                 })
                 .await;
@@ -464,23 +475,39 @@ impl Shell {
                 if this.profile_seq != seq {
                     return; // 切了仓库 / 已有新一轮，这批过期
                 }
-                let (langs, activity, readme_text, readme_file, readme_alt) = r;
+                let (langs, activity, (index, docs, readme_file, readme_text, readme_alt)) = r;
                 // 扫完这一次性转成 SharedString，之后每帧只是克隆一个引用计数
+                let readme_docs: HashMap<String, SharedString> = docs
+                    .into_iter()
+                    .map(|(k, v)| (k, SharedString::from(v)))
+                    .collect();
                 let readme_text = readme_text.map(SharedString::from);
+                // ⚠️ **用户正在看哪一份是他自己的选择，后台扫描不该把它顶掉**。
+                // 扫完直接 new 一个 `ProfileState` 的话，用户刚点过去的那份英文
+                // 会被这一轮的结果按回中文——又是一次自己跟自己打架的闪动
+                let cur_file = this.profile.readme_file.clone();
+                let (file, text) = match cur_file.as_deref().and_then(|f| readme_docs.get(f)) {
+                    Some(kept) => (cur_file, Some(kept.clone())),
+                    None => (readme_file, readme_text),
+                };
                 // 正文状态也换掉：用户切页签回来看到的是新仓库的文档，
                 // 不是上一个仓库留在那儿的那份
                 this.readme_state.update(cx, |st, cx| {
-                    st.set_text(readme_text.as_deref().unwrap_or_default(), cx)
+                    st.set_text(text.as_deref().unwrap_or_default(), cx)
                 });
                 this.profile = ProfileState {
                     langs,
                     activity,
-                    readme_text,
-                    readme_file,
+                    readme_text: text,
+                    readme_file: file,
                     readme_alt,
                     readme_error: None,
                     scanning: false,
                     scanned_at: store::now_secs(),
+                    // 候选表与全部正文无条件跟着走：切换要用的就是这两样
+                    readme_index: index,
+                    readme_docs,
+                    readme_loading: false,
                 };
                 // 档案数据落库，下次启动不用再遍历一遍 `git ls-files`
                 this.persist_profile_cache(&path);

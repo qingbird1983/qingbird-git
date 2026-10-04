@@ -277,10 +277,16 @@ impl Shell {
             // 阶段 16：这段正文可能是**从库里读出来的旧文**（先灌缓存、
             // 再后台重读一遍文件）。不标时间，昨天那份文档和刚读出来的
             // 那份**长得一模一样**——用户按着旧文档写代码，绕一大圈。
-            // 与错误同属一个槽，所以是「否则」而不是各自独立一句
-            let note = scanned_note(self.profile.scanning, self.profile.scanned_at);
+            // 阶段 18：`readme_note` 把「正在读某一份文档」与「整份档案在刷新」
+            // 分成两个标志——中英切换走内存同步切换，一个都不该动，
+            // 而这道闪烁恰恰就是这一句在闪
+            let note = readme_note(
+                self.profile.readme_loading,
+                self.profile.scanning,
+                self.profile.scanned_at,
+            );
             if !note.is_empty() {
-                hdr = hdr.note(format!("读取于 {note}"), false);
+                hdr = hdr.note(note, false);
             }
         }
         // 中英两颗键只在真的有两份时才出现。摆一颗切不过去的键比不摆更糟——
@@ -348,14 +354,47 @@ impl Shell {
     }
 
     /// 换到"另一语言"那一份（表头上那两颗键）
+    ///
+    /// ⚠️ **阶段 18：目标是"点了就换完"，中间不许有任何一帧在闪**。
+    /// 目标那份正文早在 `readme_docs` 里（`scan_profile` 一次读齐、
+    /// 并落进 SQLite），所以这里是**纯内存同步切换**：不派生后台任务、
+    /// 不动 `scanning`、不动 `readme_loading`，表头那一句时间纹丝不动。
+    ///
+    /// 以前这条路径走 `load_readme_doc`，第一行就 `scanning = true` →
+    /// 表头先闪一下「读取中…」，再等后台读完才换。实机抓帧量到那一下：
+    /// 点完的第一帧只变了 **280 像素，包围盒 (585,209)-(631,221)**，
+    /// 正好就是那一句——文档本身是同一帧换完的，闪的只有它
     fn switch_readme_doc(&mut self, path: &str, cx: &mut Context<Self>) {
         let Some(alt) = self.profile.readme_alt.clone() else {
             return;
         };
+        // 手上真有这一份 → 同步换（绝大多数情况：表是同一次扫出来的）
+        if let Some(text) = self.profile.readme_docs.get(&alt.file).cloned() {
+            self.show_readme_doc(alt.file, text, cx);
+            return;
+        }
+        // 手上没有（老库、或者用户中途把那份删了）→ 老老实实回后台读。
+        // 宁可慢一拍，也不能拿一份错的正文上屏
         self.load_readme_doc(path, alt.file, cx);
     }
 
-    /// 读一份指定的说明文档并上屏（表头切换与 README 里的相对链接都走这里）
+    /// 把一份**已经在手上**的正文换上屏。同步、纯内存、一帧内完成。
+    ///
+    /// 「另一份是哪一份」问的是 core 的 `alt_of` + 缓存里那张候选表，
+    /// **与扫描时用的是同一个函数**——界面不自己再写一遍挑哪一份的规则
+    fn show_readme_doc(&mut self, file: String, text: SharedString, cx: &mut Context<Self>) {
+        let alt = repos::alt_of(&self.profile.readme_index, &file);
+        self.readme_state
+            .update(cx, |st, cx| st.set_text(&text, cx));
+        self.profile.readme_text = Some(text);
+        self.profile.readme_file = Some(file);
+        self.profile.readme_alt = alt;
+        self.profile.readme_error = None;
+        cx.notify();
+    }
+
+    /// 读一份指定的说明文档并上屏。**只在手上没有那一份时才会走到这里**——
+    /// README 正文里点相对链接切到第三份文档，或者老库里没存过那一份。
     ///
     /// **读文件走后台线程**——一份 README 十万字，堵在 UI 线程上那一帧会卡住。
     ///
@@ -366,12 +405,16 @@ impl Shell {
     fn load_readme_doc(&mut self, path: &str, name: String, cx: &mut Context<Self>) {
         let repo = path.to_string();
         let want = name.clone();
-        self.profile.scanning = true;
+        // ⚠️ **借的是 `readme_loading`，不是 `scanning`**（阶段 18）。
+        // `scanning` 是**整份档案扫描**的标志，仓库头的活跃度芯片与语言构成条
+        // 都读它——借去用的话，点一次中英切换会让那两个毫不相干的地方一起说
+        // 「统计中…」，读完再一起说不是：**一个标志两件事**
+        self.profile.readme_loading = true;
         self.profile.readme_error = None;
         cx.notify();
         // ⚠️ **先自增再取 seq**，与 `scan_space` / `scan_profile` / `scan_overview_activity`
         // 同一套写法。写成「先取 seq 再自增」的话，守卫拿的是加之前的值，
-        // 回来一比永远对不上 → 闭包静默早退 → `scanning` 永远落不回 false，
+        // 回来一比永远对不上 → 闭包静默早退 → 标志永远落不回 false，
         // 画面就永久停在骨架屏（2026-10-05 实机点出来的：点「中文」没反应，
         // 表头也跟着空掉——那条早退把表头一起吞了，因为它在同一个 early return 之后）
         self.profile_seq += 1;
@@ -387,17 +430,25 @@ impl Shell {
                 })
                 .await;
             this.update(cx, |this, cx| {
+                // ⚠️ **过期结果也要先把标志落回去**，与 `scan_space` 的
+                // `tree_loading` 同一个道理（AGENTS.md D 那条）：`profile_seq`
+                // 也会被 `scan_profile` 顶掉，而那次并不管 `readme_loading`——
+                // 早退之前不清，表头就会**永远**停在「读取中…」。
+                // 宁可新来那一轮在途时少说一句，也不留一个收不回来的标志
+                this.profile.readme_loading = false;
                 if this.profile_seq != seq {
                     return;
                 }
                 let (text, alt) = r;
-                this.profile.scanning = false;
                 match text {
                     Some(text) => {
-                        let text = SharedString::from(text);
+                        // 顺手把它补进内存那份：这一份读过了，下次切回来就是同步的
+                        this.profile
+                            .readme_docs
+                            .insert(name.clone(), SharedString::from(text.clone()));
                         this.readme_state
                             .update(cx, |st, cx| st.set_text(&text, cx));
-                        this.profile.readme_text = Some(text);
+                        this.profile.readme_text = Some(SharedString::from(text));
                         this.profile.readme_file = Some(name);
                         this.profile.readme_alt = alt;
                         this.profile.readme_error = None;
