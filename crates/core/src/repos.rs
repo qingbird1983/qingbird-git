@@ -138,9 +138,13 @@ pub struct ChangeEntry {
     /// git 的两字母状态码，如 `M ` / `??` / `A ` / `R `。原样留着，
     /// 界面上按字符分色比让 core 翻译一遍更不容易失真
     pub status: String,
-    /// 路径。已暂存的给相对仓库根的路径，未跟踪的同理
+    /// 路径。已暂存的给相对仓库根的路径，未跟踪的同理。
+    /// 未跟踪目录带一个结尾斜杠（`scratch/`）——那是 git 在说"这是目录"，
+    /// 底下可能有几十个文件，删的时候要整棵删
     pub path: String,
-    /// 原始状态码的第二个字符非空格 = 在暂存区里
+    /// 状态码里 **X 位**（第一个字符）非空格 = 在暂存区里。
+    /// ⚠️ 是**第一个**不是第二个：git 的 `XY` 里 X 是索引、Y 是工作区，
+    /// 而本字段判的是索引
     pub staged: bool,
     /// 状态码里含 `?` = 未跟踪（还没进过版本控制）
     pub untracked: bool,
@@ -154,8 +158,24 @@ pub fn changed_entries(repo_path: &str) -> Vec<ChangeEntry> {
     if !valid_repo(repo_path) {
         return Vec::new();
     }
-    parse_porcelain(&run_local(repo_path, &["status", "--porcelain"]).stdout)
+    parse_porcelain(&run_local(repo_path, &QUOTE_PATH_OFF_STATUS).stdout)
 }
+
+/// 关掉路径转义的 `git status --porcelain` 参数。
+///
+/// ⚠️ **不带 `core.quotePath=false` 时，git 把非 ASCII 路径转义成八进制**
+/// （`"\\346\\231\\256\\351\\200\\232.txt"`）。代价有两层：
+/// ① 界面上列出来的是一串谁都认不出的数字（变更页签一直是这样）；
+/// ② 阶段 17 拿这种路径去删，删的是一个**磁盘上根本不存在的文件名**。
+///
+/// Rust 侧一直是 `String::from_utf8_lossy` 解码（与控制台代码页无关），
+/// 所以拿到的就是原始 UTF-8 字节，解析没有问题。
+const QUOTE_PATH_OFF_STATUS: [&str; 4] = [
+    "-c",
+    "core.quotePath=false",
+    "status",
+    "--porcelain",
+];
 
 /// 解析 `git status --porcelain` 的输出。
 ///

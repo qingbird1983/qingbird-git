@@ -568,6 +568,10 @@ pub(crate) struct Shell {
     /// **必须先过这个框**——`target` 删掉意味着整个工程要重新编译几十分钟，
     /// 这种代价不给一次「你确定」是不能接受的
     pub(crate) clean_dlg: Option<CleanDialog>,
+    /// 第三方「清掉多出来的文件」逐项勾选框；None = 未打开。
+    /// **只给第三方**（17-4）：自己的仓库要做这件事有正经工具链，
+    /// 在这里给一条「一键丢工作区」的路是帮倒忙
+    pub(crate) purge_dlg: Option<PurgeDialog>,
     /// 克隆对话框；None = 未打开。**与添加/编辑仓库那个 `dlg` 分开**：
     /// 那个是"把已经在磁盘上的目录登记进来"，克隆是"先从网络取回来"，
     /// 两者字段几乎不重叠，挤在一个结构体里只会让两处各自判有没有
@@ -604,6 +608,30 @@ pub(crate) struct CleanDialog {
     pub(crate) path: String,
     /// `(目录名, 字节数)`，按体积从大到小——先告诉用户最贵的那项
     pub(crate) items: Vec<(String, u64)>,
+}
+
+/// 阶段 17：第三方仓库「多出来的文件」逐项勾选框的状态
+///
+/// **两类东西必须分开列**（`purge.rs` 的分流是这一层的前提）：
+/// - `untracked` = 从没进过版本控制 → 勾选意味着**永久删除**
+/// - `tracked` = 已跟踪但被改 / 被删 / 被 add 过 → 勾选意味着**恢复成云端版本**
+///
+/// 摆成一列是危险的：用户看到两个长得差不多的条目，不会去想"这个删了能撤回吗"，
+/// 而**两者的可逆性完全不同**。
+///
+/// 清单是**打开那一刻的快照**：对话框开着的时候后台状态扫描可能正好回来一份新的，
+/// 那几项就已经不是用户勾的时候看到的那些了。core 那层会再扫一次取交集兜底。
+///
+/// `Clone` 是对话框的 `content` builder 每帧现读时要用（`batch_log.rs` 同一套）
+#[derive(Clone)]
+pub(crate) struct PurgeDialog {
+    pub(crate) path: String,
+    pub(crate) untracked: Vec<String>,
+    pub(crate) tracked: Vec<String>,
+    /// 勾中的那些。⚠️ **默认空，一个都不许预勾**——这是不可逆操作，
+    /// 替用户勾好等于替他决定。`init` 向导那套"常见构建产物默认勾上"是
+    /// 反过来的理由：写 `.gitignore` 是可逆且无害的
+    pub(crate) picked: HashSet<String>,
 }
 
 /// 提交并推送对话框的状态

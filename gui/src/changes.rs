@@ -59,6 +59,20 @@ impl Shell {
                     .into_any_element(),
             );
         }
+        // 阶段 17：**只给第三方**。自己的仓库要做这件事有正经工具链，
+        // 在这里给一条「一键丢工作区」的路是帮倒忙
+        if third && !changes.is_empty() {
+            hdr = hdr.right(
+                Button::new("changes-purge")
+                    .label("清掉多出来的文件…")
+                    .custom(ghost_variant(cx))
+                    .with_size(Size::XSmall)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_purge_dlg(window, cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
         v_flex()
             .flex_1()
             .min_h_0()

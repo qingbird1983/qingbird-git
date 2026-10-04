@@ -16,6 +16,7 @@ pub mod git;
 pub mod history;
 pub mod net;
 pub mod proxy;
+pub mod purge;
 pub mod repos;
 pub mod run_cmd;
 pub mod scan_cache;

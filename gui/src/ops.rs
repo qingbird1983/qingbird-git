@@ -10,6 +10,7 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::{AppContext, Context, SharedString, Window};
 use qingbird_core::fork;
 use qingbird_core::git;
+use qingbird_core::purge;
 use qingbird_core::repos::{self};
 use qingbird_core::run_cmd::{self, Slot};
 use qingbird_core::scan_cache;
@@ -910,6 +911,77 @@ impl Shell {
                 lg.error = err;
                 lg.ts = store::now_secs();
                 this.scan_space(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 执行阶段 17 的勾选清理。**勾选框在 `dialogs::purge`**，这里只管执行
+    ///
+    /// 结论落进**这个仓库自己的**日志槽（`log_of`）——只写 `space.note` 那种
+    /// 活在一页上的地方，用户切到概览页就看不到了，而概览页才是默认会去的
+    /// 那屏。**逐条记成功与失败**：删了 3 个有 1 个被占用，只报"清完了"是骗人
+    pub(crate) fn run_purge(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.purge_dlg.take() else {
+            return;
+        };
+        // 17-4 的闸门在**执行这一层**也留一道：入口键不画只是"通常到不了"，
+        // 而这一层动的是不可逆的东西
+        if !self.selected_is_third() {
+            return;
+        }
+        let untracked: Vec<String> = d
+            .untracked
+            .iter()
+            .filter(|p| d.picked.contains(*p))
+            .cloned()
+            .collect();
+        let tracked: Vec<String> = d
+            .tracked
+            .iter()
+            .filter(|p| d.picked.contains(*p))
+            .cloned()
+            .collect();
+        if untracked.is_empty() && tracked.is_empty() {
+            let lg = self.log_of(&d.path);
+            lg.lines.push("· 清理：没有勾选任何一项，什么都没动".into());
+            lg.ts = store::now_secs();
+            cx.notify();
+            return;
+        }
+        let path = d.path.clone();
+        cx.spawn(async move |this, cx| {
+            let p = path.clone();
+            let r = cx
+                .background_executor()
+                .spawn(async move { purge::purge_changes(&p, &untracked, &tracked) })
+                .await;
+            this.update(cx, |this, cx| {
+                let lg = this.log_of(&path);
+                let note = r.summary();
+                for p in &r.deleted {
+                    lg.lines.push(format!("✗ 已删除 {p}（未跟踪，无法撤销）"));
+                }
+                for p in &r.restored {
+                    lg.lines.push(format!("✓ 已恢复 {p}（改回云端版本）"));
+                }
+                for p in &r.skipped {
+                    lg.lines.push(format!("· 跳过 {p}：动手时它已经不是那个状态了"));
+                }
+                for (p, why) in &r.failed {
+                    lg.lines.push(format!("✗ {p}：{why}"));
+                }
+                lg.verdict = Some((r.failed.is_empty(), note.clone()));
+                lg.error = if r.failed.is_empty() {
+                    None
+                } else {
+                    Some(format!("{} 项没成功", r.failed.len()))
+                };
+                lg.ts = store::now_secs();
+                // 清理完工作区变了，侧栏徽标 / 总览「状态」列都靠它
+                this.refresh_status(cx);
                 cx.notify();
             })
             .ok();

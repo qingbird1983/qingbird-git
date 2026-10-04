@@ -416,14 +416,17 @@ pub fn delete_cache_dir(path: &str, name: &str) -> Result<u64, String> {
     Ok(size)
 }
 
-/// 把删除失败翻译成一句人话。
+/// 把删除失败翻译成一句人话。**阶段 17 的「清掉多出来的文件」也用这一份**——
+///
+/// 两处都在做不可逆的删除，错误文案分叉了就等于有两套"怎么跟用户解释失败"，
+/// 而用户看到的那一句才是他判断"为什么没删掉"的唯一依据。
 ///
 /// ⚠️ **不能只判 `ErrorKind::PermissionDenied`**：Windows 上"另一个程序正在用
 /// 这个文件"是 `ERROR_SHARING_VIOLATION`(32)，Rust 把它归成 `Uncategorized`，
 /// 不落到 `PermissionDenied` 那个臂里——于是最常见的那一种占用恰恰落进
 /// 兜底分支，用户看到的是 `(os error 32)` 这种等于没说的东西。
 /// 所以按 `raw_os_error()` 显式认这两个号。
-fn explain_delete_error(e: &std::io::Error) -> String {
+pub fn explain_delete_error(e: &std::io::Error) -> String {
     const ERROR_ACCESS_DENIED: i32 = 5;
     const ERROR_SHARING_VIOLATION: i32 = 32;
     const ERROR_DIR_NOT_EMPTY: i32 = 145;

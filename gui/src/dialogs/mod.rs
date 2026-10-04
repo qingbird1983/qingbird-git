@@ -11,6 +11,7 @@ pub(crate) mod cmds;
 pub(crate) mod commit;
 pub(crate) mod fork;
 pub(crate) mod init;
+pub(crate) mod purge;
 pub(crate) mod repo;
 pub(crate) mod settings;
 pub(crate) mod sync;

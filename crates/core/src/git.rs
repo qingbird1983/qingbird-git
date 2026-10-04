@@ -106,6 +106,38 @@ pub fn run_git_auth(
     git_config: &[String],
     ssh_command: Option<&str>,
 ) -> GitOutput {
+    run_git_inner(
+        repo_path, args, proxy_url, timeout, on_line, git_config, ssh_command, None,
+    )
+}
+
+/// 同 `run_git_auth`，另外把 `stdin_data` 喂给 git 的标准输入。
+///
+/// **为什么需要它**：只有 `git restore --pathspec-from-file=-` 这种
+/// "路径从 stdin 读" 的命令用得上。路径走参数会撞上 Windows 命令行
+/// 32k 上限（一个改了几百个文件的仓库按参数传会被系统直接截断），
+/// 走 stdin 再配 `--pathspec-file-nul` 则路径里有空格、换行、引号
+/// 都不用转义。
+pub fn run_git_stdin(
+    repo_path: &str,
+    args: &[&str],
+    stdin_data: &[u8],
+    timeout: Duration,
+) -> GitOutput {
+    run_git_inner(repo_path, args, None, timeout, None, &[], None, Some(stdin_data))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_git_inner(
+    repo_path: &str,
+    args: &[&str],
+    proxy_url: Option<&str>,
+    timeout: Duration,
+    on_line: Option<&dyn Fn(&str)>,
+    git_config: &[String],
+    ssh_command: Option<&str>,
+    stdin_data: Option<&[u8]>,
+) -> GitOutput {
     let fail = |stderr: String| GitOutput {
         success: false,
         stdout: String::new(),
@@ -135,7 +167,14 @@ pub fn run_git_auth(
     if let Some(ssh) = ssh_command {
         cmd.env("GIT_SSH_COMMAND", ssh);
     }
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+    // stdin 默认接空——不给 git 任何输入它就不会等人敲回车。
+    // 需要喂数据的（`restore --pathspec-from-file=-`）走 run_git_stdin
+    if stdin_data.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
@@ -152,6 +191,21 @@ pub fn run_git_auth(
     let job_handle = bind_kill_on_job_close(&child);
     #[cfg(not(windows))]
     let job_handle: isize = 0;
+
+    // 喂 stdin。**必须另起一个线程写**：管道缓冲区满了之后写侧会阻塞，
+    // 而 git 要等读完 stdin 才开始吐 stdout——同一个线程里先写后读就是死锁。
+    // 路径多了（几百个文件）时数据量能到几十 KB，正好够塞满缓冲区
+    if let Some(data) = stdin_data {
+        if let Some(mut pipe) = child.stdin.take() {
+            let owned = data.to_vec();
+            std::thread::spawn(move || {
+                use std::io::Write as _;
+                // 写失败（git 提前退出）不算错：下面的退出码会说明原因
+                let _ = pipe.write_all(&owned);
+                let _ = pipe.flush();
+            });
+        }
+    }
 
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr piped");
