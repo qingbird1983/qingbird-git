@@ -841,6 +841,7 @@ impl Shell {
             scan: None,
             seq: 0,
             logs: HashMap::new(),
+            op_logs: HashMap::new(),
             detail_tab: 0,
             space: SpaceState::default(),
             space_seq: 0,
@@ -949,6 +950,10 @@ impl Shell {
             this.refresh_one(sel.clone(), cx);
             this.scan_space(cx);
             this.scan_profile(cx);
+            // 落盘的操作历史：**只读选中的这一个**（17 个仓库全读一遍
+            // 是启动时白开 17 次 SQLite 连接，而界面一次只显示一条）。
+            // 切仓库时 `select` 会补上那一个
+            this.load_op_log(&sel);
         }
         // 启动时的选中项是构造时就定下的，**没有走过 `select`**，所以这条链上
         // 灌地址条与同步设置草稿的那两步得在这里自己补。不补的话第一屏的
@@ -1308,6 +1313,10 @@ impl Shell {
         repos::touch_repo(&path);
         self.scan_space(cx);
         self.scan_profile(cx);
+        // 落盘的操作历史跟着仓库走。**切回来时重新读而不是留着旧的**：
+        // 上一次在这个窗口里跑的操作已经更新过内存那份，可"这个仓库在
+        // 别的窗口跑过"这种情况读不到——而那正是重启一次之后的情形
+        self.load_op_log(&path);
         // 停在「历史」页签时切仓库要跟着重扫。`scan_history` 自己按路径判重，
         // 所以「切到没扫过的仓库」才真起 git 进程，切回扫过的那个直接给缓存
         if self.cur_detail_tab() == DetailTab::History {
@@ -1356,6 +1365,12 @@ impl Shell {
             }
         }
         self.logs.remove(&path);
+        // 操作历史跟着 `logs` 一起从内存里摘掉。
+        // ⚠️ **库里的那些行故意留着**：`drop_cache` 只清 `scan_cache` 表，
+        // `op_history` 是"这个路径上次发生过什么"，将来同一个路径被加回来
+        // （换台机器 clone 的同一个仓库就是同一个绝对路径）时，
+        // 那句"上次拉取 · 3 天前"仍然成立。清掉反而是丢信息
+        self.op_logs.remove(&path);
         self.dlg = None;
         cx.notify();
     }

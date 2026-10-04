@@ -257,6 +257,11 @@ impl Shell {
                     lg.running = false;
                     lg.percent = None;
                 }
+                // **落进 `op_history`（阶段 16）**：这一句是**跨会话**的。
+                // 没有它的话重启一次，日志卡就写「还没有操作记录」——
+                // 而昨天明明拉取过。用户问「这仓库上次更新了什么」，
+                // 答得出来的地方只有这里
+                this.record_op(&fin_path, op, result.ok, &result.message);
                 // 变基改写了历史：接住后端算好的分叉信息与备份分支。
                 // 备份分支只在变基成功那一刻提供"撤销"；撤销完成后不再提供
                 match op {
@@ -640,6 +645,20 @@ impl Shell {
                         }
                     }
                     lg.running = false;
+                    // 批量也落进 `op_history`（阶段 16），**逐仓库各记一条**——
+                    // 这一批改了五个仓库，切到任何一个都得看得到它自己那条，
+                    // 而不是"上一个仓库的时间"串到这边来。
+                    // ⚠️ **跳过的不记**：工作区有改动时一个字节都没动，
+                    // 记一条"跳过"进历史等于把"上次成功同步"的时间抹掉，
+                    // 而那次成功仍然是真的
+                    if let Some((ok, msg)) = &outcome {
+                        let op = match kind {
+                            BatchKind::Pull => Op::Pull,
+                            BatchKind::Push => Op::Push,
+                            BatchKind::Check => Op::Check,
+                        };
+                        this.record_op(&p, op, *ok, msg);
+                    }
                     let Some(b) = this.batch.as_mut() else {
                         return;
                     };
@@ -783,6 +802,8 @@ impl Shell {
                 if r.ok {
                     this.commit_dlg = None;
                 }
+                // 落进 `op_history`（阶段 16）。与 `run_sync` 同一处收尾
+                this.record_op(&path, Op::Commit, r.ok, &r.message);
                 // 提交与推送都改 ahead/behind，变更清单也变了，一并重扫
                 this.repos = repos::list_repos();
                 this.refresh_status(cx);

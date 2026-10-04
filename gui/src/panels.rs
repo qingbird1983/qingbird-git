@@ -683,10 +683,17 @@ impl Shell {
             0 => "没有落后".to_string(),
             n => format!("落后 {n} 个提交"),
         };
-        let synced = if lg.ts == 0 {
-            "本会话还没有同步过".to_string()
-        } else {
+        // 「上次同步」这一格：**标签问的是跨会话，值就得答跨会话。**
+        // 原来只有本会话的 `lg.ts` 可用，所以退成「本会话还没有同步过」——
+        // 标签写着"上次"、值却说"本会话"，**一个格子自己跟自己打架**。
+        // 阶段 16 落了 `op_history` 之后这格答得出来了
+        let synced = if lg.ts != 0 {
             rel_time(lg.ts)
+        } else {
+            match self.selected.as_deref().and_then(|p| self.op_log_when(p)) {
+                Some(when) => when,
+                None => "还没有同步记录".to_string(),
+            }
         };
         v_flex()
             .w_full()

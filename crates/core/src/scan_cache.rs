@@ -160,20 +160,20 @@ pub fn drop_cache(repo_path: &str) -> bool {
 
 /// 记一条操作历史。**只记"用户主动发起且有结果"的操作**——
 /// 后台自动同步会自己跑，全记的话一个月就是几万条噪音。
-/// 返回 false = 没记上，调用方不必在意。
-pub fn record_op(repo_path: &str, op: &str, ok: bool, detail: &str) -> bool {
-    let Some(conn) = open() else { return false };
+///
+/// 成功时返回**写进去的那个时间戳**，调用方拿它更新自己那份内存状态。
+/// ⚠️ **别让调用方自己再取一次 `now_secs()`**：那是两个独立的钟，
+/// 跨过秒边界就对不上——刚跑完显示「3 分钟前」、重启后又变成「刚刚」。
+/// 返回 `None` = 没记上，调用方不必在意。
+pub fn record_op(repo_path: &str, op: &str, ok: bool, detail: &str) -> Option<u64> {
+    let conn = open()?;
+    let ts = crate::store::now_secs();
     conn.execute(
         "INSERT INTO op_history (ts, path, op, ok, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![
-            crate::store::now_secs() as i64,
-            repo_path,
-            op,
-            ok as i64,
-            detail
-        ],
+        rusqlite::params![ts as i64, repo_path, op, ok as i64, detail],
     )
-    .is_ok()
+    .ok()
+    .map(|_| ts)
 }
 
 /// 某个仓库的操作历史，最近的排在前面。给界面画时间线用。
@@ -330,14 +330,19 @@ mod tests {
     fn op_history_is_append_only_and_newest_first() {
         let _g = APPDATA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _db = TempDb::new("ophist");
-        assert!(record_op("F:\\y", "pull", true, "拉了 3 个提交"));
-        assert!(record_op("F:\\y", "push", false, "远端领先"));
-        assert!(record_op("F:\\other", "check", true, ""));
+        let t1 = record_op("F:\\y", "pull", true, "拉了 3 个提交").unwrap();
+        let t2 = record_op("F:\\y", "push", false, "远端领先").unwrap();
+        record_op("F:\\other", "check", true, "").unwrap();
         let h = op_history("F:\\y", 10);
         assert_eq!(h.len(), 2, "只返回该仓库的");
         assert_eq!(h[0].op, "push", "最近的在前");
         assert!(!h[0].ok);
         assert_eq!(h[1].detail, "拉了 3 个提交");
+        // 返回的时间戳必须**就是读回来的那个**：界面拿它更新内存里那一份，
+        // 对不上就会出现"刚跑完显示 3 分钟前、重启后又变回刚刚"
+        assert_eq!(h[0].ts, t2);
+        assert_eq!(h[1].ts, t1);
+        assert!(t2 >= t1, "后一条不会比前一条更早");
     }
 
     #[test]
@@ -370,9 +375,9 @@ mod tests {
         std::fs::write(dir.join("cache.db"), b"this is not a sqlite file at all").unwrap();
         // 读：当成"没扫过"
         assert!(load_cache("F:\\whatever").is_none());
-        // 写：当成"没记上"，返回 false 而不是 panic
+        // 写：当成"没记上"，返回 None 而不是 panic
         assert!(!save_cache("F:\\whatever", &sample("F:\\whatever")));
-        assert!(!record_op("F:\\whatever", "pull", true, ""));
+        assert_eq!(record_op("F:\\whatever", "pull", true, ""), None);
         assert!(op_history("F:\\whatever", 5).is_empty());
     }
 }

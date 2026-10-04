@@ -12,6 +12,13 @@ path = "src/main.rs"
 qingbird-core = { path = "../crates/core" }
 gpui-kit = "0.7"
 serde_json = "1"
+# 只为「本地的今天是哪天」这一件事（overview::fill_days 的窗口右端）。
+# ⚠️ **它早就在依赖树里了**——`gpui-base` 自己就直接依赖 chrono，
+# 所以加这条边不新增任何编译单元，也不用引新的日期库。
+# 手写 epoch →  civil 的那套（原来的 `civil_from_days`）算法本身没错，
+# 错在**喂给它的偏移量**：偏移为 0 时它给的是 UTC 日期，
+# 而 git 那边 `--date=format-local` 给的是本地日期，两边对不上。
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # 托盘图标（Q11）。gpui-kit 没有托盘件，基座也没有 tray API，只能自挂。
 # muda 是 Windows 上的 win-menu 实现（托盘右键菜单），托盘图标自身没有菜单能力。
 tray-icon = "0.26"

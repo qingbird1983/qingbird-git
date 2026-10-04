@@ -85,6 +85,71 @@ pub(crate) enum Op {
     Commit,
 }
 
+impl Op {
+    /// 落进 `op_history` 表的**稳定键**（英文小写）。
+    /// **`None` = 这一类不进操作历史**。
+    ///
+    /// ⚠️ **它会写进磁盘、跟着数据库活很久**，所以别拿中文文案当键——
+    /// 改一次文案就等于换一批记录。也不要用会变的字符串拼装
+    /// （`format!("{}-{}", …)` 那种），拼错一个字符就是新的一类。
+    ///
+    /// **返回 `Option` 而不是让调用点自己判**：不记是这一类操作**自身的性质**，
+    /// 写在类型里，谁漏了都绕不过去。
+    pub(crate) fn key(self) -> Option<&'static str> {
+        match self {
+            Op::Pull => Some("pull"),
+            Op::Push => Some("push"),
+            Op::Check => Some("check"),
+            Op::Rebase(_) => Some("rebase"),
+            Op::UndoRebase => Some("undo_rebase"),
+            Op::Commit => Some("commit"),
+            // 命令槽位**不记**，两条理由：
+            // ① `op_history` 回答的是「这个仓库上次被**更新**过什么」，
+            //    跑一次 `cargo test` 不改变仓库的更新状态；
+            // ② 槽位键是 `pinned:{i}`，**下标来自 config 里按钮的顺序**——
+            //    用户在 ⌘K 里重排一次按钮，历史里那条 `pinned:2` 就对不上
+            //    它当时指的是哪条命令了。同步操作没有这个问题。
+            Op::Cmd(_) => None,
+        }
+    }
+
+    /// 从落库的键反查回中文说法。**认不出来的给一个说人话的兜底**
+    /// ——库里存着上个版本写的键时，宁可显示"某项操作"也不要空字符串
+    pub(crate) fn label_of_key(key: &str) -> &'static str {
+        match key {
+            "pull" => "拉取",
+            "push" => "推送",
+            "check" => "检测更新",
+            "rebase" => "变基",
+            "undo_rebase" => "撤销变基",
+            "commit" => "提交并推送",
+            _ => "某项操作",
+        }
+    }
+
+    /// 这个操作在界面上叫什么。
+    ///
+    /// **与 `label_of_key` 是同一件事的两处写法**（一个从枚举出发、一个从
+    /// 落库的键出发，没法合成一个函数）。单测
+    /// `every_op_key_round_trips_through_its_label` 钉住两者一致——
+    /// **两处各写一遍的东西迟早有一处会漂**
+    ///
+    /// ⚠️ **它与 `SYNC_SLOT_LABELS` 刻意不完全一样**：同步卡那颗键要短
+    /// （「检测」两个字），这里要能嵌进一句话（「检测更新 · 3 分钟前」）。
+    /// 别为了"统一"去改任何一边。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Op::Pull => "拉取",
+            Op::Push => "推送",
+            Op::Check => "检测更新",
+            Op::Rebase(_) => "变基",
+            Op::UndoRebase => "撤销变基",
+            Op::Commit => "提交并推送",
+            Op::Cmd(s) => s.default_label(),
+        }
+    }
+}
+
 /// 一个仓库的日志。
 ///
 /// **按仓库路径存**（D7），不是单份全局：切仓库不该把上一个仓库正在跑的输出
@@ -436,6 +501,16 @@ pub(crate) struct Shell {
     /// 每个仓库一份的日志（D7）。键是仓库路径，**别再存第二份全局的**——
     /// 那样后台任务回来只能写到"当前选中"名下，切个仓库就记错地方了
     pub(crate) logs: HashMap<String, LogState>,
+    /// 每个仓库**最近一条**操作历史（阶段 16 的 `op_history`）。
+    ///
+    /// 与 `logs` 的分工：`logs` 是**本次会话**的输出流，跑完就没了；
+    /// 这一份是**落盘的**，回答「这个仓库上次被更新过什么、上次是什么时候」。
+    /// 没有它的话重启一次，日志卡就写「还没有操作记录」——而昨天明明拉过。
+    ///
+    /// **只存一条**（`op_history` 表里是全量追加，界面只问"最近那条"）。
+    /// 存更多就得决定摆在哪、怎么翻页，而那是另一个设计决定。
+    /// 切仓库时按需读一条，**别在 render 里读库**——那是每帧 I/O。
+    pub(crate) op_logs: HashMap<String, qingbird_core::scan_cache::OpRecord>,
     /// 详情页当前页签（概览 / 说明 / 历史 / 空间 / 变更）。
     /// 跟着仓库走还是全局？**全局**：切页签不是切仓库，用户的注意力
     /// 应该在"看同一个仓库的另一个角度"上；跟着仓库走的话每换一个仓库
@@ -1107,5 +1182,88 @@ mod tests {
         let now = qingbird_core::store::now_secs();
         assert_eq!(scanned_note(true, now), "刷新中…");
         assert_eq!(scanned_note(false, now), "刚刚");
+    }
+
+    /// 落库的键 ↔ 界面的说法，**两个方向都要对**。
+    ///
+    /// ⚠️ 这条守的是一件具体的事：`label_of_key` 是 `key` 的逆函数，
+    /// 两处各写一遍。往后加一个新 `Op` 变体时，忘了在 `label_of_key`
+    /// 里补一条**编译期不报、单测也不报**——库里明明写着 `checkout`，
+    /// 界面上却显示「某项操作」，而那句话永远没人会去查。
+    /// **往 `key()` 里加一条、往 `label_of_key` 忘一条，这条单测立刻红。**
+    #[test]
+    fn every_op_key_round_trips_through_its_label() {
+        // 覆盖每一个会落库的变体。`Rebase(false)` / `Rebase(true)`
+        // 键相同（是同一个操作，区别只在要不要先暂存），列一个就够
+        for op in [
+            Op::Pull,
+            Op::Push,
+            Op::Check,
+            Op::Rebase(false),
+            Op::UndoRebase,
+            Op::Commit,
+        ] {
+            let key = op.key().expect("这几个都要落 op_history");
+            assert_eq!(
+                Op::label_of_key(key),
+                op.label(),
+                "键 `{key}` 反查回来的说法与 `label()` 不是同一句"
+            );
+        }
+    }
+
+    /// 落库的键**不许重名**，也不许是空串。
+    ///
+    /// 重名那条更阴：两个**不同的**操作共用一个键，界面上会把 A 显示成 B，
+    /// 而所有单测都还是绿的（它们各自都没写错）。
+    #[test]
+    fn op_keys_are_unique_and_never_empty() {
+        let mut seen = std::collections::HashSet::new();
+        for op in [
+            Op::Pull,
+            Op::Push,
+            Op::Check,
+            Op::Rebase(false),
+            Op::UndoRebase,
+            Op::Commit,
+        ] {
+            let key = op.key().expect("这几个都要落 op_history");
+            assert!(!key.is_empty(), "{op:?} 的落库键是空串");
+            assert!(seen.insert(key), "键 `{key}` 被两个操作共用了：{op:?}");
+        }
+    }
+
+    /// ⚠️ **同一次操作的两个变体必须共用一个键**——这是上面那条唯一允许的重名。
+    ///
+    /// `Rebase(bool)` 里的 bool 是"工作区脏时用户同意先暂存"，**不是两种操作**：
+    /// 不暂存的变基与先暂存的变基，在"这个仓库上次被更新过什么"这个问题上
+    /// 是同一件事。给它们两个键的话，界面上会出现两条长得一样、
+    /// 只有时间不同的记录，读的人会以为是两次变基。
+    ///
+    /// 写死这条是防下一个人"顺手修好它"——看到两个变体一个键，多数人会当 bug
+    #[test]
+    fn the_two_rebase_variants_share_one_key_on_purpose() {
+        assert_eq!(Op::Rebase(false).key(), Op::Rebase(true).key());
+        assert_ne!(
+            Op::Rebase(false).key(),
+            Op::UndoRebase.key(),
+            "变基与撤销变基是两件事，键必须分开"
+        );
+    }
+
+    /// 命令槽位**不落 op_history**，而认不出来的键有个说人话的兜底。
+    ///
+    /// 兜底这条是给**上一个版本写下的键**留的：那时没有这一类，
+    /// 数据库里躺着别的键。宁可显示"某项操作"，也不要一行空白——
+    /// 空白会被读成"没跑过操作"，那是假话
+    #[test]
+    fn cmd_slots_stay_out_of_op_history_and_unknown_keys_still_say_something() {
+        assert_eq!(
+            Op::Cmd(Slot::Test).key(),
+            None,
+            "命令槽位的下标来自 config 里按钮的顺序，进不了落库键"
+        );
+        assert_eq!(Op::label_of_key("pinned:0"), "某项操作");
+        assert_eq!(Op::label_of_key(""), "某项操作");
     }
 }

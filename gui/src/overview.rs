@@ -5,11 +5,12 @@
 //! 阶段 6 全部删掉，批量改由 ⌘K 承载（阶段 11）：命令面板本来就是"挑几行做一件事"的地方，
 //! 在表格里另造一套勾选语法只是让同一个动作有两种心智模型。
 //!
-//! 两处自研，都是设计文档点名允许的：
-//! ① **日期键用本地时区**（`local_date_key`）——`toISOString` 会串日，
-//!    UTC 和本地差一天时整根柱子会挪到隔壁。
-//! ② **补齐 14 天窗口**（`fill_days`）——后端只给有提交的日子，
-//!    空白天要画成 0 高度的柱子而不是直接不画。
+//! 唯一一处自研的整形，是 `fill_days`：**补齐 14 天窗口**——
+//! 后端只给有提交的日子，空白天要画成 0 高度的柱子而不是直接不画。
+//! **窗口右端必须是「本地的今天」**（`local_day_key`）：core 那边的
+//! 日期串是 `git log --date=format-local` 算出来的本地日期，
+//! 两边口径必须一致，否则**凌晨 0–8 点今天的提交会落在窗口外**——
+//! 那一段曾经正是这么错的，见 `local_day_key` 的注释。
 
 // 图标只认这一套：assets 里是完整 lucide，外加品牌 Bird。
 // 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
@@ -23,8 +24,8 @@ use gpui_kit::{
     div, px, AnyElement, App, Context, Div, Entity, FontWeight, IntoElement, ParentElement, Styled,
     Window,
 };
+use chrono::{DateTime, Duration, Local};
 use qingbird_core::repos::ActivityDay;
-use qingbird_core::store;
 
 use crate::sidebar::BadgeKind;
 use crate::state::*;
@@ -598,37 +599,46 @@ impl Shell {
 /// **不能用 `toISOString`**：那是 UTC 日期。本地在 UTC 以东时（比如 UTC+8 的
 /// 晚上 8 点之后），`toISOString` 给的是"明天"，整根柱子会挪到隔壁去，
 /// 而且"今天"这个概念在用户脑子里永远是本地的今天
-pub(crate) fn local_date_key(offset_secs: i64) -> String {
-    let secs = store::now_secs() as i64 + offset_secs;
-    let days = secs.div_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02}")
+/// 本地时区的 `YYYY-MM-DD`，往前数 `days_ago` 天。
+///
+/// ⚠️ **这里原来是一套手写的 epoch → civil 换算**（`civil_from_days`，
+/// Howard Hinnant 的算法，算法本身没错），错的是**喂给它的偏移量**：
+/// 偏移为 0 时 `epoch.div_euclid(86_400)` 给的是 **UTC 日期**，
+/// 而 core 那边 `git log --date=format-local:%Y-%m-%d` 给的是**本地日期**。
+/// 两边对不上，而窗口右端（"今天"）走的正是偏移 0 那条路。
+///
+/// **实测后果**（2026-10-05 04:34 +08:00，合成仓库当天提交 3 次）：
+/// x 轴标签从 9/21 到 **10/04**（本该到 10/05），整张图一根柱子都没有。
+/// 也就是**本地时间 0:00–8:00 之间，今天的提交在总览图上永远看不见**。
+///
+/// 换成 `chrono` 是因为**它早就在依赖树里**（`gpui-base` 自己就依赖它，
+/// 加这条边不新增编译单元），而"本机现在的 UTC 偏移是多少"这件事
+/// 自己手搓要么引 FFI、要么猜——**夏令时一换就悄悄错**。
+pub(crate) fn local_day_key(now: DateTime<Local>, days_ago: i64) -> String {
+    (now.date_naive() - Duration::days(days_ago))
+        .format("%Y-%m-%d")
+        .to_string()
 }
-/// 天数序号 → `(年, 月, 日)`。Howard Hinnant 的 civil_from_days 算法：
-/// 不用引日期库，也不用 `time` 依赖，且对负数（1970 之前）同样成立
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
 /// 把后端给的「有提交的日子」补齐成连续 14 个点，按日期升序（旧 → 新）。
 ///
 /// 图表的 x 轴从左到右是时间轴，**空的点会让后面的点往前挤**——
 /// 少一天两根就靠拢了，看起来像"提交变频繁了"。所以宁可画一个 0，
 /// 也不能让那一天消失
 pub(crate) fn fill_days(src: &[ActivityDay], days: u32) -> Vec<ActivityBar> {
+    fill_days_from(src, days, Local::now())
+}
+
+/// 主体。**`now` 显式传进来**——窗口右端是"本地的今天"，
+/// 那由本机时区决定，从外面钉不住，要能注入才测得了
+pub(crate) fn fill_days_from(
+    src: &[ActivityDay],
+    days: u32,
+    now: DateTime<Local>,
+) -> Vec<ActivityBar> {
     let mut out: Vec<ActivityBar> = Vec::with_capacity(days as usize);
-    // 从 (今天 - days + 1) 到今天，共 days 天。offset 是一天 86400 秒
+    // 从 (今天 - days + 1) 到今天，共 days 天
     for i in 0..days as i64 {
-        let key = local_date_key(-(days as i64 - 1 - i) * 86_400);
+        let key = local_day_key(now, days as i64 - 1 - i);
         out.push(ActivityBar {
             count: src
                 .iter()
@@ -645,7 +655,7 @@ pub(crate) fn fill_days(src: &[ActivityDay], days: u32) -> Vec<ActivityBar> {
 ///
 /// **必须跳掉年**：早先写的是取前两段，得到的是 `2026/09`——14 个标签上
 /// 全印着同一个 "2026/09"，一屏重复 14 次，一个日期都读不出来
-/// （2026-10-03 实机首轮）。`local_date_key` 产出的是三段 `年-月-日`，
+/// （2026-10-03 实机首轮）。`local_day_key` 产出的是三段 `年-月-日`，
 /// 段数不同就意味着"按位置取"这种写法本身不可靠，这里按下标取并容错。
 fn short_day(date: &str) -> String {
     let mut it = date.split('-');
@@ -683,6 +693,75 @@ pub(crate) fn ov_status_text(b: Bucket, changed: u32, third: bool) -> String {
         BadgeKind::Ahead => "待推送".into(),
         BadgeKind::Forked => "已分叉".into(),
         BadgeKind::Dirty => format!("未提交 {changed}"),
+    }
+}
+
+// ================= 窗口右端的单测 =================
+
+#[cfg(test)]
+mod window_tests {
+    use super::{fill_days, fill_days_from, local_day_key, ACTIVITY_DAYS};
+    use chrono::{DateTime, Local, Utc};
+    use qingbird_core::repos::ActivityDay;
+
+    fn local_today() -> String {
+        Local::now().date_naive().format("%Y-%m-%d").to_string()
+    }
+
+    /// **回归钉住：今天的提交必须落在窗口最右端那一格。**
+    ///
+    /// 原来的 `local_date_key(0)` 是 `epoch.div_euclid(86_400)`，给的是
+    /// **UTC 日期**；core 那边的日期串来自 `git log --date=format-local`，
+    /// 是**本地日期**。UTC+8 的凌晨两者差一天，于是今天的提交整根柱子
+    /// 落在窗口外（图看着像"近两周没人提交"）。
+    /// 实测 2026-10-05 04:34 +08:00，当天 3 次提交，x 轴止于 10/04，零柱子。
+    #[test]
+    fn a_commit_today_lands_on_the_last_column() {
+        let today = ActivityDay { date: local_today(), count: 3 };
+        let bars = fill_days(&[today], ACTIVITY_DAYS);
+        assert_eq!(bars.len(), ACTIVITY_DAYS as usize);
+        assert_eq!(bars.last().unwrap().date, local_today(), "右端是本地的今天");
+        assert_eq!(
+            bars.last().unwrap().count,
+            3,
+            "今天的提交必须被数进去，而不是静默掉出窗口"
+        );
+    }
+
+    /// 窗口右端跟 `Local::now()` 对齐，**不是** UTC 的今天。
+    /// 两者在非零偏移的机器上每天有 24 − 2×|offset| 小时不等，
+    /// 旧实现每 16 小时就会在这条上红一次（UTC+8）
+    #[test]
+    fn the_window_ends_on_the_local_today() {
+        let bars = fill_days(&[], ACTIVITY_DAYS);
+        assert_eq!(bars.last().unwrap().date, local_today());
+    }
+
+    /// 注入一个固定时刻：**本地日期必须取本地的那个**，
+    /// 哪怕同一瞬间 UTC 还在前一天。造不出这种时刻的机器（UTC）上
+    /// 这条会平凡通过——但它至少把"取本地"这件事写成了断言，
+    /// 而不是一个没人看的注释
+    #[test]
+    fn the_local_civil_date_is_used_even_when_utc_is_a_day_behind() {
+        // 一个随便的时刻；本机时区非零时它与 UTC 的日期就有机会不同
+        let instant: DateTime<Utc> = DateTime::from_timestamp(1_760_000_000, 0).unwrap();
+        let local = instant.with_timezone(&Local);
+        assert_eq!(
+            local_day_key(local, 0),
+            local.date_naive().format("%Y-%m-%d").to_string()
+        );
+    }
+
+    /// 14 根柱子必须是**连续的 14 个日历日**，中间一天都不能少。
+    /// x 轴是时间轴，少一天后面的就往前挤（看着像"提交变频繁了"）
+    #[test]
+    fn the_window_is_consecutive_calendar_days() {
+        let now = Local::now();
+        let bars = fill_days_from(&[], 14, now);
+        for (i, b) in bars.iter().enumerate() {
+            let want = local_day_key(now, 13 - i as i64);
+            assert_eq!(b.date, want, "第 {i} 根柱子");
+        }
     }
 }
 

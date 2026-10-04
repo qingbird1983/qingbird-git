@@ -63,7 +63,7 @@ impl Shell {
             .flex_1()
             .min_h_0()
             .child(self.log_header(path.as_str(), lg, t, cx))
-            .child(self.log_status_row(t, lg, cx))
+            .child(self.log_status_row(path.as_str(), t, lg, cx))
             .when(lg.running, |col| col.child(progress_bar(t, lg)))
             .child(output_stream(
                 "log-stream",
@@ -158,29 +158,30 @@ impl Shell {
 impl Shell {
     /// 「正在拉取…」/「跑测试 · 2 分钟前」+ 停止按钮。
     /// 停止按钮只在跑的时候出现——平时摆一个点不动的停止键只会让人去试它
-    fn log_status_row(&self, t: &Theme, lg: &LogState, cx: &mut Context<Self>) -> Div {
+    ///
+    /// ⚠️ **三档的判据要分清**：
+    /// ① 正在跑 → 报的是"进行中"（`lg.op` 一定有值）
+    /// ② 本次会话跑过 → 报"做了什么 · 多久前"
+    /// ③ **本次会话没跑过** → 去问落盘的操作历史（阶段 16 的 `op_history`）。
+    ///    少了③，重启一次这张卡就写「还没有操作记录」——而昨天明明拉过。
+    ///    **那一档不是"没有信息"，是"信息在库里没人去读"**
+    fn log_status_row(&self, path: &str, t: &Theme, lg: &LogState, cx: &mut Context<Self>) -> Div {
         let text = if lg.running {
             match lg.op {
-                Some(Op::Cmd(s)) => format!("{} 进行中…", s.default_label()),
-                Some(Op::Pull) => "拉取中…".to_string(),
-                Some(Op::Push) => "推送中…".to_string(),
-                Some(Op::Check) => "检测更新中…".to_string(),
-                Some(Op::Rebase(_)) => "变基中…".to_string(),
-                Some(Op::UndoRebase) => "撤销变基中…".to_string(),
-                Some(Op::Commit) => "正在提交并推送".to_string(),
+                Some(op) => format!("{} 进行中…", op.label()),
                 None => "进行中…".to_string(),
             }
         } else if lg.ts == 0 {
-            "还没有操作记录".to_string()
+            // 回落到落盘的那一条。空串 = 库里也没有，这个仓库真的没跑过操作
+            let past = self.op_log_line(path);
+            if past.is_empty() {
+                "还没有操作记录".to_string()
+            } else {
+                past
+            }
         } else {
             match lg.op {
-                Some(Op::Cmd(s)) => format!("{} · {}", s.default_label(), rel_time(lg.ts)),
-                Some(Op::Pull) => format!("拉取 · {}", rel_time(lg.ts)),
-                Some(Op::Push) => format!("推送 · {}", rel_time(lg.ts)),
-                Some(Op::Check) => format!("检测更新 · {}", rel_time(lg.ts)),
-                Some(Op::Rebase(_)) => format!("变基 · {}", rel_time(lg.ts)),
-                Some(Op::UndoRebase) => format!("撤销变基 · {}", rel_time(lg.ts)),
-                Some(Op::Commit) => format!("提交并推送 · {}", rel_time(lg.ts)),
+                Some(op) => format!("{} · {}", op.label(), rel_time(lg.ts)),
                 None => rel_time(lg.ts),
             }
         };
