@@ -1840,6 +1840,154 @@ qingbird-md-rust 就要 43 秒），空间页会长时间停在骨架屏。这�
 
 ---
 
+## 阶段 15–18：后端优化四件事（2026-10-05 用户提出）
+
+用户提了四件事，**顺序按「先修退化、再做优化、最后做小的」排**，
+每阶段一次提交，出口条件写死：
+
+| 阶段 | 做什么 | 依赖 | 状态 |
+|---|---|---|---|
+| 15 | 拉取/推送日志恢复逐行输出（**功能退化**，不是优化） | 无 | `✅ 已完成` |
+| 16 | 启动秒开：SQLite 缓存 + 只刷当前选中的仓库 | 15 独立 | `- [ ]` |
+| 17 | 第三方仓库「多出来的文件」清理 | 无 | `- [ ]` |
+| 18 | 说明页中英切换闪烁 | 无 | `- [ ]` |
+
+### 阶段 15：日志退化（先做这个的理由）
+
+用户原话：「以前拉取跟新会像用终端拉取那样，会显示每一行的记录的，
+加了什么减了什么，都是一样的，现在的日志没有了，就记录拉取成功，
+拉取了什么，什么发生了变化，**过程一点看不到**」。
+
+**根因不在能力丢失。** 逐行流式回调还完整地留在 `git::run_git_stream`
+（按 `\r` 与 `\n` 都切分，因为 git 的进度就是用 `\r` 刷新同一行）。
+问题出在 `net.rs::progress_hooks` 的 `forward` 闭包：
+
+```rust
+if let Some(mut ev) = parse_progress(line) {   // ← 认不出的行直接丢掉
+```
+
+而 `parse_progress` 用 `strip_prefix` **从行首**匹配 7 个固定前缀。
+git 输出**远端侧**进度时前面带 ` remote: `：
+
+```
+ remote: Compressing objects: 100% (1234/1234), done.
+ remote: Counting objects: 100% (5000/5000)
+ Unpacking objects: 100% (3000/3000), done.
+ Checking out files:  50% (500/1000)
+```
+
+前缀一挡**全部匹配不上**，连同「接收了多少对象、多快」一起被静默扔掉。
+`types.rs::combined()` 组装日志时又按同一份（同样不完整）白名单**滤了第二遍**。
+
+- [x] **15-1** core：`parse_progress` 先剥 `remote: ` 前缀再匹配；补全白名单
+      （`Unpacking objects` / `Checking out files` / `Total` / `Writing` /
+      `Receiving` / `Resolving`…）。**认不出的行不再丢**——照常返回
+      `ProgressEvent`，stage/detail 留空但**带上 git 原文**
+- [x] **15-2** core：`ProgressEvent` 加 `raw: String`（git 原文）与
+      `to_log: bool`（该不该进日志）。**判据是百分比**：`< 100` 的刷新行
+      只更新进度条（否则每秒十几行把日志冲掉），`= 100` 或无百分比的
+      一次性事件行进日志。**分档放 core**——它才懂 git 输出的形状
+- [x] **15-3** core：`combined()` 的 `PROGRESS_NOISE` 白名单同步补全
+      （它漏了 `remote: Compressing` / `Unpacking` / `Checking out`）
+- [x] **15-4** GUI：`ops.rs::on_progress` 优先把 `raw` **原文**推进日志区
+      （现在拼的是 `· 阶段 细节` 的中文化格式），`Stage` 仍只喂进度条
+- [x] **15-5**（附带，验的时候才暴露出来的）**代理竞速时两路输出混作两段**。
+      `race_direct_vs_proxy` 里直连与代理两路走**同一个裸 channel**、
+      接收时不区分来源，于是用户看到同一段 `remote: Enumerating objects…`
+      **原样出现两遍**却没有任何交代。收法：消息带上路标签，每路首次出现时
+      插一条 `—— 直连 ——` / `—— 经代理 127.0.0.1:7897 ——` 分隔行。
+      **不要给 raw 加前缀**——那是 git 的输出、不是我们的话；没配代理时标签
+      写「代理路」，别留个空地址变成无头的一行
+- **出口**：`cargo test -p qingbird-core` 全绿且 `parse_progress` 覆盖上面
+      四行样例；实机拉一次，日志区能看到逐行原文且**不刷屏**；
+      `cargo check --workspace` 零错零警
+
+**出口实测（2026-10-05）**：`cargo check --workspace` 零错零警；core **145** /
+gui 32 全绿（141 → 145，+4 组）。验收环境是 `$TEMP` 下的**本地 bare 仓库
+走 `file://`**（`git clone --depth 1 file:///…` 才真的走 pack 传输——
+本地路径 clone 是硬链接拷贝，一条进度行都不出），**不联网、不碰用户任何真实仓库**。
+点「检测」后日志区：
+
+```
+· 正在连接远端…
+· 直连与已缓存代理并行尝试中…
+—— 直连 ——
+remote: Enumerating objects: 5, done.
+remote: Counting objects: 100% (5/5), done.
+remote: Compressing objects: 100% (4/4), done.
+remote: Total 4 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)
+—— 代理路 ——
+（同上）
+✓ 云端有 1 个新提交，可以拉取
+```
+
+进度刷新行（`2%` / `4%` …）**一条都没出现**（`to_log=false` 滤掉，不刷屏），
+完成行（`100%` / `done.`）全在。拉取那轮还验到 `fatal: Cannot fast-forward…`
+**原样上屏**——这类行旧版是被静默吞掉的。
+顺带钉下一条**用真实 git 输出的 fixture 测试**（`real_clone_output_shape_is_fully_recognised`）：
+实测 104 行里**近 55 行带 ` remote: ` 前缀**、行尾还带 git 用来覆盖同一行的
+**尾随空格**，旧白名单一条都认不出来。
+
+> ⚠️ 另一个坑记在这儿：`shutil.rmtree` 删 git 仓库会 `PermissionError`——
+> **git 的 object 文件是只读的**（`-r--r--r--`），Windows 上要先
+> `os.chmod(p, S_IWRITE)` 再删。以后写任何清理脚本都要处理。
+
+### 阶段 16：启动秒开（SQLite）
+
+**用户拍板上 SQLite**——因为要「记录这个仓库历史、更新了什么」，
+数据从「覆盖写一条」变成**持续追加**，JSON 会越攒越大、那是 SQLite 的主场。
+
+> 最初我建议不上（数据量小、纯读缓存 JSON 5–15ms 就够、加它会引入项目
+> **唯一的 C 依赖**）。用户明确要历史后**结论反转**：那次评估只覆盖了
+> 「读缓存」这一种访问模式，没算上「持续追加的操作历史」。
+
+代价说清：`rusqlite` 开 `bundled` 会静态编 sqlite3.c，干净构建多一步。
+
+| 表 | 用途 | 写法 |
+|---|---|---|
+| `scan_cache` | 启动秒开的扫描结果 | 每仓库一行，**覆盖**写 |
+| `op_history` | 这个仓库被更新过什么 | **追加**，永不覆盖 |
+
+- [ ] **16-1** core 新增 `history.rs`：SQLite 封装 + 建表 + 迁移兜底
+      （库打不开时**降级成"没缓存"而不是崩**——它是加速器不是依赖）
+- [ ] **16-2** README 正文**单独存文本文件，不进库**（大段纯文本进数据库
+      只让读写都变慢）
+- [ ] **16-3** 启动读缓存上屏（页面**立刻稳定**），后台**只刷当前选中的仓库**，
+      其余等你点到哪个刷哪个——用户已拍板这一档
+- [ ] **16-4** 缓存带「扫描于 X 时间」，过期不假装新鲜
+- **出口**：`cargo check --workspace` 零错零警；同一批仓库连续启动两次，
+      第二次**秒开**且内容与第一次一致；删掉库文件后应用照常启动（降级）
+
+### 阶段 17：第三方仓库「多出来的文件」清理
+
+用户原话：第三方不参加推送，但本地会无意间多出文件（AI 分析仓库时留下日志），
+同步就提示本地有变更。**用户拍板删除范围 = 未跟踪的 + 已跟踪但被改的，
+全删回云端状态**；交互 = **逐项勾选、默认全不勾、确认后才删**。
+
+- [ ] **17-1** 数据源现成：`ChangeEntry` **已有 `untracked: bool`**
+      （状态码含 `?`）。缺的只是筛选与一个入口
+- [ ] **17-2** ⚠️ **两类实现不同，界面必须分开标注**：
+      - **未跟踪** → 真删（永久，无法撤销）
+      - **已跟踪但被改 / 被删** → **`git restore` 恢复成云端版本**。
+        **删文件是错的**——git 会记成「本地删除」，仍是本地变更，等于白删
+- [ ] **17-3** 逐项勾选、默认全不勾；已跟踪那一类要写明
+      「将恢复为云端版本，与不可撤销的删除分开列」
+- [ ] **17-4** **只给第三方**（我的仓库不做这个）
+- [ ] **17-5** 复用 13-3 的 `explain_delete_error`（Windows 5/32/145 显式认）
+- **出口**：单测钉住「未跟踪走删除、已跟踪走 restore」的分流；实机在
+      `$TEMP` 合成第三方仓库上验证两类都正确，且**取消后 0 像素差**
+
+### 阶段 18：说明页中英切换闪烁
+
+根因明确：`load_readme_doc` **第一行就** `scanning = true` + `notify()`
+→ 整页塌成骨架屏 → 后台**重读一遍文件** → 再渲染。
+**问题是两份 README 早都在内存里**（`profile.readme_text` + `readme_alt`），
+切换却还要白走一趟后台读盘。
+
+- [ ] **18-1** 目标那份**已在缓存就同步切换**：不置 `scanning`、不碰骨架屏
+- [ ] **18-2** 只有真的没缓存（首次进这个仓库）才走加载态
+- **出口**：往返验证拿**逐像素相同**当判据——中→英→中与初始帧 diff = 0 像素
+
 ## 未决事项
 
 遇到要在这些点上拍板的，写进这里并停下来问，**不要自己选**：
@@ -1958,4 +2106,5 @@ qingbird-md-rust 就要 43 秒），空间页会长时间停在骨架屏。这�
 
 | 2026-10-05 | 12 补 11 + 补测试覆盖 | **为删除旧实现（Q6）铺路**。用户拍板分两轮：先补测试覆盖 + 改 README，下一轮再删。① 查清依赖：`crates/` + `gui/` 里**没有一处引用 `src-tauri` 或 `src/`**，仓库也**没有 `.github`**（没有 CI 靠 Tauri 构建），`tauri.conf.json` 只被它自己用 → 删是安全的。② **README 全错**：第 30/36/42 行还写着 `pnpm tauri dev` / `pnpm tauri build` / `cd src-tauri && cargo test`。改写成 `cargo build --workspace` + `cargo test -p qingbird-{core,gui}`，并补上目录表与"界面怎么验"一节（点名四个脚本）。③ **补 6 组单测覆盖旧测试钉住、且现在仍然归我们管的规则**（gui 19 → **32**）：`bucket_of` 分档优先级（分叉优先于落后/待推/未提交）、`bucket_word` 每一档都有中文说法、`BatchKind::wants` 的 Q3 三档筛选口径（**第三方一律不进推送队列**）、`batch_summary`（**「跳过 0 个」这种废话不出现**，顺序固定在成功之后；`done < total` 报进度，`done == total` 算跑完）、`step_repo_index`（**到头停头不绕回**；没选中时 ↓ 从头 ↑ 从尾）、`batch_line`（没有可跑的仓库时把原因写进标签）。④ **两处顺手收口**：`state.rs::batch_summary` 与 `palette.rs::batch_line` 原来挂在 `Shell` 上得一整个 Shell 才调得了，**抽成自由函数**（这也是它们能单测的前提）；`palette_model` 末尾的 `debug_assert_eq!(acts.len(), groups.len())` **只查了组数对齐，没查组内条目数**——加一个条目忘了配动作，那个断言照样过、⌘K 静默执行错的动作，补了三处 `debug_assert_eq!(items.len(), acts.len())`。⑤ **三键顺序收成一个声明**：`state.rs::SYNC_SLOTS` / `SYNC_SLOT_LABELS`（拉取·推送·检测），同步卡改成读它（`cargo check` 那两条 "never used" 告警就是这么消掉的），`bind_keys` 与同步卡两处留指向它的注释。⑥ `docs/shots/` 只留 `current.png`，删掉 8 张记着已经不存在的旧 React 界面的截图。**没照抄的**：`commands.test.mjs` 的模糊匹配规则（**已经是基座 `CommandState` 的行为**）、`overview.test.mjs` 的 `buildTodo` / `ringGradient` / `countBuckets`（**随改版设计性删掉了**——待处理列表没了、圆环删了）、`hotkeys.test.mjs` 的键位判定（**官方 Action + `bind_keys` 接管了**）——给已经不存在的实现补测试等于测空气。⑦ **抓帧流程一直在写用户的真实 config，本轮查实并堵死**：核对时发现真实 `config.json` 的 mtime 停在 `2026/10/5 1:49:48`——正是上一轮抓帧的时段，且 `inspector_open` 已从 false 被写成 true（`Copy-Item` 保留 mtime，所以副本的时间戳反而成了证据）。根因不是"忘了设 `$env:APPDATA`"这一件事，而是**隔离靠人记得**：`steps.py` 用 `Popen([EXE])` 启动、继承调用方 shell 的环境变量，脚本自身**没有任何隔离入口**；`uia_probe.py` / `a11y_stress.py` 同样只设了 `RUST_BACKTRACE`。修法收进新模块 `scripts/qbguard.py`（**三个脚本共用，不各写一遍**）：`QB_APPDATA` 指向副本时覆盖 `APPDATA`，不设就打醒目警告，收尾再按 `mtime+size+sha256` 指纹核对真实 config 并在不一致时直接报出来。本轮两次抓帧指纹前后一致（`bcbc1ef3…`），确认隔离生效 | ✅ `cargo check --workspace` 零错零警；gui 32 / core 141 全绿；同步卡在隔离环境下抓帧核对：「我的」拉取·推送·检测三键齐全、顺序正确，第三方推送位仍是空格子占位 |
 | 2026-10-05 | 12 补 12 + 删旧实现 | **Q6 第二轮：旧 Tauri 2 + React 实现整体退役删除**（用户批准，同日执行）。① **删**：`src/`（64 文件）、`src-tauri/`（42 文件）、`public/`（3）、`index.html`、`vite.config.ts`、`tsconfig.json` + `tsconfig.node.json`、`package.json` + `pnpm-lock.yaml`（`test:web` 一并退役）、`scripts/gen-icons.mjs`（它调 `@tauri-apps/cli`、产出目标是 `src-tauri/icons/` 与 `src/assets/`，两个都没了才失效），外加三个本地产物 `node_modules/`（**88.8 MB**）、`dist/`、`debug.log`（旧 WebView2 的 crashpad 日志，全是「拒绝访问 0x5」）。跟踪文件 **206 → 90**。② **清单修正一处**：`assets/` 原写着要删，实查里面只有 `icon-source.png`——1024px 的**图标源图**，而 `gui/assets/app-icon.png` 是它的 128px 展开 → **保留**。删了将来改图标就没有源了（gen-icons.mjs 退役后，改图标就是直接替换 `gui/assets/` 下那一张）。③ **删前逐条查引用**，结论是**零代码依赖**：`crates/` + `gui/` 里对旧实现的提及**全在注释里**（`history.rs`「合并提交走 `git diff <hash>^ <hash>`」、`repos.rs`「日期键按本地时区」、`net.rs`「`Channel` 改回调闭包」这类溯源，**留着有价值**，指向的目录没了也不影响读者理解）；`app_assets.rs` 的 `include_bytes!` 指向 `gui/assets/` 而非 `src-tauri/`（当初拷进来就是为了不把构建绑在准备删的目录上）；两个 `Cargo.toml` 都没有 node 依赖、`gui/` 下无 `build.rs`；`Cargo.lock` 里的 `tauri-winrt-notification` 是 `notify-rust` 的传递依赖，与旧实现无关。④ **修掉三处会变错的文档**：`Cargo.toml` 末尾那条「src-tauri 保持独立工作区」、`.gitignore` 的 `src-tauri/target` 与 `src-tauri/gen/schemas`、`.vscode/extensions.json` 推荐的 `tauri-apps.tauri-vscode` 插件。⑤ **AGENTS.md 大改**：「项目说明」从「Tauri 2 + React · 迁移中」改成已换成 GPUI；「目录规则」删掉「src/ 与 src-tauri/src/ 是只读迁移源」；「常用命令」**整节重写**（原来教人 `pnpm install` / `pnpm tauri dev` / `cd src-tauri && cargo test` / `pnpm test:web`——那个目录已经没了）；并**删掉整节「架构要点（旧实现，只读参考）」99 行**。删之前逐条核过它记的结论在新代码里都有**更详细、带代码位置**的版本（`history.rs` 的 `diff_args` 纯函数 + 单测、`repos.rs` 直接让 git `--date=format-local` 算时区、`shell.rs:980` 与 `panels.rs:222` 的「1·2·3 按屏幕位置对位」、`ops.rs:505` 的「遇脏工作区跳过不自动 stash」、`state.rs:789` 的「跳过 0 个不出现」+ 单测），而「三列布局 / minWidth 1080 预算」那类界面规格早已彻底失效——留着一份指向空目录的「只读参考」只会让人白跑一趟。⑥ `docs/UI-DESIGN.md` 里那段阶段 11 的复查台账**没改正文**，只在开头加一句「`src-tauri` 指当时的迁移源，该目录已退役」——结论历史上都是真的，逐条改路径反而容易改错 | ✅ `cargo check --workspace` **零错零警**；core **141** / gui **32** 全绿；`cargo build --workspace` 成功出 exe（63,598,080 字节），**删掉 88.8 MB 依赖后构建不受影响** |
+| 2026-10-05 | 15 + 日志退化 | **拉取/推送日志恢复逐行输出**（用户报的功能退化，不是优化）。① **能力没丢，路由丢了**：`git::run_git_stream` 逐行流式回调（按 `\r` 与 `\n` 都切分）一直都在，但 `net.rs::progress_hooks` 的 forward 是 `if let Some(ev) = parse_progress(line)`——**认不出的行直接丢掉**。而 `parse_progress` 用 `strip_prefix` **从行首**匹配 7 个前缀，git 输出**远端侧**进度时前面带 ` remote: `，前缀一挡**一条都认不出来**。`types.rs::combined()` 组装日志时又按同一份（同样不完整）白名单**滤了第二遍**。实测一次真实 `git clone --progress` 的 104 行里**近 55 行带该前缀**。② `parse_progress` 改为先剥 `remote: ` 再匹配、白名单补全（`Unpacking objects` / `Checking out files` / `Writing` / `Total`…），且**认不出的行不再返回 None**——照常返回、stage/detail 留空但**带上 git 原文**。③ `ProgressEvent` 加 `raw: String` 与 `to_log: bool`。**分档判据是百分比**：`< 100` 的刷新行只喂进度条（`Receiving objects: 45%` 每秒十几条，全进日志会把记录冲掉），`= 100` 或无百分比的一次性事件行进日志。④ GUI `on_progress` **优先上 git 原文**——原来拼的是 `· 接收对象 已传输 1.2 MiB` 这样的**二次转述**，信息在翻译里被磨掉一层。⑤ **顺带修两个只在实机上才暴露的问题**：（a）**代理竞速时两路输出混作两段**——`race_direct_vs_proxy` 让直连与代理走**同一个裸 channel**、接收时不区分来源，用户看到同一段原文**原样出现两遍**却没有任何交代；收法是消息带路标签、每路首次出现时插一条 `—— 直连 ——` 分隔行（**不给 raw 加前缀**：那是 git 的话不是我们的；没配代理时写「代理路」别留空地址）。（b）**克隆对话框靠 `split_once(" · ")` 从展示文本里反解阶段词**——输出换成原文后那个分隔符不存在了，阶段会整个退化成整行；改成 `events: Vec<(String, String)>` 成对存。⑥ 补一个**用真实 git 输出形状的 fixture 测试**（`real_clone_output_shape_is_fully_recognised`），连行尾那些 git 用来覆盖同一行的**尾随空格**一起钉住 | ✅ `cargo check --workspace` 零错零警；core **141 → 145**、gui 32 全绿。实机验收在 `$TEMP` 下自建 **bare 仓库走 `file://`**（`--depth 1` 才真的走 pack 传输——本地路径 clone 是硬链接拷贝，一条进度行都不出），**不联网、不碰用户任何真实仓库**。点「检测」后日志区逐行显示 `remote: …` 原文、两路有分隔标记、**进度刷新行一条都没出现**（不刷屏）、完成行全在；拉取那轮还验到 `fatal: Cannot fast-forward…` **原样上屏**（旧版是被静默吞掉的）。真实 config 指纹抓帧前后一致（`1074690f…`） |
 

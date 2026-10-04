@@ -168,15 +168,28 @@ impl Shell {
             let on_progress: Arc<dyn Fn(&ProgressEvent) + Send + Sync> =
                 Arc::new(move |ev: &ProgressEvent| {
                     if let Ok(mut g) = sink_buf.lock() {
-                        let mut line = format!("· {}", ev.stage);
-                        if !ev.detail.is_empty() {
-                            line.push_str(&format!("  {}", ev.detail));
+                        // **优先上 git 原文**（用户要的是"像终端那样一行行显示"）。
+                        // 原来这里把 stage + detail 拼成 `· 接收对象  已传输 1.2 MiB`
+                        // 这样的**二次转述**——信息在翻译里被磨掉了一层。
+                        // 现在：raw 非空就用原文；空（我们自己发的阶段提示）才退回转述。
+                        if !ev.raw.is_empty() {
+                            if ev.to_log {
+                                g.push(LogEvent::Line(ev.raw.clone()));
+                            }
+                        } else {
+                            let mut line = format!("· {}", ev.stage);
+                            if !ev.detail.is_empty() {
+                                line.push_str(&format!("  {}", ev.detail));
+                            }
+                            g.push(LogEvent::Line(line));
                         }
-                        g.push(LogEvent::Line(line));
-                        g.push(LogEvent::Stage {
-                            stage: ev.stage.clone(),
-                            percent: ev.percent,
-                        });
+                        // 进度条只吃 stage/percent，跟日志是不是原文无关
+                        if !ev.stage.is_empty() || ev.percent.is_some() {
+                            g.push(LogEvent::Stage {
+                                stage: ev.stage.clone(),
+                                percent: ev.percent,
+                            });
+                        }
                     }
                 });
             let r = match op {

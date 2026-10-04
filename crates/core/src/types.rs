@@ -26,6 +26,14 @@ pub struct ProgressEvent {
     pub stage: String,
     pub detail: String,
     pub percent: Option<f32>,
+    /// **git 原文**这一行。日志区用它逐行上屏——用户要的是"像终端那样"，
+    /// 而不是把 git 输出翻译成 `· 阶段 细节` 的二次转述。
+    /// 解析不出来的行 `stage` / `detail` 留空，但 `raw` 一定非空
+    pub raw: String,
+    /// 该不该进日志。**进度刷新行（百分比 < 100）为 false**——
+    /// 那类行每秒十几条，全进日志会把真正的记录冲掉；
+    /// 完成那一条（100%）与无百分比的事件行为 true
+    pub to_log: bool,
 }
 
 /// 拉取成功后的更新内容：新拉下来的提交与文件变更摘要
@@ -93,20 +101,26 @@ impl OpResult {
 
 pub(crate) fn combined(out: &git::GitOutput) -> String {
     // 进度刷新行（\r 重复输出）在进度条里已展示，日志里去掉避免刷屏
-    const PROGRESS_NOISE: &[&str] = &[
-        "Receiving objects",
-        "Resolving deltas",
-        "Updating files",
-        "Counting objects",
-        "Compressing objects",
-        "Enumerating objects",
-        "remote: Enumerating",
-    ];
+    //
+    // **白名单必须与 `net::parse_progress` 那份保持同步**（2026-10-05 修）：
+    // 原来这里只有 7 条且漏了 `remote: Compressing` / `Unpacking` /
+    // `Checking out`，于是"完成"那几行逃过过滤、又没被别处渲染，
+    // 在日志里就成了半截。
+    //
+    // 判据是**百分比 < 100**：完成那一条（100% / done）是要留的，
+    // 它正是"这一步做完了"的记录。两份各写一遍规则迟早漂——
+    // 所以这里认不出的行**一律保留**（宁可多一行，也不要静默吞掉信息）。
     let clean = |text: &str| -> String {
         text.split('\n')
             .filter(|line| {
                 let l = line.trim();
-                !l.is_empty() && !PROGRESS_NOISE.iter().any(|k| l.starts_with(k))
+                if l.is_empty() {
+                    return false;
+                }
+                let body = l.strip_prefix("remote:").map(str::trim_start).unwrap_or(l);
+                !PROGRESS_STAGES
+                    .iter()
+                    .any(|k| body.starts_with(k) && percent_of(body) < 100.0)
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -124,4 +138,28 @@ pub(crate) fn combined(out: &git::GitOutput) -> String {
     }
     s
 }
+
+/// git 进度行的前缀。与 `net::parse_progress` 的那份同源同值。
+const PROGRESS_STAGES: &[&str] = &[
+    "Updating files",
+    "Checking out files",
+    "Unpacking objects",
+    "Counting objects",
+    "Compressing objects",
+    "Enumerating objects",
+    "Receiving objects",
+    "Resolving deltas",
+    "Writing objects",
+];
+
+/// 从进度行里抠出百分比。抠不出（无 `%`）算 100——
+/// **无百分比的行为一次性事件行，不是刷新行**，不该被滤掉。
+fn percent_of(s: &str) -> f32 {
+    let Some(idx) = s.find('%') else { return 100.0 };
+    let Some(start) = s[..idx].rfind(|c: char| !c.is_ascii_digit() && c != '.') else {
+        return 100.0;
+    };
+    s[start..idx].parse().unwrap_or(100.0)
+}
+
 

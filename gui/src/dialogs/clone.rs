@@ -512,7 +512,10 @@ fn clone_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
 /// 后台线程把 `ProgressEvent` 攒在这里，主线程一次性取走。
 #[derive(Default)]
 struct ProgressSink {
-    events: Vec<String>,
+    /// `(阶段, 展示文本)` 成对存。**不要靠 `split_once(" · ")` 从展示
+    /// 文本里反解阶段**——展示文本换成 git 原文之后那个分隔符就不存在了，
+    /// 阶段会整个退化成整行原文（2026-10-05 改输出为原文时踩到）。
+    events: Vec<(String, String)>,
     last: String,
     percent: Option<f32>,
 }
@@ -521,14 +524,19 @@ impl ProgressSink {
     fn push(&mut self, ev: &ProgressEvent) {
         // git 的进度行按 \r 反复刷新同一句（"接收对象 42%" → "43%" → …），
         // 全攒下来能把输出区刷爆。只在**文字真的变了**时记一条
-        let text = if ev.detail.is_empty() {
+        //
+        // **优先用 git 原文**（用户要的是"像终端那样"），raw 为空
+        // ——也就是我们自己发的阶段提示——才退回中文转述。
+        let text = if !ev.raw.is_empty() {
+            ev.raw.clone()
+        } else if ev.detail.is_empty() {
             ev.stage.clone()
         } else {
             format!("{} · {}", ev.stage, ev.detail)
         };
         if text != self.last {
             self.last = text.clone();
-            self.events.push(text);
+            self.events.push((ev.stage.clone(), text));
         }
         if let Some(p) = ev.percent {
             self.percent = Some(p);
@@ -536,14 +544,13 @@ impl ProgressSink {
     }
 
     fn drain_into(&self, d: &mut CloneDialog) {
-        for line in &self.events {
-            // 阶段词取最后一条：它才是"现在在干什么"
-            if let Some((stage, _)) = line.split_once(" · ") {
-                d.stage = stage.to_string();
-            } else {
-                d.stage = line.clone();
+        for (stage, text) in &self.events {
+            // 阶段词取最后一条非空的：它才是"现在在干什么"。
+            // 空 stage = 认不出的原文行，不该把上一次的阶段冲掉
+            if !stage.is_empty() {
+                d.stage = stage.clone();
             }
-            d.output.push(line.clone());
+            d.output.push(text.clone());
         }
         if d.output.len() > OUT_MAX_LINES {
             let drop = d.output.len() - OUT_MAX_LINES;

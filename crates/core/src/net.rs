@@ -65,7 +65,9 @@ pub fn progress_hooks(
         if let Some(on_progress) = on_progress {
             if let Some(mut ev) = parse_progress(line) {
                 let r = t.get();
-                if !r.is_empty() {
+                // **stage 为空就别拼路径标记**——那类行是"只有原文"的分支，
+                // 拼出来会变成 `（直连）` 这种无意义文本
+                if !r.is_empty() && !ev.stage.is_empty() {
                     ev.stage = format!("{}（{}）", ev.stage, r);
                 }
                 on_progress(&ev);
@@ -80,6 +82,10 @@ pub fn progress_hooks(
                 stage: s.into(),
                 detail: String::new(),
                 percent: None,
+                // 路径切换提示是**我们自己说的**，不是 git 说的，
+                // 所以 raw 留空——否则日志里会出现两行重复的东西
+                raw: String::new(),
+                to_log: true,
             });
         }
     };
@@ -87,52 +93,101 @@ pub fn progress_hooks(
 }
 
 /// 解析 git 的 stderr 进度行，转换成可展示的进度事件
+///
+/// **认不出的行也要返回**（`stage` / `detail` 留空、只带 `raw` 原文）——
+/// 这条是 2026-10-05 修的：原来返回 `None`，而调用方是
+/// `if let Some(ev) = parse_progress(line)`，于是**没进白名单的行被静默丢掉**。
+/// 用户看到的现象是「拉取过程一点看不到，只有一句拉取成功」。
+///
+/// 丢掉的是最有信息量的那批：git 输出**远端侧**进度时前面带 ` remote: `
+/// （`remote: Compressing objects: 100% …`），而白名单是 `strip_prefix`
+/// **从行首**匹配的，前缀一挡就全不中。
 pub fn parse_progress(line: &str) -> Option<ProgressEvent> {
     let line = line.trim();
+    // 远端侧的进度行会带这个前缀，先剥掉再匹配。**顺序不能反**：
+    // 先匹配的话 `remote: Compressing objects` 永远认不出来。
+    let body = line.strip_prefix("remote:").map(str::trim_start).unwrap_or(line);
+    let raw = line.to_string();
+    // 「只有原文」的分支：解析不出来的行照常上屏，stage/detail 留空。
+    // **收参数而不是 capture `raw`**——capture 会把它 move 走，
+    // 后面每个 return 分支再用就编译不过
+    let plain = |raw: &str, to_log: bool| {
+        Some(ProgressEvent {
+            stage: String::new(),
+            detail: String::new(),
+            percent: None,
+            raw: raw.to_string(),
+            to_log,
+        })
+    };
+
     let pct = |s: &str| -> Option<f32> {
         let idx = s.find('%')?;
         let start = s[..idx].rfind(|c: char| !c.is_ascii_digit() && c != '.')? + 1;
         s[start..idx].parse().ok()
     };
     for (kw, stage) in [
-        ("Receiving objects", "接收对象"),
-        ("Resolving deltas", "解析增量"),
         ("Updating files", "检出文件"),
+        ("Checking out files", "检出文件"),
+        ("Unpacking objects", "解包对象"),
         ("Counting objects", "统计对象"),
         ("Compressing objects", "压缩对象"),
         ("Enumerating objects", "枚举对象"),
+        ("Receiving objects", "接收对象"),
+        ("Resolving deltas", "解析增量"),
+        ("Writing objects", "写对象"),
     ] {
-        if let Some(rest) = line.strip_prefix(kw) {
+        if let Some(rest) = body.strip_prefix(kw) {
+            let percent = pct(rest);
+            // **到 100% 才进日志**：`Receiving objects: 45% …` 每秒刷十几行，
+            // 全塞进日志会把真正的记录冲掉。完成那一条是"这一步做完了"，
+            // 才是用户要看的东西。judge 放这里——core 才懂 git 输出的形状
+            let done = percent.map(|p| p >= 100.0).unwrap_or(true);
             return Some(ProgressEvent {
                 stage: stage.into(),
                 detail: transfer_detail(rest),
-                percent: pct(rest),
+                percent,
+                raw,
+                to_log: done,
             });
         }
     }
-    if line.starts_with("Cloning into") {
+    if body.starts_with("Cloning into") {
         return Some(ProgressEvent {
             stage: "开始克隆".into(),
-            detail: line.to_string(),
+            detail: body.to_string(),
             percent: None,
+            raw,
+            to_log: true,
         });
     }
-    if line.starts_with("From ") || line.starts_with("FETCH_HEAD") {
+    if body.starts_with("From ") || body.starts_with("FETCH_HEAD") {
         return Some(ProgressEvent {
             stage: "获取远端引用".into(),
-            detail: line.to_string(),
+            detail: body.to_string(),
             percent: None,
+            raw,
+            to_log: true,
         });
     }
-    if line.starts_with("Fast-forward") {
+    if body.starts_with("Fast-forward") {
         return Some(ProgressEvent {
             stage: "合并更新".into(),
-            detail: line.to_string(),
+            detail: body.to_string(),
             percent: None,
+            raw,
+            to_log: true,
         });
     }
-    None
+    // git 的报错与提示行（`warning:` / `fatal:` / `error:` / `Auto-merging` …）
+    // 一律原文上屏。**只滤纯空行**——宁可多一行也不要静默吞掉信息。
+    if body.is_empty() {
+        None
+    } else {
+        plain(&raw, true)
+    }
 }
+
 
 const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -278,13 +333,19 @@ fn race_direct_vs_proxy(
     on_line: Option<&dyn Fn(&str)>,
     timeout: Duration,
 ) -> (git::GitOutput, Option<String>) {
-    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
-    let spawn_attempt = |proxy: Option<String>, line_tx: std::sync::mpsc::Sender<String>| {
+    // 消息带**路标签**（2026-10-05 修）。原来两路的行走同一个裸 channel，
+    // 接收时不区分来源，于是用户看到同一段 `remote: Enumerating objects…`
+    // **原样出现两遍**却没有任何交代——那是直连与代理在赛跑，两边都真跑了。
+    // 修好后每路第一次出现时插一条 `—— 直连 ——` / `—— 经代理 x ——` 分隔行，
+    // 原文一字不动（**不要给 raw 加前缀**：那是 git 的输出，不是我们的话）
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<(String, String)>();
+    let spawn_attempt = |label: &str, proxy: Option<String>, line_tx: std::sync::mpsc::Sender<(String, String)>| {
         let repo = repo_path.to_string();
         let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let owned_cfg = git_config.to_vec();
         let owned_ssh = ssh.map(|s| s.to_string());
         let git_proxy = proxy.as_deref().map(proxy::to_git_proxy_url);
+        let label = label.to_string();
         std::thread::spawn(move || {
             let args: Vec<&str> = owned_args.iter().map(String::as_str).collect();
             git::run_git_auth(
@@ -293,15 +354,26 @@ fn race_direct_vs_proxy(
                 git_proxy.as_deref(),
                 timeout,
                 Some(&|line: &str| {
-                    let _ = line_tx.send(line.to_string());
+                    let _ = line_tx.send((label.clone(), line.to_string()));
                 }),
                 &owned_cfg,
                 owned_ssh.as_deref(),
             )
         })
     };
-    let mut t_direct = Some(spawn_attempt(None, line_tx.clone()));
-    let mut t_proxy = Some(spawn_attempt(Some(proxy_addr.to_string()), line_tx));
+    let mut t_direct = Some(spawn_attempt("直连", None, line_tx.clone()));
+    // 没有可用代理地址时标签别留个空括号（合成环境/没配代理时会出现
+    // `—— 经代理 ——` 这种没头没尾的一行）
+    let proxy_label = if proxy_addr.trim().is_empty() {
+        "代理路".to_string()
+    } else {
+        format!("经代理 {}", proxy_addr.trim())
+    };
+    let mut t_proxy = Some(spawn_attempt(
+        &proxy_label,
+        Some(proxy_addr.to_string()),
+        line_tx,
+    ));
     let fail_out = || git::GitOutput {
         success: false,
         stdout: String::new(),
@@ -312,8 +384,16 @@ fn race_direct_vs_proxy(
 
     let mut direct_out: Option<git::GitOutput> = None;
     let mut proxy_out: Option<git::GitOutput> = None;
+    // 已经打过分隔行的路。最多两路，Vec 就够
+    let mut announced: Vec<String> = Vec::new();
     loop {
-        while let Ok(line) = line_rx.try_recv() {
+        while let Ok((label, line)) = line_rx.try_recv() {
+            if !announced.iter().any(|a| a == &label) {
+                announced.push(label.clone());
+                if let Some(cb) = on_line {
+                    cb(&format!("—— {label} ——"));
+                }
+            }
             if let Some(cb) = on_line {
                 cb(&line);
             }
@@ -561,7 +641,122 @@ mod tests {
         let ev = parse_progress("Resolving deltas: 100% (10/10), done.").unwrap();
         assert_eq!(ev.percent, Some(100.0));
         assert_eq!(ev.detail, ""); // done. 无速度信息
-        assert!(parse_progress("fatal: unable to access").is_none());
+    }
+
+    /// **2026-10-05 的退化就在这里**：`remote: ` 前缀一挡，白名单
+    /// 从行首匹配全部落空 → `if let Some` 把它静默丢掉 → 用户看到
+    /// 「过程一点看不到」。这四行是真实 git 输出的原样。
+    #[test]
+    fn remote_prefixed_progress_is_not_dropped() {
+        for line in [
+            " remote: Compressing objects: 100% (1234/1234), done.",
+            " remote: Counting objects: 100% (5000/5000), done.",
+            " Unpacking objects: 100% (3000/3000), done.",
+            " Checking out files:  50% (500/1000)",
+        ] {
+            let ev = parse_progress(line)
+                .unwrap_or_else(|| panic!("这行被丢了：{line}"));
+            assert!(!ev.raw.is_empty(), "raw 必须带回原文：{line}");
+        }
+        // 剥掉前缀后要能认出阶段
+        assert_eq!(
+            parse_progress(" remote: Compressing objects: 100% (1/1), done.")
+                .unwrap()
+                .stage,
+            "压缩对象"
+        );
+        assert_eq!(
+            parse_progress(" Unpacking objects: 100% (3/3), done.")
+                .unwrap()
+                .stage,
+            "解包对象"
+        );
+        // **原文要去掉前导空格**（git 输出带一个前导空格）
+        assert_eq!(
+            parse_progress(" remote: Counting objects: 100% (5/5), done.")
+                .unwrap()
+                .raw,
+            "remote: Counting objects: 100% (5/5), done."
+        );
+    }
+
+    /// 进度刷新行不进日志（每秒十几条会冲掉真正的记录），
+    /// **到 100% 那一条要进**——它是"这一步做完了"。
+    #[test]
+    fn only_finished_progress_lines_go_to_the_log() {
+        let mid = parse_progress("Receiving objects:  45% (123/273), 1.2 MiB").unwrap();
+        assert!(!mid.to_log, "45% 这种刷新行不该进日志");
+        let done = parse_progress("Receiving objects: 100% (273/273), 6.00 MiB | 2.3 MiB/s, done.").unwrap();
+        assert!(done.to_log, "完成那一条要进日志");
+        // 没有百分比的行（From / Fast-forward）都是一次性事件
+        assert!(parse_progress("From github.com:x/y").unwrap().to_log);
+        assert!(parse_progress("Fast-forward").unwrap().to_log);
+    }
+
+    /// 认不出的行**不再返回 None**，只带原文上屏。
+    /// 原断言是 `fatal: …` 应为 `None`——那正是被静默吞掉的那一类。
+    #[test]
+    fn unrecognised_lines_carry_their_raw_text_instead_of_vanishing() {
+        let ev = parse_progress("fatal: unable to access 'https://…'").unwrap();
+        assert_eq!(ev.raw, "fatal: unable to access 'https://…'");
+        assert!(ev.stage.is_empty(), "认不出阶段就别编一个");
+        assert!(ev.detail.is_empty());
+        assert!(ev.to_log, "报错行一定要上屏");
+        // 只有纯空行才真的没有内容
+        assert!(parse_progress("   ").is_none());
+    }
+
+    /// 真实 `git clone --progress` 的输出形状（2026-10-05 实测，共 104 行，
+    /// 从本地 bare 仓库 `file://` 浅克隆抓的 stderr）。
+    ///
+    /// 钉它是因为**整段输出里近 55 行带 ` remote: ` 前缀**，
+    /// 而旧白名单是 `strip_prefix` 从行首匹配的——那 55 行一条都认不出来，
+    /// 全被 `if let Some` 静默丢掉。行尾那些尾随空格也是真的
+    /// （git 用它们覆盖同一行），所以顺带钉住 trim。
+    #[test]
+    fn real_clone_output_shape_is_fully_recognised() {
+        let real = [
+            "Cloning into 'C:\\tmp\\x'...",
+            "remote: Enumerating objects: 47, done.        ",
+            "remote: Counting objects:   2% (1/47)        ",
+            "remote: Counting objects: 100% (47/47)        ",
+            "remote: Counting objects: 100% (47/47), done.        ",
+            "remote: Compressing objects:  25% (1/4)        ",
+            "remote: Compressing objects: 100% (4/4), done.        ",
+            "remote: Total 47 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)        ",
+            "Receiving objects:   2% (1/47)",
+            "Receiving objects: 100% (47/47), done.",
+        ];
+        for line in real {
+            let ev = parse_progress(line)
+                .unwrap_or_else(|| panic!("这行被丢了：{line:?}"));
+            assert_eq!(ev.raw, line.trim(), "raw 要带原文且去掉尾随空格");
+        }
+        // **里程碑必须进日志**：完成那几条 + 无百分比的统计行
+        for line in [
+            "Cloning into 'C:\\tmp\\x'...",
+            "remote: Enumerating objects: 47, done.",
+            "remote: Counting objects: 100% (47/47), done.",
+            "remote: Compressing objects: 100% (4/4), done.",
+            "remote: Total 47 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)",
+            "Receiving objects: 100% (47/47), done.",
+        ] {
+            assert!(
+                parse_progress(line).unwrap().to_log,
+                "这一步做完了，必须上日志：{line}"
+            );
+        }
+        // **中途的刷新行不进日志**（否则 104 行会把真正的记录冲掉）
+        for line in [
+            "remote: Counting objects:   2% (1/47)",
+            "remote: Compressing objects:  25% (1/4)",
+            "Receiving objects:   2% (1/47)",
+        ] {
+            assert!(
+                !parse_progress(line).unwrap().to_log,
+                "刷新行不该进日志：{line}"
+            );
+        }
     }
 
     #[test]

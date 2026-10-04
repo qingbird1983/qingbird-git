@@ -59,6 +59,9 @@ pub fn do_check(path: &str, on_progress: Option<&dyn Fn(&ProgressEvent)>) -> OpR
             stage: "正在连接远端…".into(),
             detail: String::new(),
             percent: None,
+            // 这是我们自己说的提示，不是 git 输出，所以 raw 留空
+            raw: String::new(),
+            to_log: true,
         });
     }
     let (_tag, forward, stage) = progress_hooks(on_progress);
