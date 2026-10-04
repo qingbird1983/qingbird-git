@@ -271,14 +271,16 @@ impl Shell {
         let mut keys = h_flex().gap(px(GAP));
         keys = keys.child(key(
             "sync-pull",
-            "拉取",
+            // 文案与 `Op` 都取自 `state.rs::SYNC_SLOTS` / `SYNC_SLOT_LABELS`，
+            // 与 `shell.rs::bind_keys` 绑的 `1` `2` `3` 同序——**改一处必须改三处**
+            SYNC_SLOT_LABELS[0],
             pull_hot,
             if status.behind > 0 {
                 format!("云端有 {} 个新提交，点这里接上来", status.behind)
             } else {
                 "拉取云端更新（--ff-only，不会改写本地历史）".into()
             },
-            Op::Pull,
+            SYNC_SLOTS[0],
             &SyncPull,
             lg,
             cx,
@@ -289,14 +291,14 @@ impl Shell {
         } else {
             keys = keys.child(key(
                 "sync-push",
-                "推送",
+                SYNC_SLOT_LABELS[1],
                 push_hot,
                 if status.ahead > 0 {
                     format!("本地有 {} 个提交没推上去", status.ahead)
                 } else {
                     "把本地提交推到云端".into()
                 },
-                Op::Push,
+                SYNC_SLOTS[1],
                 &SyncPush,
                 lg,
                 cx,
@@ -304,10 +306,10 @@ impl Shell {
         }
         keys = keys.child(key(
             "sync-check",
-            "检测",
+            SYNC_SLOT_LABELS[2],
             false,
             "只看云端有没有更新，不动本地".into(),
-            Op::Check,
+            SYNC_SLOTS[2],
             &SyncCheck,
             lg,
             cx,

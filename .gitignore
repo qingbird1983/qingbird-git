@@ -31,3 +31,7 @@ target
 # agent 工具状态目录（hook 快照 / 工具自建记忆），不是项目源码
 .mimosa/
 .workbuddy/
+
+# scripts/ 下验证脚本（steps.py / frame.py 等）被导入时产生的字节码
+__pycache__/
+*.pyc

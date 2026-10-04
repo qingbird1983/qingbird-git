@@ -885,6 +885,10 @@ impl Shell {
             KeyBinding::new("ctrl-.", StopOp, None),
             KeyBinding::new("ctrl-k", OpenPalette, None),
             KeyBinding::new("ctrl-t", OpenTerminal, None),
+            // ⚠️ **顺序即语义**：`1` `2` `3` 必须与详情页同步卡从左到右同序。
+            // 那个顺序声明在 `state.rs::SYNC_SLOTS`（连同文案一起）——
+            // 改键位要三处一起改：这里、那边的顺序、侧栏 / 状态条的文案。
+            // `shell.rs` 的单测 `the_three_number_keys_match_the_sync_card_order` 钉住这个序
             KeyBinding::new("1", SyncPull, None),
             KeyBinding::new("2", SyncPush, None),
             KeyBinding::new("3", SyncCheck, None),
@@ -1078,18 +1082,10 @@ impl Shell {
             .selected
             .as_deref()
             .and_then(|p| list.iter().position(|x| x == p));
-        // 选中的不在候选集里（刚切组还没落选中、或刚进总览）时，
-        // ↓ 从头起步、↑ 从尾起步——否则第一次按会跳到列表中间
-        let next = match cur {
-            Some(ix) => {
-                let n = list.len() as i32;
-                (ix as i32 + delta).clamp(0, n - 1) as usize
-            }
-            None if delta > 0 => 0,
-            None => list.len() - 1,
-        };
+        let next = step_repo_index(cur, delta, list.len());
         self.reveal_repo(list[next].clone(), window, cx);
     }
+
 
     /// `Esc`。**只收本壳自己画的那一样**——侧栏筛选框。
     /// 对话框 / Sheet / 右键菜单的 Esc 都被官方那几层先吃掉了，
@@ -1413,5 +1409,60 @@ impl Shell {
                 }
             }))
             .into_any_element()
+    }
+}
+
+/// `↑↓` 切仓库时下一步落在第几项。
+///
+/// **到头就停，不绕回**——列表首尾相接会让用户按到底之后突然跳回第一个，
+/// 在"我正在往下翻仓库"这件事上是最反直觉的一种行为。
+///
+/// `cur = None`（选中的不在候选集里：刚切组还没落选中、或刚进总览）时
+/// **↓ 从头、↑ 从尾**。⚠️ 旧 React 版这里 ↑ 也是从头，于是第一次按 `↑`
+/// 会跳到列表中间；那是**故意改的**，别改回去。
+///
+/// 调用方保证 `total > 0`（`move_repo` 里先判了 `list.is_empty()`）
+fn step_repo_index(cur: Option<usize>, delta: i32, total: usize) -> usize {
+    match cur {
+        Some(ix) => (ix as i32 + delta).clamp(0, total as i32 - 1) as usize,
+        None if delta > 0 => 0,
+        None => total - 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stepping_stops_at_the_ends_instead_of_wrapping() {
+        assert_eq!(step_repo_index(Some(0), -1, 5), 0, "已在顶部再按上，停在顶部");
+        assert_eq!(step_repo_index(Some(4), 1, 5), 4, "已在底部再按下，停在底部");
+        assert_eq!(step_repo_index(Some(1), 1, 5), 2);
+        assert_eq!(step_repo_index(Some(1), -1, 5), 0);
+    }
+
+    /// 候选集里没有选中项时，**方向决定去哪一端**。旧 React 版 ↑ 也从头，
+    /// 第一次按 ↑ 会落到列表中间——那条已经被有意改掉了
+    #[test]
+    fn with_nothing_selected_the_direction_picks_the_end() {
+        assert_eq!(step_repo_index(None, 1, 3), 0, "没选中时向下 → 第一项");
+        assert_eq!(step_repo_index(None, -1, 3), 2, "没选中时向上 → 最后一项");
+    }
+
+    #[test]
+    fn a_single_row_list_never_moves() {
+        assert_eq!(step_repo_index(Some(0), 1, 1), 0);
+        assert_eq!(step_repo_index(Some(0), -1, 1), 0);
+    }
+
+    /// 键位与语义不许错位：`1/2/3` 必须是**拉取 / 推送 / 检测**，
+    /// 且与详情页同步卡从左到右同序（设计 6.1 把三键定成"按位置记忆"）。
+    /// 错位了用户按 `2` 却跑成检测，而界面上没有任何东西会告诉他
+    #[test]
+    fn the_three_number_keys_match_the_sync_card_order() {
+        assert_eq!(SYNC_SLOTS, [Op::Pull, Op::Push, Op::Check]);
+        assert_eq!(SYNC_SLOTS.len(), SYNC_SLOT_LABELS.len());
+        assert_eq!(SYNC_SLOT_LABELS, ["拉取", "推送", "检测"]);
     }
 }

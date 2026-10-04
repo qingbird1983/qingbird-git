@@ -493,32 +493,26 @@ impl Shell {
             );
             cur_acts.push(PaletteAction::EditCmds);
         }
+        debug_assert_eq!(cur_items.len(), cur_acts.len());
         groups.push(CommandGroup::new().label("当前仓库").items(cur_items));
         acts.push(cur_acts);
         debug_assert_eq!(groups.len(), G_BATCH);
-
         // ---- 批量同步（Q3：固定三条，按分档自动筛） ----
         let busy = self.batch.as_ref().is_some_and(|b| b.running);
         let mut items = Vec::new();
         let mut a_batch = Vec::new();
         for kind in [BatchKind::Pull, BatchKind::Push, BatchKind::Check] {
             let n = self.batch_targets(kind).len();
-            // 没东西可跑时把个数写进标签并置灰。用户看到的不是"点了没反应"，
-            // 而是"现在没有落后的仓库"——这本身就是要报的信息
-            let label = if n == 0 {
-                format!("{}（没有可跑的仓库）", kind.verb())
-            } else {
-                format!("{} · {} 个仓库", kind.verb(), n)
-            };
             items.push(
                 CommandItem::new()
-                    .label(label)
+                    .label(batch_line(kind, n))
                     .icon(icon_sm(batch_icon(kind)).text_color(tier3(t)))
                     .keywords(kind.keywords().iter().copied())
                     .disabled(n == 0 || busy),
             );
             a_batch.push(PaletteAction::Batch(kind));
         }
+        debug_assert_eq!(items.len(), a_batch.len(), "批量组：条目与动作必须逐条对应");
         groups.push(CommandGroup::new().label("批量同步").items(items));
         acts.push(a_batch);
         debug_assert_eq!(groups.len(), G_VIEW);
@@ -570,12 +564,24 @@ impl Shell {
             items.push(CommandItem::new().label("还没有仓库").disabled(true));
             a_repos.push(PaletteAction::Rescan);
         }
+        debug_assert_eq!(items.len(), a_repos.len());
         groups.push(CommandGroup::new().label("切到仓库").items(items));
         acts.push(a_repos);
 
         debug_assert_eq!(acts.len(), groups.len());
         self.palette_actions = acts;
         groups
+    }
+}
+
+/// 批量那一行的标签。**没东西可跑时把这件事写进标签**——置灰的按钮配一句
+/// 「没有可跑的仓库」，用户看到的是"现在没有落后的仓库"而不是"点了没反应"。
+/// 抽成自由函数是为了能单测：这段文案挂在 `Shell` 上时得一整个 Shell 才调得了
+fn batch_line(kind: BatchKind, n: usize) -> String {
+    if n == 0 {
+        format!("{}（没有可跑的仓库）", kind.verb())
+    } else {
+        format!("{} · {n} 个仓库", kind.verb())
     }
 }
 
@@ -621,5 +627,42 @@ fn batch_icon(kind: BatchKind) -> AssetIcon {
 fn notify_os(r: Result<(), String>, window: &mut Window, cx: &mut App) {
     if let Err(e) = r {
         window.push_notification(e, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 没有可跑的仓库时**把这件事写进标签**。这是用户唯一能看到的解释——
+    /// 一颗灰着的键什么都不说，读起来就是"坏了"
+    #[test]
+    fn an_empty_batch_says_why_it_is_disabled() {
+        assert_eq!(
+            batch_line(BatchKind::Pull, 0),
+            "拉取全部（没有可跑的仓库）"
+        );
+        assert_eq!(
+            batch_line(BatchKind::Push, 0),
+            "推送全部（没有可跑的仓库）"
+        );
+    }
+
+    /// 有东西可跑时把个数写进去：点之前就知道会动几个仓库
+    #[test]
+    fn a_non_empty_batch_carries_its_count() {
+        assert_eq!(batch_line(BatchKind::Pull, 3), "拉取全部 · 3 个仓库");
+        assert_eq!(batch_line(BatchKind::Check, 1), "检测全部 · 1 个仓库");
+    }
+
+    /// 三档各有一颗键，顺序固定（用户是按位置记的）
+    #[test]
+    fn the_three_batch_kinds_keep_a_fixed_order() {
+        let ks = [BatchKind::Pull, BatchKind::Push, BatchKind::Check];
+        let lines: Vec<String> = ks.iter().map(|k| batch_line(*k, 1)).collect();
+        assert_eq!(
+            lines,
+            vec!["拉取全部 · 1 个仓库", "推送全部 · 1 个仓库", "检测全部 · 1 个仓库"]
+        );
     }
 }

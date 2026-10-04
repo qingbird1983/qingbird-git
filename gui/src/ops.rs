@@ -666,18 +666,7 @@ impl Shell {
     /// 完整结论在 `app_log` 与跑完时的通知里
     pub(crate) fn batch_note(&self) -> Option<String> {
         self.batch.as_ref().map(|b| {
-            if b.running {
-                format!("{} · {}/{}", b.kind.label(), b.done, b.paths.len())
-            } else {
-                let mut s = format!("{} · {} 成功", b.kind.label(), b.ok);
-                if b.skipped > 0 {
-                    s.push_str(&format!(" · {} 跳过", b.skipped));
-                }
-                if b.failed > 0 {
-                    s.push_str(&format!(" · {} 失败", b.failed));
-                }
-                s
-            }
+            batch_summary(b.kind, b.done, b.paths.len(), b.ok, b.skipped, b.failed)
         })
     }
 }

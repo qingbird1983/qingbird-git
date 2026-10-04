@@ -55,8 +55,23 @@ impl RepoView {
     }
 }
 
+/// 三键的顺序：**拉取 · 推送 · 检测**。
+///
+/// 这是一个**跨三处**的不变量：详情页同步卡从左到右是这个序（设计 6.1 把
+/// 三键定成"按位置记忆"）、`shell.rs::bind_keys` 绑的 `1` `2` `3` 是这个序、
+/// 侧栏与状态条的文案也按它。**错位了用户按 `2` 却跑成检测，而界面上
+/// 没有任何东西会告诉他**。
+///
+/// `bind_keys` 那边读不了这个常量（`KeyBinding::new` 要的是具体 Action
+/// 类型，没法从数组里造），所以那处与同步卡都留了指向本行的注释——
+/// 改键位要三处一起改，`shell.rs` 的单测 `the_three_number_keys_match_the_sync_card_order` 钉住这个序
+pub(crate) const SYNC_SLOTS: [Op; 3] = [Op::Pull, Op::Push, Op::Check];
+
+/// 三键各自的中文说法。**与 `SYNC_SLOTS` 同序**
+pub(crate) const SYNC_SLOT_LABELS: [&str; 3] = ["拉取", "推送", "检测"];
+
 /// 输出块里正在跑的操作类别
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Op {
     Cmd(Slot),
     Pull,
@@ -771,6 +786,29 @@ impl BatchKind {
     }
 }
 
+/// 批量跑完（或中途）的一句话。**抽成自由函数**是为了能单测——它挂在
+/// `Shell` 上时要一整个 Shell 才能调，而这段文案的规则恰恰最容易漂：
+/// 「跳过 0 个」这种废话一旦漏进去就再也看不出来了
+///
+/// 规则：**跳过 / 失败为 0 时那一段整个不出现**（旧 React 版就钉过这条，
+/// `pnpm test:web` 里的「不写『跳过 0 个』这种废话」）。顺序固定在成功之后。
+pub(crate) fn batch_summary(kind: BatchKind, done: usize, total: usize, ok: usize, skipped: usize, failed: usize) -> String {
+    if done < total {
+        return format!(
+            "{} · {done}/{total}",
+            kind.label()
+        );
+    }
+    let mut s = format!("{} · {ok} 成功", kind.label());
+    if skipped > 0 {
+        s.push_str(&format!(" · {skipped} 跳过"));
+    }
+    if failed > 0 {
+        s.push_str(&format!(" · {failed} 失败"));
+    }
+    s
+}
+
 /// 批量同步的进度与结论。入口在 ⌘K（Q3），**界面上的复选框与批量条在阶段 6 已删**。
 ///
 /// 汇总写进 `Shell::app_log`（全局槽）而不是某个仓库的日志：这一批横跨多个
@@ -795,7 +833,7 @@ pub(crate) const PROFILE_ACTIVITY_DAYS: u32 = 30;
 
 /// 仓库在侧栏的状态口径：分叉 > 落后 > 领先 > 脏 > 已同步。
 /// 与后端 `ForkInfo` 一致（ahead>0 && behind>0 就是分叉），不另立标准。
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Bucket {
     Synced,
     Dirty,
@@ -903,3 +941,121 @@ pub(crate) static EMPTY_VIEW: RepoView = RepoView {
         install_cmd: String::new(),
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn st(is_repo: bool, ahead: u32, behind: u32, dirty: bool) -> RepoStatus {
+        RepoStatus {
+            is_repo,
+            branch: "main".into(),
+            ahead,
+            behind,
+            dirty,
+            has_upstream: true,
+            upstream: String::new(),
+            remote_url: String::new(),
+        }
+    }
+
+    /// 分档优先级是**一条链**，顺序错了会静默归错档：
+    /// `ahead>0 && behind>0` 必须先判成「已分叉」，不能拆成待推 + 落后两件事
+    /// （分叉 `--ff-only` 拉不下来，是唯一不能一键解决的那一档）
+    #[test]
+    fn bucket_priority_puts_fork_first_then_dirty_last() {
+        assert_eq!(bucket_of(&st(false, 0, 0, false)), Bucket::Unknown, "没扫过 / 不是仓库");
+        assert_eq!(bucket_of(&st(true, 0, 0, true)), Bucket::Dirty, "有未提交");
+        assert_eq!(bucket_of(&st(true, 0, 0, false)), Bucket::Synced);
+        assert_eq!(bucket_of(&st(true, 2, 0, false)), Bucket::Ahead);
+        assert_eq!(bucket_of(&st(true, 0, 3, false)), Bucket::Behind);
+        assert_eq!(
+            bucket_of(&st(true, 2, 3, true)),
+            Bucket::Forked,
+            "分叉优先于落后 / 待推 / 未提交——它是唯一不能一键解决的那档"
+        );
+    }
+
+    /// 每一档都要有中文说法：侧栏徽标、⌘K 状态点、统计卡都从这里取，
+    /// 空串会让某几处画出一个没有文字的徽标
+    #[test]
+    fn every_bucket_has_a_chinese_word() {
+        for b in [
+            Bucket::Synced,
+            Bucket::Dirty,
+            Bucket::Ahead,
+            Bucket::Behind,
+            Bucket::Forked,
+            Bucket::Unknown,
+        ] {
+            assert!(!bucket_word(b).is_empty(), "{:?} 缺标签", b);
+        }
+    }
+
+    /// Q3 拍板的筛选口径（2026-10-03）。**第三方一律不进推送队列**——
+    /// 推送会改别人的仓库，这是设计 3.5 的硬边界
+    #[test]
+    fn batch_filter_follows_the_three_tiers_q3_decided() {
+        let clean = st(true, 0, 0, false);
+        let ahead = st(true, 2, 0, false);
+        let behind = st(true, 0, 3, false);
+        // 落后：拉
+        assert!(BatchKind::Pull.wants(false, &behind));
+        // 待推：推
+        assert!(BatchKind::Push.wants(false, &ahead));
+        // 干净的：两条都不进——按钮上会写「没有可跑的仓库」而不是点了没反应
+        assert!(!BatchKind::Pull.wants(false, &clean));
+        assert!(!BatchKind::Push.wants(false, &clean));
+        // 检测：全部都进，它不改任何东西
+        assert!(BatchKind::Check.wants(false, &clean));
+        assert!(BatchKind::Check.wants(true, &clean));
+        // **第三方不进推送**
+        assert!(!BatchKind::Push.wants(true, &ahead), "第三方推送是越界");
+        // 第三方该拉还是要拉
+        assert!(BatchKind::Pull.wants(true, &behind));
+    }
+
+    /// 每一档的两种句式都不能为空：⌘K 用 `verb`（「拉取全部」），
+    /// 状态条与对话框用 `label`（「批量拉取」）
+    #[test]
+    fn batch_kinds_have_both_sentences() {
+        for k in [BatchKind::Pull, BatchKind::Push, BatchKind::Check] {
+            assert!(!k.label().is_empty() && !k.verb().is_empty());
+            assert!(!k.keywords().is_empty());
+        }
+    }
+
+    /// 「跳过 0 个」这种废话一旦漏进去就再也看不出来——所以钉住
+    #[test]
+    fn batch_summary_omits_the_zero_parts() {
+        assert_eq!(
+            batch_summary(BatchKind::Pull, 3, 3, 3, 0, 0),
+            "批量拉取 · 3 成功"
+        );
+        assert_eq!(
+            batch_summary(BatchKind::Push, 2, 2, 1, 1, 0),
+            "批量推送 · 1 成功 · 1 跳过",
+            "顺序固定在成功之后"
+        );
+        assert_eq!(
+            batch_summary(BatchKind::Check, 4, 4, 1, 0, 3),
+            "批量检测 · 1 成功 · 3 失败"
+        );
+    }
+
+    /// 跑一半停下来要说清跑到哪、还剩几个没动；
+    /// **停在最后一个上算跑完了**，不报「0 个没动」
+    #[test]
+    fn batch_summary_distinguishes_stopped_from_finished() {
+        assert_eq!(
+            batch_summary(BatchKind::Pull, 2, 5, 2, 0, 1),
+            "批量拉取 · 2/5",
+            "还在跑 / 被停：报进度"
+        );
+        assert_eq!(
+            batch_summary(BatchKind::Push, 2, 2, 2, 0, 0),
+            "批量推送 · 2 成功",
+            "done == total 就是跑完了，哪怕 running 是 false"
+        );
+    }
+}

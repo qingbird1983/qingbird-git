@@ -288,6 +288,14 @@ Rust 快速检查：`cd src-tauri && cargo check`
   没有一条是 `cargo check` 或单测能判的。落法见路线表 D48。三条纪律：
   ① **临时描边核完当轮删掉**；② **验第三方屏要把 config 拷到 `$TEMP` 下、
   用 `$env:APPDATA` 指向副本启动**，不许动用户自己的配置；
+  ⚠️ **但光在 shell 里设 `$env:APPDATA` 是不够的**——2026-10-05 实锤：
+  真实 config 的 `inspector_open` 被抓帧进程从 false 写成了 true
+  （`Copy-Item` 保留 mtime，副本的时间戳反而成了证据）。根因是
+  `steps.py` 靠 `Popen` 继承 shell 的环境变量、**脚本自身没有隔离入口**，
+  于是"记得设"这种约定迟早会漏。**现在一律设 `$env:QB_APPDATA` 指向副本**：
+  `scripts/qbguard.py` 会覆盖 `APPDATA`、不设就打警告、收尾再按
+  `mtime+size+sha256` 核对真实 config 并在不一致时报警（`steps.py` /
+  `uia_probe.py` / `a11y_stress.py` 都走它，**别再各写一遍**）；
   ③ **窗口未获焦时第一击只用于激活窗口**，脚本要补一次空点击，
   否则"点了没反应"会被误判成功能坏了。
 - **抓帧只证明"渲染出来了"，证明不了"点得动"**——这两道关要分开过。

@@ -9,6 +9,10 @@
   wait:<秒>        只等
 
 用法：python scripts/steps.py "nav:105" "row:121,120" "wait:2" "tab:474" "wait:2" "shot:qb_a"
+
+**先设 QB_APPDATA 指向 $TEMP 下的配置副本**，否则跑的是用户真实配置、会把
+用户的设置写掉（脚本收尾会核对真实配置的指纹并在不一致时报警）：
+  $env:QB_APPDATA = "$env:TEMP\\qbapp"
 """
 
 import ctypes
@@ -19,6 +23,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import qbguard  # noqa: E402
 import shoot  # noqa: E402
 
 user32 = ctypes.windll.user32
@@ -130,10 +135,15 @@ def run_step(hwnd, step):
 def main():
     steps = sys.argv[1:]
     err = os.path.join(os.environ["TEMP"], "qb_steps_err.txt")
-    subprocess.run(["taskkill", "/F", "/IM", "qingbird-git.exe"], capture_output=True)
+
+    before = qbguard.real_cfg_fp()
+    env = qbguard.launch_env()
+    subprocess.run(["taskkill", "/F", "/IM", "qingbird-git.exe"],
+                   capture_output=True)
     time.sleep(0.8)
     fh = open(err, "wb")
-    proc = subprocess.Popen([EXE], cwd=REPO, stdout=subprocess.DEVNULL, stderr=fh)
+    proc = subprocess.Popen([EXE], cwd=REPO, env=env,
+                            stdout=subprocess.DEVNULL, stderr=fh)
     hwnd = find_window(proc.pid)
     if not hwnd:
         print("NO WINDOW")
@@ -155,6 +165,8 @@ def main():
                 print("--- stderr ---")
                 print(f.read()[:3000])
         proc.kill()
+        time.sleep(0.5)
+        qbguard.check_real_cfg(before)
     return 0
 
 

@@ -22,6 +22,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import qbguard  # noqa: E402
+
 user32 = ctypes.windll.user32
 
 REPO = r"F:\AIwork\qingbird-git"
@@ -92,7 +95,8 @@ def main():
     if os.path.exists(ERR):
         os.remove(ERR)
 
-    env = dict(os.environ)
+    before = qbguard.real_cfg_fp()
+    env = qbguard.launch_env()
     env["RUST_BACKTRACE"] = "full"
     err = open(ERR, "wb")
     proc = subprocess.Popen(
@@ -146,6 +150,8 @@ def main():
 
     if proc.poll() is None:
         proc.kill()
+    time.sleep(0.5)
+    qbguard.check_real_cfg(before)
     return 0
 
 
