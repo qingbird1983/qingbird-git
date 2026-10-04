@@ -23,9 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 
-# Rust / Tauri build output
-src-tauri/target
-src-tauri/gen/schemas
+# Rust build output
 target
 
 # agent 工具状态目录（hook 快照 / 工具自建记忆），不是项目源码

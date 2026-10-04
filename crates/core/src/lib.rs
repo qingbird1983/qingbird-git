@@ -1,7 +1,7 @@
 //! qingbird-git 纯逻辑后端。
 //!
-//! 从 src-tauri 平移而来，去 Tauri 依赖：gui（gpui-kit）与 src-tauri 过渡期共用。
-//! 迁移完成后 src-tauri 整体退役，本 crate 成为唯一的业务层。
+//! 原本与旧 Tauri 版平移共存（两套界面共用同一份 config），2026-10-05 起
+//! 旧实现已整体退役，本 crate 成为唯一的业务层。
 //!
 //! 约定：这一层不碰任何 GUI 框架，也不碰 IPC。
 //! 流式输出这类要回调界面的地方一律用闭包（`run_cmd::run_repo_cmd`），

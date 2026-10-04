@@ -13,10 +13,10 @@
 //! → 拿到字节 → 解码 → 渲染。多拖一个图像解码依赖进来换一张图，不划算。
 //!
 //! **为什么图要拷进 `gui/assets/` 而不是 `include_bytes!` 直接指
-//! `src-tauri/icons/`。** `src-tauri/` 是迁移源，早晚整体退役（路线表 Q6）。
+//! `src-tauri/icons/`。** `src-tauri/` 当时是迁移源，早晚要整体退役（路线表 Q6）。
 //! 让新 GUI 的构建去 `include_bytes!` 一个"准备删掉的目录"里的文件，
 //! 等于把退役日期焊死在构建脚本上。这张图在这里只有一份真源
-//! （`src-tauri/icons/icon.png` → `tauri icon` 展开出的 128px 那张）。
+//! （源图 `assets/icon-source.png` 展开出的 128px 那张）。
 
 use gpui_kit::assets::AllAssets;
 use gpui_kit::{AssetSource, Result, SharedString};
