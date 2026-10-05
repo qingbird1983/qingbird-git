@@ -819,6 +819,11 @@ impl Shell {
             // 收起的右栏只有仓库头那颗按钮能叫回来，默认为收等于新装用户看不到这列
             inspector_open: saved.inspector_open,
             inspector_w: qingbird_core::store::clamp_inspector_w(saved.inspector_w),
+            // 模块可见性（阶段 19）：同样是"启动读一次、设置里改完写回来"。
+            // **不存合并后的结果**——归属基线（第三方天生没有「空间」与分叉条）
+            // 每次问的时候现并，免得基线改了就有一份旧的躺在内存里
+            hidden_mine: saved.hidden_modules_mine.clone(),
+            hidden_third: saved.hidden_modules_third.clone(),
             insp_split: cx.new(|_| ResizableState::default()),
             copied: None,
             copied_until: 0,

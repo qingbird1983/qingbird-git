@@ -448,6 +448,16 @@ pub(crate) struct Shell {
     /// 检视抽屉当前宽度（px，已夹在 `INSPECTOR_MIN_W..INSPECTOR_MAX_W`）。
     /// 拖完由 `on_resize` 写回，收起再展开恢复的就是它
     pub(crate) inspector_w: f32,
+    /// 「我的」这一类**藏了哪些模块**（阶段 19）
+    ///
+    /// 存字段而不是每帧 `store::load()`：读配置要开一次文件，
+    /// 页签栏与概览四段每帧都要问"这个模块显不显示"。
+    /// 与 `sidebar_collapsed` / `inspector_open` 同一口径——启动读一次，
+    /// 设置里改了再写回来
+    pub(crate) hidden_mine: Vec<String>,
+    /// 「第三方」这一类藏了哪些模块。**两套不共用一份**：用户的话是
+    /// "我的和第三方只是操作功能不一样"，可勾选也该分得开
+    pub(crate) hidden_third: Vec<String>,
     /// 「主区 / 检视抽屉」这条分隔的运行时状态。**与 `split` 是两个独立分组**：
     /// 侧栏那组只有仓库页有、且总览页整组不挂，混进同一组会让面板下标
     /// 随页面变，下标与列的对应关系就不再固定
@@ -699,11 +709,66 @@ pub(crate) const CMD_FIELDS: [&str; 10] = [
     "钉住 3 命令",
 ];
 
+/// 设置对话框左侧那几个分类（阶段 20）
+///
+/// **为什么是左导航而不是页签**：那一排设置按「这是什么事」分才分得开
+/// （身份与令牌是同一件事、代理与通知都是「出了事怎么找我」、显示是一类），
+/// 而页签只能横排在顶部，四个名字会把 700px 宽的弹窗顶部切得很碎。
+/// 左边一列、右边一屏，是设置这类"少而整"的内容最省地的形态
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetCat {
+    /// 提交身份 / 访问令牌 / SSH 私钥
+    Identity,
+    /// 代理 / 系统通知
+    Network,
+    /// 主题 / 显示哪些模块
+    Display,
+}
+
+impl SetCat {
+    pub(crate) const ALL: &'static [SetCat] = &[SetCat::Identity, SetCat::Network, SetCat::Display];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SetCat::Identity => "身份与访问",
+            SetCat::Network => "网络与通知",
+            SetCat::Display => "显示",
+        }
+    }
+
+    /// `ElementId` 用的 ASCII 键。**不拿 `label()` 去拼 id**——
+    /// 界面文案一改（"网络与通知" → "网络"）id 就跟着变，
+    /// gpui 按 id 存的那份悬停状态当场作废，表现为"扫过没反应"
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            SetCat::Identity => "identity",
+            SetCat::Network => "network",
+            SetCat::Display => "display",
+        }
+    }
+
+    /// 左侧那颗键旁边的一句话。**每个分类都要有**——只有名字的话，
+    /// 「显示」这两个字说不清里面是主题还是别的东西
+    pub(crate) fn hint(self) -> &'static str {
+        match self {
+            SetCat::Identity => "提交用的名字与邮箱、云端令牌、SSH 私钥",
+            SetCat::Network => "git 走不走代理、自动同步要不要弹通知",
+            SetCat::Display => "浅色还是深色、界面上摆哪几样东西",
+        }
+    }
+}
+
 /// 设置对话框的状态。
 ///
 /// **六个输入框的 Entity 存在这里而不是每帧重建**——重建会让用户每敲一个字
 /// 就丢一次焦点。系统通知那个开关不占 Entity：它即时落盘，不参与「保存」
 pub(crate) struct SettingsDialog {
+    /// 左侧当前停在哪个分类
+    pub(crate) cat: SetCat,
+    /// 左侧哪一颗正被鼠标扫着。gpui 没有 CSS 的 `:hover`，悬停面只能靠
+    /// `on_hover` 记状态（与 `Shell.hovered` 同一口径）——**没有这一格，
+    /// 扫过一整列导航键全程零反馈**，用户不知道该点哪一颗
+    pub(crate) nav_hover: Option<SetCat>,
     pub(crate) git_name: Entity<InputState>,
     pub(crate) git_email: Entity<InputState>,
     pub(crate) github_token: Entity<InputState>,
@@ -715,6 +780,15 @@ pub(crate) struct SettingsDialog {
     pub(crate) probing: bool,
     /// 探测结果的一句话
     pub(crate) probe_note: Option<String>,
+    /// 「我的」这一类**勾上 = 显示**的模块（阶段 19）
+    ///
+    /// **存"勾上"而不是"藏了"**是为了与界面上的复选框一一对应——
+    /// 用户拨的是"这个模块给我看"，复选框就该直接跟着他拨的方向走。
+    /// 落盘时再翻成 `hidden_*`（core 那边存"藏了哪些"是为了老配置兼容，
+    /// 那是**存储**的选择，不是**交互**的选择，两个方向不矛盾）
+    pub(crate) mod_mine: Vec<String>,
+    /// 「第三方」这一类勾上 = 显示的模块
+    pub(crate) mod_third: Vec<String>,
     pub(crate) error: Option<String>,
 }
 

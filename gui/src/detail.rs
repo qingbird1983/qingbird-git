@@ -11,14 +11,16 @@
 use gpui_kit::base::v_flex;
 use gpui_kit::component::tab::{Tab, TabBar, TabVariant};
 use gpui_kit::component::{Sizable, Size, Theme};
-use gpui_kit::{px, AnyElement, Context, IntoElement, ParentElement, Styled};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{div, px, AnyElement, Context, IntoElement, ParentElement, Styled};
+use qingbird_core::store;
 
 use crate::state::*;
 use crate::tokens::*;
 
 // ================= 详情页共用骨架 =================
 
-/// 详情页页签。**两类仓库共用一套，按归属裁剪**。
+/// 详情页页签。**两类仓库共用一套，按可见性裁剪**。
 ///
 /// 2026-10-05 调整过一次序列：
 /// - 「同步设置」**撤掉**，内容并进概览页同步段右上角那颗「定时同步」弹窗
@@ -27,9 +29,13 @@ use crate::tokens::*;
 ///   历史/空间是同一份数据、同一套内容，两处并排就是两个入口看同一件事。
 ///   变更同理——它已经在概览页底部有过一张摘要卡（已删），现在升格成页签。
 ///
-/// 第三方裁掉的是「空间」：那是**我自己磁盘上**的占用与清理，
-/// 对一个我只是关注着的别人的项目没有意义，摆出来是点了会越界的入口。
-/// 「变更」留着——第三方仓库只要在本地有一份工作区，未提交改动就真实存在。
+/// **第三方天生没有「空间」**（阶段 19）：那是**我自己磁盘上**的占用与清理，
+/// 对一个我只是关注着的别人的项目没有意义，摆出来是点了会越界的入口
+/// ——那页里有一键清理，会**真删** `node_modules` / `target` / `dist`。
+/// 这条现在是 core 的归属基线 `THIRD_BASELINE_HIDDEN`，
+/// 设置里的开关**放不出来**（它编码的是安全边界，不是偏好）。
+/// 「变更」两边都留着——第三方仓库只要在本地有一份工作区，
+/// 未提交改动就真实存在
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum DetailTab {
     Overview,
@@ -40,23 +46,29 @@ pub(crate) enum DetailTab {
 }
 
 impl DetailTab {
-    /// 两类仓库的完整页签序列。第三方裁掉「空间」
-    pub(crate) fn for_third(third: bool) -> &'static [DetailTab] {
-        if third {
-            &[
-                DetailTab::Overview,
-                DetailTab::Readme,
-                DetailTab::History,
-                DetailTab::Changes,
-            ]
-        } else {
-            &[
-                DetailTab::Overview,
-                DetailTab::Readme,
-                DetailTab::History,
-                DetailTab::Space,
-                DetailTab::Changes,
-            ]
+    /// 这一类仓库**全都适用**的页签序列（含第三方的「空间」）
+    ///
+    /// ⚠️ **这里不再按归属裁剪**（阶段 19）：原来这个函数对第三方少给一个
+    /// 「空间」，那是**一张手写的裁剪表**——用户要"可勾选显示/隐藏"时，
+    /// 它就该被配置取代。现在归属差异走 core 的 `THIRD_BASELINE_HIDDEN`
+    /// （安全边界：第三方那个「空间」页里有**一键清理**，真删文件），
+    /// 用户勾选再叠在上面，两条路合流到一个判据
+    pub(crate) const ALL: &'static [DetailTab] = &[
+        DetailTab::Overview,
+        DetailTab::Readme,
+        DetailTab::History,
+        DetailTab::Space,
+        DetailTab::Changes,
+    ];
+
+    /// 模块键（与 core `store::MOD_TAB_*` 一一对应）
+    pub(crate) fn module_key(self) -> &'static str {
+        match self {
+            DetailTab::Overview => store::MOD_TAB_OVERVIEW,
+            DetailTab::Readme => store::MOD_TAB_README,
+            DetailTab::History => store::MOD_TAB_HISTORY,
+            DetailTab::Space => store::MOD_TAB_SPACE,
+            DetailTab::Changes => store::MOD_TAB_CHANGES,
         }
     }
 
@@ -72,11 +84,52 @@ impl DetailTab {
 }
 
 impl Shell {
-    /// 当前停在哪个详情页页签。**页签序列按归属裁剪**，所以下标要夹回范围再取——
-    /// 从第三方切到我的仓库时，原来那个下标可能停在被裁掉的「同步设置」上
+    /// 当前停在哪个详情页页签。**页签序列是筛出来的**，所以下标要夹回范围再取——
+    /// 从第三方切到我的仓库时，原来那个下标可能停在被藏掉的那一页上
     pub(crate) fn cur_detail_tab(&self) -> DetailTab {
-        let tabs = DetailTab::for_third(self.selected_is_third());
+        let tabs = self.visible_detail_tabs(self.selected_is_third());
+        // ⚠️ `visible_detail_tabs` 保证至少一个（core 那个不变量），
+        // 所以这里 `len() - 1` 不会下溢。少写那句不变量的话，
+        // 用户把页签全勾掉就能让 debug 构建**每帧 panic 一次**
         tabs[self.detail_tab.min(tabs.len() - 1)]
+    }
+
+    /// 这一类仓库**藏了哪些**模块（归属基线 + 用户勾的，合成一份）
+    pub(crate) fn hidden_for(&self, third: bool) -> Vec<&str> {
+        let user: &[String] = if third {
+            &self.hidden_third
+        } else {
+            &self.hidden_mine
+        };
+        let mut out: Vec<&str> = user.iter().map(String::as_str).collect();
+        if third {
+            out.extend(store::THIRD_BASELINE_HIDDEN.iter().copied());
+        }
+        out
+    }
+
+    /// 这个模块在这个归属下显不显示。**判据只有这一份**
+    /// ——页签栏、概览四段、仓库头那颗磁盘摘要徽标都问它
+    pub(crate) fn module_on(&self, third: bool, key: &str) -> bool {
+        store::module_shown(&self.hidden_for(third), key)
+    }
+
+    /// 这一类仓库**该显示哪几个页签**
+    ///
+    /// **全藏了回退到全给**（core `visible_modules`）——页签栏是导航本身，
+    /// 一个都不剩的话详情页就没有可去的地方了
+    pub(crate) fn visible_detail_tabs(&self, third: bool) -> Vec<DetailTab> {
+        let hidden = self.hidden_for(third);
+        let keys: Vec<&str> = DetailTab::ALL.iter().map(|t| t.module_key()).collect();
+        store::visible_modules(&keys, &hidden)
+            .into_iter()
+            .filter_map(|k| DetailTab::ALL.iter().find(|t| t.module_key() == k).copied())
+            .collect()
+    }
+
+    /// 某个页签在当前仓库这一类下能不能打开
+    pub(crate) fn detail_tab_shown(&self, tab: DetailTab) -> bool {
+        self.module_on(self.selected_is_third(), tab.module_key())
     }
 
     /// 当前选中的是不是第三方仓库
@@ -90,12 +143,12 @@ impl Shell {
 }
 
 impl Shell {
-    /// 切到某个详情页页签。**给按钮用**（磁盘摘要卡的「查看」、抽屉「历史」的入口）。
+    /// 切到某个详情页页签。**给按钮用**（磁盘摘要卡的「查看」等）。
     ///
-    /// 按枚举切而不是按下标：页签序列按归属裁剪，写死下标的话在第三方
-    /// 仓库上会切到一个不存在的位置
+    /// 按枚举切而不是按下标：页签序列是**筛出来的**，写死下标的话
+    /// 在藏过几个页签的仓库上会切到一个不存在的位置
     pub(crate) fn open_detail_tab(&mut self, tab: DetailTab, cx: &mut Context<Self>) {
-        let tabs = DetailTab::for_third(self.selected_is_third());
+        let tabs = self.visible_detail_tabs(self.selected_is_third());
         if let Some(ix) = tabs.iter().position(|x| *x == tab) {
             self.detail_tab = ix;
             self.sync_detail_tab(cx);
@@ -103,6 +156,10 @@ impl Shell {
             // 少了这一行页签下标改了却画不出来
             cx.notify();
         }
+        // ⚠️ **不可见就什么都不做**：曾经这里是"找不到就静默返回"，
+        // 而调用方（仓库头那颗磁盘摘要徽标）不知道自己点了没反应，
+        // 画面上就变成"点了跳到别的地方"。现在入口本身会跟着页签一起隐，
+        // 这里只是**最后一道**——入口藏了就没人点得到它
     }
 
     /// 页签切到「历史」时补一次扫描。`git log` 要派生子进程，
@@ -127,9 +184,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let third = self.entry(path).map(|e| e.is_third_party).unwrap_or(false);
-        let tabs = DetailTab::for_third(third);
+        let tabs = self.visible_detail_tabs(third);
         // 切仓库后原来那个下标可能越界（比如从第三方切到我的，
-        // 下标还停在被裁掉的「同步设置」上）——夹回范围内
+        // 下标还停在被藏掉的那一页上）——夹回范围内
         let ix = self.detail_tab.min(tabs.len() - 1);
         let cur = tabs[ix];
 
@@ -260,19 +317,67 @@ impl Shell {
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .gap(px(GAP))
-            .children(self.fork_card(t, cx))
-            .child(self.sync_card(path, t, cx))
-            .child(self.log_panel(t, cx).min_h(px(LOG_MIN_H)))
-            .child(self.lang_section(t))
+        self.overview_body(path, t, cx, false)
     }
 }
 
 
-// ================= Screen 1：第三方仓库档案页 =================
+// ================= 概览页正文：两类仓库共用（阶段 19） =================
+
+impl Shell {
+    /// 概览页正文。**「我的」与「第三方」进的是同一个函数**（阶段 19）
+    ///
+    /// 以前是两个函数各写一遍版面，而它们**逐行相同、只差一个分叉条**——
+    /// 两份迟早漂。现在分叉条是四个模块之一（`sec.fork`），
+    /// 而它在第三方的**归属基线**里就是藏着的，于是"第三方没有分叉条"
+    /// 这件事由基线表达，而不是由两份版面各自记住。
+    ///
+    /// `third` 只用来**问判据**与裁剪 `sync_card` 内部那把推送键，
+    /// 版面本身两套一模一样——这正是用户那条设计原则的落法。
+    pub(crate) fn overview_body(
+        &self,
+        path: &str,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        third: bool,
+    ) -> impl IntoElement {
+        // 四段里可见的那些。**顺序照旧**（分叉条 → 同步 → 日志 → 语言），
+        // 藏掉某段不会让别的段顶上它的位置——`flex_1` 落在日志段上，
+        // 藏掉语言技术栈时日志会把多出来的高度吃掉，这是对的
+        let on = |k: &str| self.module_on(third, k);
+        let any = on(store::MOD_SEC_FORK)
+            || on(store::MOD_SEC_SYNC)
+            || on(store::MOD_SEC_LOG)
+            || on(store::MOD_SEC_LANG);
+
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .gap(px(GAP))
+            .when(on(store::MOD_SEC_FORK), |b| b.children(self.fork_card(t, cx)))
+            .when(on(store::MOD_SEC_SYNC), |b| b.child(self.sync_card(path, t, cx)))
+            .when(on(store::MOD_SEC_LOG), |b| {
+                b.child(self.log_panel(t, cx).min_h(px(LOG_MIN_H)))
+            })
+            .when(on(store::MOD_SEC_LANG), |b| b.child(self.lang_section(t)))
+            // **全藏了要说清楚为什么空**，不能留一页白。
+            // 这不是防御性代码：勾选区就在设置里摆着，全勾掉是用户做得到的
+            .when(!any, |b| {
+                b.child(
+                    v_flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .text_size(px(FS_BODY))
+                                .text_color(tier4(t))
+                                .child("这一屏的模块都被关掉了 · 到「设置 → 显示哪些模块」里打开"),
+                        ),
+                )
+            })
+    }
+}
 
 impl Shell {
     /// 第三方仓库的**内容区**。头与页签由 `detail_page` 给。
@@ -303,12 +408,10 @@ impl Shell {
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .gap(px(GAP))
-            .child(self.sync_card(path, t, cx))
-            .child(self.log_panel(t, cx).min_h(px(LOG_MIN_H)))
-            .child(self.lang_section(t))
+        // ⚠️ **不再是一份手写版面**（阶段 19）。它原来与「我的」那份**逐行相同、
+        // 只少一个 `fork_card`**——两份函数各写一遍，改一处忘一处就要漂。
+        // 现在两者都走 `overview_body`，分叉条是**四个模块之一**
+        // （`sec.fork` 在第三方的基线里就是藏着的，于是这里什么都不用写）
+        self.overview_body(path, t, cx, true)
     }
 }

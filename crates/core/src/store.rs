@@ -128,6 +128,93 @@ pub struct Settings {
     /// 一条常驻的 320px 空列只会让主区白白少三分之一
     #[serde(default)]
     pub inspector_open: bool,
+    /// 「我的」这一类仓库**藏了哪些模块**（阶段 19）
+    ///
+    /// **存「藏了哪些」而不是「显示哪些」**：空列表 = 什么都不藏 = 今天的界面。
+    /// 反过来存"显示哪些"的话，老配置读出来是空，界面上就变成什么都不显示
+    /// ——改个存储方向就把老用户的界面清空了。`#[serde(default)]` 天然
+    /// 给出"什么都不藏"，**老配置零迁移**
+    #[serde(default)]
+    pub hidden_modules_mine: Vec<String>,
+    /// 「第三方」这一类仓库藏了哪些模块。**同样存「藏了哪些」**，理由同上
+    #[serde(default)]
+    pub hidden_modules_third: Vec<String>,
+}
+
+// ---- 模块可见性（阶段 19）----
+//
+// 键名是**界面与配置之间唯一的约定**，所以放 core：界面那份勾选区、
+// 那份判据、以及用户 config 里存的字面量，必须是同一批字符串。
+// 拼错了的判据是「静默地不生效」，界面上看不出来。
+//
+// 前缀分两组（`tab.` 页签 / `sec.` 概览段），不是为了好看——是设置对话框
+// 要按组分区画，而 `starts_with` 一比就够，不必另存一份分组表
+
+/// 详情页页签
+pub const MOD_TAB_OVERVIEW: &str = "tab.overview";
+pub const MOD_TAB_README: &str = "tab.readme";
+pub const MOD_TAB_HISTORY: &str = "tab.history";
+pub const MOD_TAB_SPACE: &str = "tab.space";
+pub const MOD_TAB_CHANGES: &str = "tab.changes";
+/// 概览页的段
+pub const MOD_SEC_FORK: &str = "sec.fork";
+pub const MOD_SEC_SYNC: &str = "sec.sync";
+pub const MOD_SEC_LOG: &str = "sec.log";
+pub const MOD_SEC_LANG: &str = "sec.lang";
+
+/// 第三方**天生不适用**的模块
+///
+/// ⚠️ **基线不能被开关放出来**，理由不是"不想给"：「空间」页里有一键清理
+/// （真删 `node_modules` / `target` / `dist`），摆到一个只是关注着的别人
+/// 项目上就是一个**越界的删除入口**；分叉条改的是本地历史，对第三方
+/// 本来就没有意义。**基线编码的是安全边界，开关只负责在基线之上再藏**。
+/// 设置里那两项是禁用 + 说明，不是可勾的
+pub const THIRD_BASELINE_HIDDEN: &[&str] = &[MOD_TAB_SPACE, MOD_SEC_FORK];
+
+/// 这个模块在**这个归属**下是否适用（= 不在基线里）
+pub fn module_applicable(third: bool, key: &str) -> bool {
+    !third || !THIRD_BASELINE_HIDDEN.contains(&key)
+}
+
+/// 某个归属下**藏了哪些**。基线 + 用户勾的，合成一份
+pub fn hidden_modules<'a>(settings: &'a Settings, third: bool) -> Vec<&'a str> {
+    let user: &[String] = if third {
+        &settings.hidden_modules_third
+    } else {
+        &settings.hidden_modules_mine
+    };
+    let mut out: Vec<&str> = user.iter().map(String::as_str).collect();
+    if third {
+        out.extend(THIRD_BASELINE_HIDDEN.iter().copied());
+    }
+    out
+}
+
+/// 这个模块显不显示。**纯函数**——判据只有这一份，界面各处都问它
+///
+/// 泛型收 `AsRef<str>` 是因为有**两种形状**要查：配置里那份是
+/// `Vec<String>`（用户写的字面量），合并归属基线之后那份是 `Vec<&str>`。
+/// 写成两个函数就是两条会各自漂的判据
+pub fn module_shown<S: AsRef<str>>(hidden: &[S], key: &str) -> bool {
+    !hidden.iter().any(|k| k.as_ref() == key)
+}
+
+/// 在给定候选序列里挑出该显示的，**但至少留一个**
+///
+/// ⚠️ **全藏了就回退到基线（也就是全显示）**，不给一页空白：
+/// 空白页看着像坏了，而不是像"我刚把这儿都关了"。同理，一个页签都不剩时
+/// 页签栏就没法当导航用了
+pub fn visible_modules<'a>(all: &[&'a str], hidden: &[&str]) -> Vec<&'a str> {
+    let vis: Vec<&str> = all
+        .iter()
+        .copied()
+        .filter(|k| module_shown(hidden, k))
+        .collect();
+    if vis.is_empty() {
+        all.to_vec()
+    } else {
+        vis
+    }
 }
 
 fn default_true() -> bool {
@@ -162,6 +249,8 @@ impl Default for Settings {
             sidebar_collapsed: false,
             inspector_w: DEFAULT_INSPECTOR_W,
             inspector_open: false,
+            hidden_modules_mine: Vec::new(),
+            hidden_modules_third: Vec::new(),
         }
     }
 }
@@ -348,6 +437,79 @@ mod tests {
 
     // 这里只测纯逻辑。`set_sidebar_layout` 会写 %APPDATA% 下真实的 config.json，
     // 拿它做单测等于每次跑测试都改掉用户自己的配置——那种测试不许写。
+
+    /// 阶段 19 的一条硬约定：**空列表 = 什么都不藏 = 今天的界面**。
+    /// 反过来存"显示哪些"的话，老配置读出来是空 ⇒ 界面全空
+    #[test]
+    fn an_empty_hidden_list_hides_nothing() {
+        let s = Settings::default();
+        assert!(s.hidden_modules_mine.is_empty());
+        assert!(s.hidden_modules_third.is_empty());
+        for k in [
+            MOD_TAB_OVERVIEW,
+            MOD_TAB_README,
+            MOD_TAB_HISTORY,
+            MOD_TAB_SPACE,
+            MOD_TAB_CHANGES,
+            MOD_SEC_FORK,
+            MOD_SEC_SYNC,
+            MOD_SEC_LOG,
+            MOD_SEC_LANG,
+        ] {
+            assert!(module_shown(&hidden_modules(&s, false), k), "我的：{k}");
+        }
+    }
+
+    /// 第三方天生少两项，且**开关放不出来**。这不是"不想给"：「空间」页里
+    /// 有一键清理（真删文件），摆到别人项目上就是越界的入口
+    #[test]
+    fn the_third_party_baseline_cannot_be_switched_back_on() {
+        let s = Settings::default();
+        let third = hidden_modules(&s, true);
+        assert!(!module_shown(&third, MOD_TAB_SPACE), "空间对第三方不适用");
+        assert!(!module_shown(&third, MOD_SEC_FORK), "分叉条对第三方不适用");
+        assert!(!module_applicable(true, MOD_TAB_SPACE));
+        assert!(!module_applicable(true, MOD_SEC_FORK));
+        // 「我的」那边两项都适用
+        assert!(module_applicable(false, MOD_TAB_SPACE));
+        assert!(module_applicable(false, MOD_SEC_FORK));
+
+        // ⚠️ **用户把它写进"没藏"的反义里也没用**：基线是并进去的，
+        // 不看用户那份。少写这一条的话，一个手改过的 config 就能把
+        // 一键清理挂到别人项目上
+        let sneaky = Settings {
+            hidden_modules_third: vec![MOD_TAB_HISTORY.to_string()],
+            ..Settings::default()
+        };
+        let t2 = hidden_modules(&sneaky, true);
+        assert!(!module_shown(&t2, MOD_TAB_SPACE));
+        assert!(!module_shown(&t2, MOD_SEC_FORK));
+        // 而用户自己勾的那一项确实生效了
+        assert!(!module_shown(&t2, MOD_TAB_HISTORY));
+    }
+
+    /// 两套互不串：藏「我的」的历史页签，第三方那边不受影响
+    #[test]
+    fn the_two_scopes_do_not_leak_into_each_other() {
+        let s = Settings {
+            hidden_modules_mine: vec![MOD_TAB_HISTORY.to_string()],
+            ..Settings::default()
+        };
+        assert!(!module_shown(&hidden_modules(&s, false), MOD_TAB_HISTORY));
+        assert!(module_shown(&hidden_modules(&s, true), MOD_TAB_HISTORY));
+    }
+
+    /// **全藏了要回退到全显示，不能给一页空白**。空白页看着像坏了，
+    /// 而不是像"我刚把这儿都关了"
+    #[test]
+    fn hiding_everything_falls_back_instead_of_going_blank() {
+        let all = [MOD_TAB_OVERVIEW, MOD_TAB_HISTORY, MOD_TAB_CHANGES];
+        let vis = visible_modules(&all, &all);
+        assert_eq!(vis, all, "一个都不剩时回退到基线");
+        // 留一个就按留的来，不要多给
+        let vis = visible_modules(&all, &[MOD_TAB_HISTORY]);
+        assert_eq!(vis, vec![MOD_TAB_OVERVIEW, MOD_TAB_CHANGES]);
+    }
 
     #[test]
     fn clamp_keeps_width_inside_the_design_range() {
