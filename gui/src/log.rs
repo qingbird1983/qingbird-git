@@ -24,7 +24,7 @@ use gpui_kit::component::{Disableable as _, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, ClipboardItem, Context, Div, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled,
+    ParentElement, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
 };
 use qingbird_core::run_cmd::Slot;
 
@@ -39,6 +39,8 @@ use crate::tokens::*;
 /// 钉住的命令与它们的编辑入口都在 ⌘K（`palette.rs` 的 `RunSlot` 与 `EditCmds`）
 pub(crate) const QUICK_SLOTS: [(Slot, &str); 2] =
     [(Slot::Dev, "开发运行"), (Slot::Build, "编译构建")];
+
+// ================= 表头 =================
 
 impl Shell {
     /// 日志区本体。**概览页第一段**（`detail_body` 的 Overview 分支）。
@@ -59,7 +61,14 @@ impl Shell {
         };
         let lg = self.logs.get(&path).unwrap_or(&LOG_EMPTY);
 
-        card(t)
+        // 阶段 21-1：新行追加时把视口带到底。判据在**渲染之前**算——
+        // `scroll_to_bottom` 只是置一个标记（`div.rs:4386` 写的是
+        // `state.scroll_to_bottom = true`），由基座在下一帧布局时消费，
+        // 所以它在哪一帧调都生效，但**要在这一帧 notify 之前**立起来，
+        // 否则观感上就是"慢一帧才滚"。
+        let stick = self.log_follow_bottom();
+
+        let panel = card(t)
             .flex_1()
             .min_h_0()
             .child(self.log_header(path.as_str(), lg, t, cx))
@@ -67,15 +76,31 @@ impl Shell {
             .when(lg.running, |col| col.child(progress_bar(t, lg)))
             .child(output_stream(
                 "log-stream",
+                &self.log_scroll,
                 t,
                 lg,
                 "点同步三键或命令行的按钮，输出会实时回显在这里",
             ))
-            .child(self.log_verdict_row(t, lg))
+            .child(self.log_verdict_row(t, lg));
+
+        if stick {
+            self.log_scroll.scroll_to_bottom();
+        }
+        panel
+    }
+
+    /// 该不该跟着新输出滚到底（阶段 21-1）。
+    ///
+    /// **判据是"视口是不是还贴着底"**，而不是"用户有没有滚过"——
+    /// 见 `Shell::log_stick_to_bottom` 的注释：用户自己滚回底部后
+    /// 跟随就该自动恢复，否则会留一个只有用户自己摸得出来的怪状态
+    fn log_follow_bottom(&self) -> bool {
+        should_follow_bottom(
+            self.log_scroll.offset().y.to_f64() as f32,
+            self.log_scroll.max_offset().y.to_f64() as f32,
+        )
     }
 }
-
-// ================= 表头 =================
 
 impl Shell {
     /// 表头：左边「日志」，右边五颗键。
@@ -238,6 +263,22 @@ fn progress_bar(t: &Theme, lg: &LogState) -> impl IntoElement {
 
 // ================= 输出流 =================
 
+/// 输出流是否该自动滚到底部（阶段 21-1）。
+///
+/// **纯函数**：要 `&Self` 与滚动句柄才能调的判据留在方法里就只能靠抓帧看，
+/// 而抓帧证明不了"点了有反应"。抽出来才单测得掉（D48 那条规律）。
+///
+/// `offset.y` 是视口顶相对容器顶的位移，**越往下越负**（`div.rs:4393` 文档）；
+/// `max_offset.y` 是能滚到的最深处的同一个量。两者的差就是"离底还有多远"。
+///
+/// 差在 **2px 以内**算贴底：那 2px 不是宽容度，是"内容不足一屏时 `max_offset`
+/// 恒为 0，而 `offset` 也恰好是 0"——差为 0 判成贴底是对的；
+/// 而滚动到最底时浮点/取整可能差 1–2px，卡死在那几像素上的话用户
+/// 滚到底之后跟随就再也不恢复了。
+pub(crate) fn should_follow_bottom(offset_y: f32, max_offset_y: f32) -> bool {
+    (offset_y - max_offset_y).abs() <= 2.0
+}
+
 /// 输出流：浅色底 + 1px 边 + 等宽字体。
 ///
 /// **那圈里框只在有内容时画**（2026-10-05）。它的作用是把等宽输出与白卡分开；
@@ -250,11 +291,12 @@ fn progress_bar(t: &Theme, lg: &LogState) -> impl IntoElement {
 /// 也要用这一段渲染。两处各画一份的话，改配色 / 间距只改一处，
 /// 另一个对话框会留在旧样式上。
 ///
-/// **id 必须由调用方给**：gpui 的滚动状态是按 `ElementId` 全局存的，
-/// 两个元素共用一个 id 会共用同一个滚动句柄——在批量结果对话框里滚一下，
-/// 底下检视抽屉的日志会跟着跳
+/// **id 与滚动句柄都由调用方给**（阶段 21-1）：gpui 的滚动状态按 `ElementId`
+/// 全局存，两个元素共用一个 id 会共用同一个滚动句柄——在批量结果对话框里
+/// 滚一下，底下概览页的日志会跟着跳
 pub(crate) fn output_stream(
     id: &'static str,
+    scroll: &ScrollHandle,
     t: &Theme,
     lg: &LogState,
     empty_hint: &str,
@@ -266,6 +308,10 @@ pub(crate) fn output_stream(
         .min_h(px(120.0))
         .min_h_0()
         .overflow_y_scroll()
+        // ⚠️ **必须有 `track_scroll` 才滚得动**（阶段 21-1）：`overflow_y_scroll`
+        // 只给这个元素一个滚动条，滚动状态本身存在 `ScrollHandle` 里，
+        // 没有句柄就没有任何外部代码能读出"现在滚到哪了"、也没法命令它滚
+        .track_scroll(scroll)
         .p(px(GAP))
         .gap(px(GAP_TIGHT))
         .rounded(px(R_MD))
@@ -410,5 +456,31 @@ impl Shell {
         }
 
         row
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_follow_bottom;
+
+    /// 贴底判据守着的是 21-1 最容易做坏的那个方向：**把「用户正在回看」
+    /// 误判成「在底部」**，于是每来一行输出就把视口拽走。
+    ///
+    /// 四个边界各有一次：一个都不守的话，"滚到底之后跟随不恢复"
+    /// 这种只有用户自己摸得出来的状态就漏出去了。
+    #[test]
+    fn follows_only_while_the_viewport_is_at_the_bottom() {
+        // 内容不足一屏：两者都是 0，必须判成"贴底"跟随，
+        // 否则刚拉取、输出还没满一屏时视口就不动了（看起来像没生效）
+        assert!(should_follow_bottom(0.0, 0.0));
+        // 正常贴底：offset 与 max_offset 同值
+        assert!(should_follow_bottom(-320.0, -320.0));
+        // 用户手动往上滚了 200px：**不许跟随**
+        assert!(!should_follow_bottom(-120.0, -320.0));
+        // 用户滚回底部附近（差 2px，取整误差）：**要恢复跟随**，
+        // 否则"回到底部之后日志再也不往下走"——那是这个功能本身失效
+        assert!(should_follow_bottom(-318.0, -320.0));
+        // 差 3px 就算离开底部：2px 是取整误差的容忍，不是任意宽容度
+        assert!(!should_follow_bottom(-317.0, -320.0));
     }
 }

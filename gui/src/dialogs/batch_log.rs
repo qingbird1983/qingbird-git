@@ -21,8 +21,10 @@ use gpui_kit::component::dialog::DialogContent;
 use gpui_kit::component::{ActiveTheme, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, App, ClipboardItem, Context, Div, Entity, FontWeight, ParentElement, Styled, Window,
+    div, px, App, ClipboardItem, Context, Div, Entity, FontWeight, ParentElement, ScrollHandle,
+    Styled, Window,
 };
+use std::rc::Rc;
 
 use crate::log::output_stream;
 use crate::state::*;
@@ -37,6 +39,16 @@ impl Shell {
             return;
         }
         let this = cx.entity();
+        // 滚动句柄在**打开对话框时**取一次并捕获进闭包：它是 `Rc` 句柄，
+        // 克隆体与 `Shell` 上那个指向同一份状态，整段闭包生命周期都有效。
+        //
+        // ⚠️ **不要在 `content` 闭包里 `this.read(..).batch_log_scroll`**
+        // ——那一行每帧都在跑，虽然对话框这条路不持有 Shell 的锁（不会 panic），
+        // 但它让"渲染期读 Entity"这件事有了一个看起来合法的先例。
+        // 阶段 21-5 的侧栏筛选键就是照着这个先例写的，当场闪退。
+        // 用 `Rc` 包一层：`Fn` 闭包只能持有**共享**引用，而 `ScrollHandle`
+        // 不是 `Copy`。`Rc` 克隆是廉价的引用计数，且里面的句柄**始终是同一份**
+        let scroll = std::rc::Rc::new(this.read(cx).batch_log_scroll.clone());
         window.open_dialog(cx, move |dialog, _window, cx| {
             let t = cx.theme().clone();
             dialog
@@ -44,11 +56,13 @@ impl Shell {
                 .content({
                     let t = t.clone();
                     let this = this.clone();
+                    // 与上面同一个道理：`this` 要 clone 之后才能被 `Fn` 闭包持有
+                    let scroll = scroll.clone();
                     move |c: DialogContent, _w, cx: &mut App| {
                         // 每帧现读：这个对话框开着的时候批次可能还在跑，
                         // 快照会在开着的这几秒里一直是旧的
                         let lg = this.read(cx).app_log.clone();
-                        c.child(batch_log_body(&t, &lg))
+                        c.child(batch_log_body(&scroll, &t, &lg))
                     }
                 })
                 .footer(batch_log_footer(&this, ghost_variant(cx)))
@@ -56,7 +70,10 @@ impl Shell {
     }
 }
 
-fn batch_log_body(t: &Theme, lg: &LogState) -> Div {
+/// 滚动句柄**由调用方给**（打开对话框时取一次，见上面那处注释）。
+/// 这个对话框与概览页的日志共用同一份 `LogState`，句柄必须分开，
+/// 否则在这里滚一下会把底下的日志视口一起拽走
+fn batch_log_body(scroll: &Rc<ScrollHandle>, t: &Theme, lg: &LogState) -> Div {
     // 汇总是最后写进去的那一行，成功与否看它前面的 `·` / `✗` 有没有出错
     let ok = lg.verdict.as_ref().is_some_and(|(ok, _)| *ok);
     v_flex()
@@ -100,11 +117,11 @@ fn batch_log_body(t: &Theme, lg: &LogState) -> Div {
         )
         .child(output_stream(
             "batch-log-stream",
+                            &scroll,
             t,
             lg,
             "这一批没有留下逐仓库的记录",
-        ))
-}
+        ))}
 
 fn batch_log_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
     let copy = this.clone();

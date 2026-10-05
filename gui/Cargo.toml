@@ -2,6 +2,8 @@
 name = "qingbird-gui"
 version = "0.1.0"
 edition = "2021"
+# 图标资源要链进 exe（桌面 / 任务栏 / Alt-Tab），走 build.rs
+build = "build.rs"
 description = "青鸟 Git · GPUI Kit 版界面（gpui-pre 0.3.7 原生渲染）"
 
 [[bin]]
@@ -23,3 +25,17 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # muda 是 Windows 上的 win-menu 实现（托盘右键菜单），托盘图标自身没有菜单能力。
 tray-icon = "0.26"
 muda = "0.21"
+
+# 下面两个**只在构建期**用（见 build.rs）：把 assets/app-icon.png 派生成
+# 托盘要的原始 RGBA 与 exe 要的多尺寸 .ico。运行期不引入任何图像库——
+# `image` 与 `embed-resource` 本来就在 Cargo.lock 里（image 是 gpui-pre 的
+# 传递依赖，embed-resource 是它链上带进来的），进 build-dependencies
+# 不会带来额外的编译成本。
+[build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+embed-resource = "3"
+# 选文件夹对话框（阶段 21-2）**没有加任何依赖**：核实过 gpui-kit / gpui-component /
+# gpui-pre 三处都没有文件选择 API，而自己绑 IFileOpenDialog 的代价被低估了
+# （windows 0.62 的绑定里 Show/GetResult 都在父接口上，见 os.rs::pick_folder）。
+# 最终走系统自带的 powershell + FolderBrowserDialog：零新增依赖，
+# 弹出来就是用户习惯的那个原生选择器。

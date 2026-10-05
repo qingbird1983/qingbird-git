@@ -44,7 +44,7 @@ use gpui_kit::{
     ParentElement, Pixels, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 use qingbird_core::proxy;
-use qingbird_core::store;
+use qingbird_core::store::{self, CloseAction};
 
 use crate::detail::DetailTab;
 use crate::state::*;
@@ -123,6 +123,7 @@ impl Shell {
             proxy: proxy_input,
             notify: s.notify_auto_sync,
             theme_dark: s.theme == crate::theme::DARK,
+            close_action: store::close_action_of(&s.close_action),
             probing: false,
             probe_note: None,
             mod_mine,
@@ -323,6 +324,34 @@ impl Shell {
     /// 那是必须的，`Theme::update` 之后没有别的路能让浮层跟着重画，
     /// 而"外壳变了、弹窗还是老的"看着就像坏了
     pub(crate) fn toggle_theme(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // 设置对话框里的开关：除了换配色，还要把**它自己**那一行翻回去
+        // （对话框可能是这次改完还开着的，见上面那段注释）
+        if Self::toggle_theme_static(on, window, cx) {
+            if let Some(d) = self.settings_dlg.as_mut() {
+                d.theme_dark = on;
+            }
+        }
+    }
+
+    /// 换主题的**唯一实现**（落盘 + 换配色）。
+    ///
+    /// ## 为什么要抽成不依赖 `&mut Shell` 的静态版
+    ///
+    /// 标题栏那颗（阶段 21-4）在 `cx.listener` 里被调，签名只能拿到
+    /// `(&mut Shell, &mut Window, &mut Context<Self>)`——**那本来是够的**，
+    /// 但 `theme_toggle` 自己要读 `cx.theme()` 决定摆哪个图标，
+    /// 于是调用点在 `Shell` 上会形成"为了读主题而借 Shell"，绕开更麻烦。
+    ///
+    /// 更要紧的是**别写两份**：设置里那颗与标题栏那颗必须落同一个配置字段、
+    /// 走同一条 `theme::apply`。两份实现改了一处就分家，而分家的后果是
+    /// "标题栏切了、设置里那颗还显示旧状态"——只有用户把两边都点一遍才发现。
+    ///
+    /// 返回 `true` = 落盘成功（失败时已通知，且**没有**换配色）
+    pub(crate) fn toggle_theme_static(
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let mut cfg = store::load();
         cfg.settings.theme = if on {
             crate::theme::DARK
@@ -332,15 +361,12 @@ impl Shell {
         .to_string();
         if let Err(e) = store::save(&cfg) {
             window.push_notification(format!("保存失败：{e}"), cx);
-            return;
-        }
-        if let Some(d) = self.settings_dlg.as_mut() {
-            d.theme_dark = on;
+            return false;
         }
         crate::theme::apply(&cfg.settings.theme, cx);
         cx.notify();
+        true
     }
-
     /// 「检测代理」。
     ///
     /// 填了地址就只试那一个；留空就按 core 的候选顺序（手动 → 上次成功 →
@@ -415,6 +441,8 @@ pub(crate) struct SettingsState {
     pub(crate) notify: bool,
     /// 当前是不是深色（阶段 20）
     pub(crate) theme_dark: bool,
+    /// 点关闭键时怎么办（阶段 22）
+    pub(crate) close_action: CloseAction,
     pub(crate) probing: bool,
     pub(crate) probe_note: Option<String>,
     /// 勾上 = 显示的模块，两套各一份（阶段 19）
@@ -437,6 +465,7 @@ impl Shell {
             proxy: d.proxy.clone(),
             notify: d.notify,
             theme_dark: d.theme_dark,
+            close_action: d.close_action,
             probing: d.probing,
             probe_note: d.probe_note.clone(),
             mod_mine: d.mod_mine.clone(),
@@ -446,15 +475,24 @@ impl Shell {
     }
 }
 
+/// 一段的标题 + 说明。**标题是二级（12px / `body`）不是三级**（阶段 21-8a）。
+///
+/// 早先它用 `FS_META`（11px）+ `tier3`——那一档的语义是"元信息、
+/// 弱提示"，而**段标题是这一段的门面**：它下面挂着这一段全部内容，
+/// 却是全对话框里最淡的一行。用户在找「深色主题」那个开关时先扫的就是它。
+///
+/// 这条属于 21-8a 说的那一类：**大量该当主文字的内容被当成元信息用了**。
+/// 升到二级之后「标题 / 说明」的大小差也回到 12 / 11，
+/// 而不是原来的 11 / 11（同一档里分主次，只能靠颜色硬分）
 fn section(t: &Theme, title: &str, note: &str) -> Div {
     v_flex()
         .w_full()
         .gap(px(GAP_TIGHT))
         .child(
             div()
-                .text_size(px(FS_META))
+                .text_size(px(FS_SEC))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(tier3(t))
+                .text_color(body(t))
                 .child(title.to_string()),
         )
         .child(
@@ -769,6 +807,14 @@ fn display_page(t: &Theme, st: &SettingsState, this: &Entity<Shell>) -> Div {
         )
         .child(section(
             t,
+            "关闭窗口时",
+            "点右上角 × 之后做什么。三选一，勾上那颗就是当前档。\n\
+             选「每次都问」时，面板里那刻「记住我的选择」打勾就会把这次的选择记下来，\n\
+             之后直接照做、不再问；不打勾就每次都问。",
+        ))
+        .child(close_action_picker(st, this))
+        .child(section(
+            t,
             "显示哪些模块",
             "前五项是详情页的页签，后四项是概览页里的四段。勾上就显示，不勾就不画；\
              两类仓库各一份，互不影响。至少要留一个，否则那一屏会空掉。\
@@ -776,6 +822,53 @@ fn display_page(t: &Theme, st: &SettingsState, this: &Entity<Shell>) -> Div {
         ))
         .child(mod_grid(t, st, false, this))
         .child(mod_grid(t, st, true, this))
+}
+
+/// 关窗那三档的勾选区（阶段 22）。**三颗复选框做单选**——勾上那颗就是当前档。
+///
+/// ## 为什么用勾选框而不是分段键
+///
+/// 用户拍板的口径是「打勾选择」。而这一页其余的可选项（主题、模块）用的都是
+/// 勾选框，**同一页里混两种选择形态会让"这一条还能不能改"变得看不出来**。
+///
+/// ## 点已勾上的那颗 = 取消还是保持
+///
+/// **保持**。三颗都是真选项、没有"不选"这一档；点当前档就什么都不发生。
+/// 官方 `Checkbox` 给的是**翻转后**的值，照着它写成"取消勾"会造出
+/// "一颗都不勾"的非法状态，而那个状态在 `close_action_of` 里落回
+/// `Ask`——**界面上看着没选、实际等于选了 Ask**，是那种最难查的骗。
+fn close_action_picker(st: &SettingsState, this: &Entity<Shell>) -> impl IntoElement {
+    v_flex()
+        .w_full()
+        .gap(px(GAP_TIGHT))
+        .children([
+            (
+                CloseAction::Ask,
+                store::CLOSE_ASK,
+                "每次都问：弹出面板让我选（默认）",
+            ),
+            (
+                CloseAction::Tray,
+                store::CLOSE_TRAY,
+                "直接关闭到托盘：程序留在后台，定时同步照常",
+            ),
+            (
+                CloseAction::Exit,
+                store::CLOSE_EXIT,
+                "直接完全退出：后台同步也一起停",
+            ),
+        ]
+        .map(|(kind, raw, label)| {
+            let me = this.clone();
+            // ⚠️ id 必须带 raw：同一帧三颗都在，gpui 按 `ElementId` 全局存状态，
+            // 同名会共用一份勾选状态（D61）
+            Checkbox::new(SharedString::from(format!("set-close-{raw}")))
+                .checked(st.close_action == kind)
+                .label(label)
+                .on_click(move |_checked, _window, cx| {
+                    me.update(cx, |this, cx| this.set_close_action(raw, cx));
+                })
+        }))
 }
 
 /// 勾选区一行放几颗

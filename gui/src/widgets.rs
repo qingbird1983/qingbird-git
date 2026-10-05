@@ -120,7 +120,26 @@ fn palette_hint(t: &Theme, window: &Window) -> AnyElement {
 ///
 /// **不加边框、不加阴影。** 这一屏已经有表格的横线当结构了，
 /// 再给每张卡套一圈框会变成"框里套框"；四张卡靠背景色与 8px 间距分组就够。
-pub(crate) fn stat_card(n: usize, label: &str, color: Hsla, t: &Theme) -> Div {
+///
+/// ## 图标位（阶段 21-8）
+///
+/// 原来这张卡只有数字与文字，**没有图标**——所以总览页那一屏看起来
+/// "图标大大小小各种风格"，其实那一处是**压根没有**。现在补上一枚
+/// lucide 图标（16px），与左工具栏、导航轨是同一套线框、同一档尺寸。
+///
+/// ⚠️ **图标颜色跟着数字走**，不取中性灰：数字已经在用语义色表达状态
+/// （已同步绿 / 落后橙 / 分叉红），图标再给一个中性色就成了两套信号，
+/// 而"这颗图标的颜色和那个数字无关"是假的——它们说的是同一件事。
+/// 数字为 0 时**两者一起降到 tier4**：一排彩色图标配一排 0 会显得吵，
+/// 而"没东西"本来就不该有动作色。
+pub(crate) fn stat_card(
+    n: usize,
+    label: &str,
+    color: Hsla,
+    icon: gpui_kit::assets::IconName,
+    t: &Theme,
+) -> Div {
+    let tint = if n > 0 { color } else { tier4(t) };
     v_flex()
         .flex_1()
         .gap(px(GAP_TIGHT))
@@ -128,33 +147,55 @@ pub(crate) fn stat_card(n: usize, label: &str, color: Hsla, t: &Theme) -> Div {
         .rounded(px(R_LG))
         .bg(t.colors.popover)
         .child(
-            div()
-                .text_size(px(FS_NUM))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if n > 0 { color } else { tier4(t) })
-                .child(n.to_string()),
-        )
-        .child(
-            div()
-                .text_size(px(FS_SEC))
-                .text_color(tier3(t))
-                .child(label.to_string()),
+            h_flex()
+                .w_full()
+                .gap(px(GAP_TIGHT))
+                .items_center()
+                // 图标在数字**左边**：先认形状、再读数——中文语境下数字不是
+                // 段首，左边一个图标把这一行锚住，四张卡的视觉重量才对齐
+                .child(icon_md(icon).text_color(tint))
+                .child(
+                    div()
+                        .text_size(px(FS_NUM))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(tint)
+                        .child(n.to_string()),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .text_size(px(FS_SEC))
+                        .text_color(tier3(t))
+                        .child(label.to_string()),
+                ),
         )
 }
 
 /// 圆角胶囊徽章：蓝灰「未提交 / 待推送 / 运行中」与暖橙「可更新」
+///
+/// **高度 24 而不是早先的 20（阶段 21-3）**：20 高装 11px 的字，
+/// 上下各只剩 4.5px，气口被压到"贴着字"——用户反馈的「太扁」就是这个。
+/// **24 是官方 `Size::Small` 按钮的高度**，取它而不是另填一个数：
+/// 胶囊与并排的小按钮在同一行里时，行高本来就该由最高的那件决定，
+/// 胶囊跟着那颗按钮走，两类东西在一条基线上才对得齐。
+/// 字仍是 `FS_META`（11px），只改外框不动字——把字也放大就不是"胶囊加高"，
+/// 是把徽章升格成第二级文字，行内会开始互相打架。
 ///
 /// **不接 `Theme`**：它一个主题字段都不用，接了只会逼调用方在 `'static`
 /// 闭包里想办法弄到主题（侧栏的 `suffix` 闭包就拿不到）。
 /// 颜色由调用方算好传进来，那边有主题。
 pub(crate) fn pill(text: &str, fg: Hsla, bg: Hsla) -> Div {
     div()
-        .h(px(20.0))
+        .h(px(PILL_H))
         .px(px(8.0))
         .rounded_full()
         .bg(bg)
         .items_center()
         .justify_center()
+        // 21-3b：**不给任何描边，也不给焦点环**。用户说的「选中后有高亮边框」
+        // 来自 `Input` 获焦时的官方描边，不是胶囊自己画的——胶囊是纯展示件，
+        // 不可点、不接受输入，给它留一个焦点环只会让"它能被选中"变成一句假话。
+        // 颜色变化（换 `bg` 表达状态）仍然是唯一的选中反馈。
         .child(
             div()
                 .text_size(px(FS_META))

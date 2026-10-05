@@ -23,7 +23,17 @@ Windows 桌面工具：本地 Git 仓库一键同步。**Rust 原生 GPUI 界面
 - 文档资料放在：`README.md`、本文件、`docs/UI-ROADMAP.md`（**唯一施工真源**，
   路线与决策台账 D1–D34）、`docs/UI-DESIGN.md`（设计规范）
 - 临时实验放在：不要提交到仓库
-- 测试文件放在：Rust 单元测试在各模块 `#[cfg(test)]` 中（core 141 个、gui 32 个）
+- 测试文件放在：Rust 单元测试在各模块 `#[cfg(test)]` 中（core 169 个、gui 72 个）
+- ⛔ **单测里不许 `std::env::set_var` 去改进程级全局**（`APPDATA` 尤其）。
+  cargo 默认**多线程**跑同一个二进制里的用例，而别的模块也在改同一个变量
+  （`scan_cache` 自己带了一把 `APPDATA_LOCK`，注释里明写「并行跑会
+  『偶发红、重跑又好了』」）。⇒ **把被依赖的那个值收成函数参数**，
+  单测整条链路都在沙箱里跑，**并行安全由构造保证，不靠一把运行时锁**。
+  `diag` 那一版是这么写的：`log_path_in(Option<&str>)` / `note_at(..)` / `note_to(&Path, ..)`。
+  **连带两条纪律**：① 单测跑完要**核对它没往真实目录写**（本项目：
+  `cargo test` 连跑 5 遍，真实 `app.log` 长度必须 260→260 不变）；
+  ② **"跑绿一次"对 flaky 零证明力**——本项目那条用例第一次跑就是绿的，
+  绿是侥幸，隔一轮改别处重跑才红，而红的原因是**别的用例**
 
 ## 常用命令
 
@@ -34,7 +44,53 @@ Windows 桌面工具：本地 Git 仓库一键同步。**Rust 原生 GPUI 界面
 GUI 侧单测：`cargo test -p qingbird-gui`（32 个，只放不依赖 gpui 初始化的纯逻辑；
 GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「界面怎么验」）
 
-出 exe：`cargo build --workspace` → `target/debug/qingbird-git.exe`
+出 exe（调试）：`cargo build --workspace` → `target/debug/qingbird-git.exe`（~66 MB）
+
+出 exe（发布）：`cargo build --workspace --release` → `target/release/qingbird-git.exe`
+（~32 MB，**约 5 分半**——gpui 那一大棵树。**release 与 debug 是两条产物路径**，
+出安装包只能用 release 那条，别拿 debug 的凑）
+
+出安装包：`pwsh scripts/build_installer.ps1`（顺带编 release；
+已编过只想重打包就加 `-SkipBuild`）→ `dist/qingbird-git-Setup-0.1.0.exe`（~9 MB）
+- 打包用 **Inno Setup 6**，脚本 `installer.iss` 在仓库根。本机已装
+  （`%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`；NSIS / WiX / cargo-wix
+  / cargo-bundle **一个都没有**）。**按用户安装、免 UAC**，装到
+  `{localappdata}\Programs\青鸟 Git`
+- **应用是真正的单文件 exe**：运行期一个文件都不读（`theme.json` 走
+  `include_str!`、图标走 `include_bytes!`、托盘位图来自 `OUT_DIR`），
+  所以 `[Files]` 只有它一条。**用户配置在 `%APPDATA%` 下、不在安装目录里，
+  卸载不会带走**
+- ⚠️ **`installer.iss` 与 `packaging/lang/zhCN.isl` 必须带 UTF-8 BOM**。
+  没有 BOM，Inno 按系统 ANSI（本机 GBK）读，中文全变乱码，
+  而 ISCC **照样报 "Successful compile"**。`build_installer.ps1` 每次都会补
+- ⚠️ **`OutputDir` / `MessagesFile` 相对 ISCC 的工作目录解析，不是相对 .iss**
+  ——所以那两条路径写成"相对仓库根"，脚本里先 `Set-Location` 到仓库根。
+  写 `..\dist` 过一次，包吐到 `F:\AIwork\dist\`（**仓库外面**）
+- 中文向导来自社区翻译
+  [kira-96/Inno-Setup-Chinese-Simplified-Translation](https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation)
+  （官方发行里没有；`raw.githubusercontent.com` 在本机不通，**`git clone` 是通的**）
+- ⛔ **`gui/src/main.rs` 必须有 `#![cfg_attr(not(debug_assertions),
+  windows_subsystem = "windows")]`**。少了它 Rust 默认编出 **console 子系统**
+  （PE 头 `Subsystem=3`），Windows 启动就**分配一个控制台** ⇒ 从资源管理器双击
+  / 从开始菜单点，必带一个黑终端窗口（2026-10-05 实机装完才发现）。
+  **必须用 `cfg_attr` 不写死**：release 是用户那份（要 GUI 子系统），
+  **debug 要保留控制台**——它才是 agent 自己的验收产物（`steps.py` 抓帧、
+  `startup_probe.py`、panic 栈、`eprintln!` 诊断全靠 stderr），
+  写死会让 debug 的 panic 消息**直接丢失**，「闪退」变成查不了的事。
+  判据不取「代码写了」而取产物：`python scripts/pe_subsystem.py <exe>`
+  读 PE Optional Header 偏移 68 那个 WORD，**2 = GUI / 3 = console**
+- ⛔ **release 走 GUI 子系统 ⇒ 没有 stderr**。凡是「出错了但界面上看不见」的地方
+  写 `crate::diag::note(..)`（落 `%APPDATA%\com.qingbird.git\app.log`，带时间戳，
+  超 512KB 轮转成 `app.log.1`，**永不 panic 永不阻塞**），**别再写 `eprintln!`**
+  ——它在 debug 里好好的，装到用户机器上就凭空消失（托盘建不出来会变成
+  「完全静默、什么都不发生」）。`main()` 第一行的 `diag::install_panic_hook()`
+  解决同一个问题的 panic 版本；**只写日志、不弹 `MessageBox`**（那会让一个后台
+  panic 变成模态框卡死整条消息泵）
+- **`os.rs` 派生子进程一律加 `CREATE_NO_WINDOW`**（`explorer` / `cmd /c start` /
+  浏览器 / **选文件夹的 `powershell`**——最后这条会挂黑框**阻塞 200–400ms**
+  等用户在选）。**唯一例外是 `open_terminal`**：`wt` / `cmd start powershell`
+  **故意不加**，用户点的就是「开终端」，加了功能等于作废。
+  判据是「**这颗操作交付给用户的东西本身是不是一个窗口**」
 
 **GUI 只能由用户双击 exe 验收**：从 agent shell 直接拉起的 GUI 进程会随命令结束被回收
   （2026-10-01 起 spike-guise 已删除，编译缓存挪到根 `target/`，走默认 target-dir；
@@ -70,11 +126,71 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
   `.text_color(tier3(t))`（Slate #5D5B54），默认继承的是墨色，观感"太深"
 - **Input 同理用 `.small()`**：`.xsmall()` 只有 20px 高、4px 水平内边距，字贴边；
   small = 24px 高 / 8px 内边距
+- ⛔ **`.loading(true)` 的按钮完全不响应指针**（基座 `button.rs:1679`，**有单测锁着**：
+  `assert!(!Button::new("test").loading(true).interactive())`，原文 "A loading button
+  must be as inert as a disabled one"）。2026-10-05 踩实：停止键写了
+  `.loading(lg.running)`，而它**只在 running 时出现** ⇒ **这键一出现就是死的**，
+  而它正是构建卡死时唯一的救命键。`cargo check` 零错、单测全绿、**抓帧完全正常**
+  （按钮在、颜色对、hover 也变）——失效的不是某个分支，是整颗按钮。
+  **判据：`.loading()` 与「这颗键自己就是那个进行中操作的终止手段」互斥**——
+  `loading` 答"这个操作在进行中，别再点"，停止答"我来结束它"，语义相反。
+  同理别给它 `.disabled(running)`。"正在跑"不用它表达：键**只在 running 时出现**，
+  存在本身就是指示器。⇒ 路线表 **D64**
 - **图标只认一套**：`use gpui_kit::assets::IconName as AssetIcon`（完整 lucide 1830 个 + 品牌 Bird）。
   不要再用 `component::IconName`——那是另一套，线宽与视觉重量不同，且没有 GitBranch
 - **hover 与动效**：gpui 没有 CSS 那样的 `:hover` 样式，悬停靠 `on_hover` 记状态
   （`Shell.hovered`，带 on_hover 的行返回类型变 `Stateful<Div>`）；
   加载占位用官方 `Skeleton`（自带呼吸动画），进度动画用 `with_animation`
+- ⛔ **要「到位后过冲再收住」的动效，官方两条弹簧档都做不到，别硬用**
+  （2026-10-05 实机：「侧栏滑出后没有回弹效果」）。欠阻尼弹簧的第一次过冲
+  ≈ 行程的 `exp(-πζ/√(1-ζ²))`：
+
+  | 档 | ζ | 过冲 | 侧栏 220px 行程上的实际过冲 |
+  |---|---|---|---|
+  | 官方 `spring_control` | **1.00**（`Spring::new` 的默认，**没被覆写**） | 0% | 0px，压根不过冲 |
+  | 官方 `spring_move` | 0.85 | 0.63% | **1.4px**——算得出，**看不见** |
+  | `tokens::SPRING_BOUNCE_DAMPING` | 0.60 | 9.5% | **21px** |
+
+  ⇒ `theme.json` **没有 motion 段**（键只有 name/mode/font/mono_font/radius/
+  radius.lg/colors），动效只能落在代码里，所以用 `tokens::spring_bounce()`。
+  **判据：位移越大越要低阻尼**；小位移反过来**必须**高阻尼（0.6 阻尼下 4px
+  的过冲会变成「抖了一下」）。`tokens.rs` 有单测把过冲钉在 **5%–15%**——
+  这类缺陷 check 零错、单测全绿、弹簧确实在跑、抓帧看着正常，
+  **任何以「有没有报错 / 有没有在动」为判据的自查都拦不住它**，
+  只能把「过冲量本身」写成可计算的断言
+- ⛔ **侧栏与检视抽屉是同一套写法的两份拷贝，改一处必须回头改另一处**
+  （2026-10-05 实机：左栏修好，用户立刻报「右栏还是会弹簧一下」）。
+  两边各有一个**代次字段**（`sidebar_gen` / `insp_gen`），各自在
+  `commit_*_width` 里自增。**这两个代次不是漏抄、不能"统一成一个"**——
+  它们是两个独立的 `ResizableState`，动画 id 若共用，两个弹簧会抢同一份
+  keyed state、互相把对方拽走。**判据：凡是"两处用了同一套写法"，
+  改完一处要逐处搜第二份，并在字段注释里写明"为什么它们必须各留一份"**，
+  否则下一个人会当重复代码去合并
+- ⛔ **`spring()` 的内部 position 外部改不了**——它在 `window.use_keyed_state`
+  里，且**静止在目标上时直接返回、不推进**（`motion.rs:609`）。
+  ⇒ **凡是由「拖拽把手」这类直接操作改出来的值，一律要把弹簧重新就地锚定**，
+  办法是**换一份 id**（新 id 的初值就是 `position = target`，`motion.rs:586-592`）。
+  本项目用 `Shell::sidebar_gen` 代次后缀，**只在 `commit_sidebar_width`
+  （拖拽松手）里自增**。不换的后果实测是：面板被**拽回旧宽度再弹过来**，
+  **每次拖拽必现**。换 keyed state **不会泄漏**——`window.rs:3347` 每帧
+  `next_frame.clear()`，当帧没被访问的直接回收
+- ⛔ **外部文件拖放的 payload 类型是 `ExternalPaths` 不是 `PathBuf`**。
+  写 `on_drop::<PathBuf>` **一行都不报错，只是永远不触发**——`PathBuf` 是
+  「本应用自己往外拖文件」时的 payload（`gpui-pre/src/window.rs:8203` 那个
+  测试用的就是它，很容易看成是外部拖放）。外部拖进来的走
+  `ExternalPaths`（`interactive.rs:694`），取路径用 `.paths()`。
+  底下三层早通、只是没人挂监听：平台每个窗口都 `RegisterDragDrop`
+  （`gpui-pre-windows/src/window.rs:1517`）、`Entered` 把 payload 塞进
+  `cx.active_drag`（`gpui-pre/src/window.rs:5478`）、`Submit` 被翻成一次
+  `MouseUpEvent`（`:5499`）所以元素级 `on_drop` 天然收得到；光标侧对 `CF_HDROP`
+  直接给 `DROPEFFECT_COPY`（`gpui-pre-windows/…:1169`），**不用挂 `can_drop`**。
+  **「窗口任意位置都能放」就是把 `on_drop` 挂根 div**：drop 监听在**冒泡阶段
+  + 命中即触发**并 `stop_propagation`（`div.rs:2897-2924`），本项目没有任何
+  子元素注册 drop 监听，事件一路冒到根
+- **拖入/悬停那类标志有三个写点，缺一不可**：`on_drag_move` 置位、
+  `on_file_drop_exit` 清位、**`on_drop` 也要清位**。第三个最容易漏——
+  漏了的话那个提示层（多半是 `.absolute().inset_0()`）会**一直挂着并盖住
+  整个界面**。判据：凡是用它控制一个整屏覆盖层的标志，把三个写点一起数一遍
 - **快捷键一律走官方 Action + `cx.bind_keys`**，不自己 `on_key_down` 判键。
   Action 都是 `#[action(namespace = qingbird_gui, no_json)]` 的 unit struct
   （**带 payload 的 Action 要 `serde::Deserialize` + `schemars::JsonSchema`，
@@ -168,8 +284,10 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
   自研时必须接住官方的三样：
   ① **窗口控件只挂 `window_control_area`、不自己处理点击**（官方 `:220-222` 的
   `when(is_windows, ..)`，它的 `on_click` 只在 `is_linux` 臂里）。自己
-  `on_click` 调 `remove_window()` 会绕过 `WM_CLOSE`，而 `tray.rs` 的托盘唤起与
-  `QuitMode::Explicit` 全按"系统关窗 → 销毁窗口 → 进程留着"设计，绕过去托盘唤不醒。
+  `on_click` 调 `remove_window()` 看着一样，但**不是"绕过 WM_CLOSE 就唤不醒"**——
+  那条是错的，见下面「两条查错的结论」；**但仍然别自己处理**：`WM_CLOSE` 会走
+  `on_window_should_close`，而关窗询问面板（阶段 22）就挂在那条路上，
+  自己 `on_click` 调 `remove_window()` 等于把这一档整个绕过去。
   ② 图标用 `WindowMinimize`/`WindowMaximize`/`WindowRestore`/`WindowClose`
   （`title_bar.rs:148-151`，lucide 一套里就有），最大化/还原按 `window.is_maximized()`
   翻，悬停面同源 `secondary_hover`/`danger`（`:175-183`）。**别画成空白块**——
@@ -192,6 +310,30 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
   `image::guess_format` → `PngDecoder`，`image` 已经在它的依赖树里）。
   `gui/src/app_assets.rs::AppAssets` 只比 `AllAssets` 多认一条路径，其余全转交。
   ⚠️ `gpui_kit::component::Icon` 只会 `svg().data(..)`，**喂 PNG 是空白方块**
+- **图标是**一份源图派三份**（`gui/assets/app-icon.png` → `gui/build.rs`），
+  改图标只改那一张，**别再去别处画**：
+
+  | 位置 | 要什么 | 怎么来 |
+  |---|---|---|
+  | 标题栏左上角 | PNG | `include_bytes!` 原始 PNG（`app_assets.rs`） |
+  | 系统托盘 | **原始 RGBA 字节** | build.rs Lanczos3 缩到 32 → `app-tray.rgba`（`tray.rs` 只 `include_bytes!`） |
+  | 桌面 / 任务栏 / Alt-Tab | exe 里的 **`.ico` 资源** | build.rs 编七档 PNG 条目 → `app.ico` → `embed-resource` |
+
+  **构建期解，运行期零新依赖**：`image` 与 `embed-resource` 本来就在
+  `Cargo.lock` 里（`image` 是 `gpui-pre` 的传递依赖），进 `[build-dependencies]`
+  不带来额外编译成本，**主依赖表一个图像库都没加**。托盘原来那套手绘矢量
+  （-160 行）已删，**别再加回来**。
+  ⚠️ **`embed_resource::compile()` 吃的是 `.rc` 脚本，不是 `.ico`**（D68）——
+  喂 `.ico` 进去 `rc.exe` 不报错、只产出一个**零条目的空 `.res`**，
+  **构建全绿而 exe 里一个图标都没有**。更早一层的判据是**文件头 32 字节**：
+  `DataSize=0` + `HeaderSize=0x20` = 空资源文件（`app.lib` 32 字节 vs 正常的 121332）。
+  ⇒ build.rs 里先落一份 `1 ICON DISCARDABLE "…"` 再交给它；路径一律换正斜杠
+  （rc 的预处理里 `\` 是续行符）
+  ⚠️ **源图四角 alpha=252，满幅不透明**——那个圆角是**画在图里的**，
+  不是透明圆角。后果：托盘上是**一块深色方块**（深色任务栏上会融掉）、
+  深色主题下标题栏那枚露白色四角。**想要透明圆角得先有第二张带 alpha 的源图**，
+  不能在托盘这头做遮罩——那会让三处又不一致（已钉成单测
+  `tray_icon_is_opaque_edge_to_edge`）
 - **官方 `Button` 的图标档是从按钮档推出来的，两条都要查**：
   `Size::Size(v)` → 图标 `v×0.75` 且文字 16px（AGENTS 禁用的那条路）；
   其余档原样传给图标，而 icon-only 外框是 `XSmall=20 / Small=24 /
@@ -219,19 +361,34 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
 - **托盘框架不带**（gpui-pre 0.3.7 全量搜索无 tray API），要自己挂 `tray-icon`；
   系统通知用 gpui-kit 的（`window.push_notification(.. .system())`），
   但未打包的 exe 必须先 `cx.set_app_identity`，否则发不出去。
-- **Windows 上"关窗不退出"拦不住关闭动作，但拦得住进程退出**——两件事，
-  分清了就不会得出"做不了"的错结论。查过 `gpui-pre-0.3.7` 源码的三条事实：
-  ① `TitleBar::on_close_window(..)` 第一行就是 `if cfg!(target_os = "linux")`，
-  Windows 上这颗钩子不会被写进去，点 X 一律 `window.remove_window()`；
-  ② `App::on_window_closed(..)` 的文档写明"窗口在该回调被调用时已不可访问"——
-  它是关闭**之后**的回调，拦不住；③ `remove_window()` 只是 `self.removed = true`，
-  整个 gpui-pre 搜不到 `prevent_close`。**别再花时间找"阻止关闭"的那个钩子了，
-  它不存在。**
-  **但要的是"关掉窗口之后进程别退出"**，那只由 `QuitMode` 决定
+- **Windows 上"关窗不退出"要分两件事：拦不拦得住关闭 / 拦不拦得住退出。**
+  真正要的是后者，那只由 `QuitMode` 决定
   （`app.rs:2922-2926`）：`Default` 在非 macOS 上**等于** `LastWindowClosed`
   （= 最后一个窗口关了就退出），`Explicit` 才是"只在我调 `App::quit` 时退"。
   设法：`gpui_kit::application().with_quit_mode(gpui_kit::QuitMode::Explicit)`
   （`QuitMode` 经 `gpui_kit::*` = `gpui::*` 转出），或运行期 `cx.set_quit_mode(..)`。
+- ⛔ **"Windows 上没有拦截关闭的钩子，它不存在"——这条是错的**（2026-10-05 查实）。
+  当年只查了两层，**漏了 `PlatformWindow` trait 那一层，而它在平台 crate 里**
+  （`gpui-pre-windows`，不翻那整个 crate 根本看不见）：
+  ① `TitleBar::on_close_window(..)` 第一行 `if cfg!(target_os = "linux")`——✅ 真的
+  ② `remove_window()` 只是 `self.removed = true`、没有 prevent 参数——✅ 真的
+  ③ **漏的**：`gpui-pre/src/window.rs:6658` `pub fn on_window_should_close(cx,
+  f: Fn(&mut Window, &mut App) -> bool)`，Windows 侧 `events.rs:110` 消息泵里
+  **`WM_CLOSE => self.handle_close_msg()`** 真的调它，`:336-341` 返回 `false` 时
+  回 `Some(0)`（DefWindowProc 不跑）⇒ **窗口不关**。已用它做了关窗询问面板
+  （`dialogs/close_prompt.rs`，见路线表阶段 22 / D65）。
+  ⇒ **判据：拿到"做不到"先写下"具体做不到的是哪一步"，再问那个能力挂在哪一层。**
+  组件层没给钩子 ≠ 框架没给；常见的一层之差：本 crate vs **平台 crate**
+- ⛔ **"自己 `on_click` 调 `remove_window()` 会绕过 `WM_CLOSE`，托盘唤不醒"
+  ——这条也是错的**。托盘唤起是 `tray.rs::show_or_open`：它只看 `cx.windows()`
+  里有没有窗口，**有就 `activate_window()`、没有就 `open_main_window()` 新开一个**，
+  **与窗口当初是怎么关的毫无关系**。同一条错误推论的第二个受害者
+- ⛔ **置一次性标记之后必须 `cx.notify()`**：`Entity::update` **不会**自动安排
+  下一帧。2026-10-05 第三次为这条交学费——`on_window_should_close` 的回调里
+  置了 `pending_app_quit` 却没 notify，而那次 `WM_CLOSE` 已被回调返回的 `false`
+  挡住，没有别的东西会触发重绘 ⇒ 标记躺在字段里没人消费，
+  表现为「点了完全退出，既不关窗也不退出」。`cargo check` 零错、单测全绿、
+  **抓帧完全正常**
   旧 Tauri 版同样是**销毁窗口**（`window.destroy()`），它要的也只是进程活着。
   ⚠️ **连带约束**：`QuitMode::Explicit` 必须与托盘**同一次改动**里一起上——
   只设它而没有托盘，窗口一关应用就变成"活着但没有任何入口"的幽灵，比直接退出更糟。
@@ -275,6 +432,13 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
   `scripts/qbguard.py` 会覆盖 `APPDATA`、不设就打警告、收尾再按
   `mtime+size+sha256` 核对真实 config 并在不一致时报警（`steps.py` /
   `uia_probe.py` / `a11y_stress.py` / `startup_probe.py` 都走它，**别再各写一遍**）；
+  ⚠️ **`QB_APPDATA` 是脚本之间的约定，只有 `qbguard` 认识它**——由它翻译成
+  子进程的 `APPDATA`，**应用读的是 `APPDATA` 本身**（`store::config_path()`
+  就是 `std::env::var("APPDATA")`）。⇒ **新写任何起子进程的脚本，
+  `env` 一律 `qbguard.launch_env()`，不自己拼**；并断言
+  `env["APPDATA"] == 沙箱` 再 `Popen`（`startup_smoke.py` 2026-10-05 就死在这：
+  另起炉灶只设了 `QB_APPDATA`，15 秒里改写了用户真实 `config.json`——
+  **闸门是有效的，正是它的收尾指纹核对报出来的；坏的不是纪律，是我绕过纪律**）；
   ③ **窗口未获焦时第一击只用于激活窗口**，脚本要补一次空点击，
   否则"点了没反应"会被误判成功能坏了。
   ④ **用户 17 个真实仓库一律不许动，验收只在 `$TEMP` 现造的合成仓库上做**。
@@ -341,6 +505,22 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
   ⚠️ **且必须在工作副本克隆完「之后」再往远端推一笔**——克隆时就把远端那几条
   一起拿走了，ahead/behind 都是 0，点拉取是"没有新提交可拉取"，**那是空跑**。
   要验失败那一档就再造一个「远端推一笔 + 本地也提交一笔」的分叉副本
+- **验「托盘里那枚图标」别用截图差分，连栽了三次，每次错法都不同**（2026-10-05）：
+  ① 截**整条任务栏**求差 → 应用一启动任务栏中间就多出一个窗口按钮，
+  差出 **525px 宽**一长条，把那枚 16px 小图标淹在里面
+  ② 只截**通知区**求差 → 收窄对了，差出来的是**输入法「中/英」在闪的 15×15**
+  ③ 点开折叠面板肉眼看 → 一屏 8 个陌生图标，**认错一个就得出了"图标没出来"**
+  ⇒ **根因是托盘图标默认在「隐藏的图标」折叠面板里**，通知区那一截启动前后
+  **完全一样**；而差分法**分不清"新增"与"闪了一下"**。
+  **机器判据是 `Shell_NotifyIconGetRect`**：`tray-icon` 用的是无 GUID 的老式身份
+  （`NOTIFYICONDATAW` 只填 `hWnd` + `uID`），而 `uID` 是**进程内自增计数器**
+  （`platform_impl/windows/mod.rs:97`），扫 0–7 就能撞上，成功即返回它的屏幕矩形。
+  面板按 `TopLevelWindowForOverflowXamlIsland` 这个顶层窗口的矩形抓——
+  **别按固定坐标裁**，面板高度随图标数量变，裁到的会是桌面壁纸，看着像"没开"。
+  同理 `FindWindowW("TrayNotifyWnd")` **返回空**：它是 `Shell_TrayWnd` 的
+  **子窗口**，得用 `FindWindowExW(parent, ..)`。工具：`scripts/tray_icon_query.py`
+  / `flyout_shot.py` / `explorer_icon_check.py`（后者验桌面——"PE 里存了什么"与
+  "Windows 会画什么"之间还隔着**系统图标缓存**，两头都得过）
 - **凡是要靠 `&self` 才能调的显示判据，抽成纯函数再单测**（`ov_status_text`、
   `badge_kind_of`、`scanned_note`、`op_line` 都是这么来的）。Shell 建起来要 gpui
   上下文，于是这类文案**留在方法里就只能靠抓帧看**——而抓帧只能证明"渲染成那样了"。
@@ -428,7 +608,14 @@ GUI（`gui/src`）：
 | `tray.rs` | **托盘图标 + 三项菜单 + 左键唤起 / 窗口没了就重开**（Q11）。窗口选项也从这里出，首次开窗与托盘重开共用同一份 |
 | `scheduler.rs` | **进程级定时器**（Q8）。`App::spawn` 不绑窗口，窗口关着也照跑；每轮 `try_begin_op` 与用户操作互斥 |
 | `dialogs/` | `repo` `init` `fork` `clone` `cmds` `commit` `settings` `batch_log` 八个官方 `Dialog` |
-| `app_assets.rs` | 资产源 = `AllAssets` + 一张应用位图 `gui/assets/app-icon.png`（源图 `assets/icon-source.png` 的 128px 展开）。**改图标只改 `gui/assets/` 下这一张** |
+| `app_assets.rs` | 资产源 = `AllAssets` + 一张应用位图 `gui/assets/app-icon.png`。**改图标只改这一张**——托盘与桌面那两份由 `gui/build.rs` 从它派生（见上面「一份源图派三份」） |
+| `build.rs`（`gui/`） | 把那一张源图派生成托盘 RGBA（32×32）+ 七档 `.ico`，并用 `embed-resource` 嵌进 exe。**换图标不需要改它**；改的是"要几档、什么尺寸、怎么嵌" |
+
+  ⚠️ **`assets/icon-source.png`（1024 那张）没有任何代码读它**——`app_assets.rs`
+  与 `build.rs` 都只读 `gui/assets/app-icon.png`（128），`gen-icons.mjs` 退役后
+  已无展开脚本。它是**纯存档**。**照着它重画并存回 1024 那张，重新构建什么都不会变。**
+  重设计的正确落法：直接替换 `gui/assets/app-icon.png`（**必须 128×128**，
+  `build.rs` 与那条单测都钉着这个尺寸），顺带把 1024 那张当草稿更新或直接删掉。
 
 **后台自动同步调度器已经搬过来了**（`crates/core/src/scheduler.rs` + `gui/src/scheduler.rs`，
 阶段 12 / Q8）：`interval_due` / `daily_is_due` / 补跑逻辑 / `last_auto_check` 维护都在，

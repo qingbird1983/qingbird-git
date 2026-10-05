@@ -5612,7 +5612,9 @@ name = "qingbird-gui"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "embed-resource",
  "gpui-kit",
+ "image",
  "muda",
  "qingbird-core",
  "serde_json",

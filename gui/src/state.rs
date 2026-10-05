@@ -18,7 +18,7 @@ use qingbird_core::history::{CommitDetail, CommitPatch, CommitSummary};
 use qingbird_core::repos::{self, ActivityDay, ChangeEntry, LangStat};
 use qingbird_core::run_cmd::{self, Slot};
 use qingbird_core::space;
-use qingbird_core::store::{self, RepoEntry};
+use qingbird_core::store::{self, CloseAction, RepoEntry};
 use qingbird_core::types::{ForkInfo, RepoStatus};
 use std::collections::{HashMap, HashSet};
 
@@ -440,6 +440,43 @@ pub(crate) struct Shell {
     /// 侧栏当前宽度（px，已夹在 200–360）。拖动结束后由 `on_resize` 写回这里，
     /// 折叠再展开时恢复的就是它。
     pub(crate) sidebar_w: f32,
+    /// 侧栏宽度的**代次**。只在 `commit_sidebar_width`（拖拽松手）里自增，
+    /// 并且**只用来给弹簧的 id 换个后缀**——见 `shell.rs` 里那段。
+    ///
+    /// ## 为什么需要它
+    ///
+    /// `spring()` 把状态挂在 `window.use_keyed_state(id, ..)` 上，静止在目标上时
+    /// **直接返回、不推进**（`motion.rs:609`）。于是拖拽这一路是脱节的：
+    /// 用户把面板从 220 拖到 300，**面板**到了 300，可弹簧的内部位置还停在 220。
+    /// 松手时 `sidebar_w` 变成 300 ⇒ 目标变了 ⇒ 弹簧从 220 起步往 300 弹，
+    /// 而 `resize_panel` 每帧把它按在弹簧值上——**面板被拽回 220 再弹过去**。
+    ///
+    /// 用户报的是「侧栏在拉大拉小时会弹簧一下很难受」，就是这个反向抽搐，
+    /// 而且**每次拖拽必现**。它不是"偶尔抖一下"，是稳定复现的整段回抽。
+    ///
+    /// ## 修法为什么是换 id
+    ///
+    /// 弹簧的内部状态在 `use_keyed_state` 里，外部**没有 API 能直接写它的 position**。
+    /// 换一个新 id 就是换一份全新状态，而 `use_keyed_state` 的初值是
+    /// `position = target`（`motion.rs:586-592`）——正好是"就地静止在新宽度上"。
+    ///
+    /// ⚠️ **不会泄漏**：keyed state 挂在 window 上，当帧没被访问的会在
+    /// `next_frame.clear()` 时丢掉（`window.rs:3347`）。换 id 的当帧旧状态
+    /// 就不再被访问 ⇒ 同帧回收。
+    ///
+    /// **代价**：拖拽中途若 `sidebar_w` 再变（例如松手后又立刻拖），会再换一次 id
+    /// 重新采纳——这正是想要的语义（每次非动画的宽度变更都重新采纳）。
+    pub(crate) sidebar_gen: u32,
+    /// 「正从资源管理器往窗口里拖东西」。只用来决定**画不画那张落点提示卡**。
+    ///
+    /// **不要拿它当「拖拽进行中」的权威状态**——权威是基座的 `cx.active_drag`，
+    /// 那里才有真正的拖拽会话。这是个纯展示用的镜像。
+    ///
+    /// 三个写点分别对应基座三个事件（`drag_drop.rs` 模块头有那张表）：
+    /// `on_drag_move`（进入窗口）置 true、`on_file_drop_exit`（拖出去）置 false、
+    /// `on_drop`（松手）置 false。第三个最容易漏——漏了的话提示卡会**一直挂着**，
+    /// 而它的 `.absolute().inset_0()` 又正好盖住整个界面。
+    pub(crate) dragging: bool,
     /// 「侧栏 / 主区」这条分隔的运行时状态。宽度、拖拽命中区、把手外观都在这里，
     /// 不要自己再存一份宽度——两份宽度必然有一帧对不上
     pub(crate) split: Entity<ResizableState>,
@@ -448,6 +485,18 @@ pub(crate) struct Shell {
     /// 检视抽屉当前宽度（px，已夹在 `INSPECTOR_MIN_W..INSPECTOR_MAX_W`）。
     /// 拖完由 `on_resize` 写回，收起再展开恢复的就是它
     pub(crate) inspector_w: f32,
+    /// 检视抽屉宽度的代次。**与 `sidebar_gen` 是同一个东西的两份**，
+    /// 理由、换 id 为什么能重新锚定、为什么不会泄漏 keyed state，
+    /// 全部见 `sidebar_gen` 的注释。
+    ///
+    /// ⚠️ **两栏各有一份，不是漏抄**：它们是两个独立的 `ResizableState`
+    /// （`split` 与 `insp_split`），动画 id 必须各自独立，否则两个弹簧
+    /// 会共用一份 keyed state、互相把对方拽走。
+    ///
+    /// 2026-10-05 实机：左栏修完用户立刻报「右栏还是会弹簧一下」——
+    /// **同一个 bug 的第二份拷贝**。凡是"两处用了同一套写法"的地方，
+    /// 改完一处要**回头把另一处也改了**，并写明为什么它们必须各留一份。
+    pub(crate) insp_gen: u32,
     /// 「我的」这一类**藏了哪些模块**（阶段 19）
     ///
     /// 存字段而不是每帧 `store::load()`：读配置要开一次文件，
@@ -494,6 +543,34 @@ pub(crate) struct Shell {
     pub(crate) group_open: [bool; 2],
     /// 仓库树的滚动句柄。定位某一行时用 `bounds_for_item` 把它滚进视野
     pub(crate) tree_scroll: ScrollHandle,
+    // ---------- 「日志」区 ----------
+    //
+    /// 输出流的滚动句柄（阶段 21-1）。**它要解决的是"日志不自己往下走"**：
+    //  `log.rs::output_stream` 早先只挂了 `.overflow_y_scroll()`，全项目
+    //  没有任何一处调过滚动 API，于是新行追加时视口**纹丝不动**——
+    //  git 的结论（最后那几行才是）永远看不见。
+    //
+    //  ⚠️ **必须由调用方给 id**，理由与它自己那份注释同源：gpui 的滚动状态按
+    //  `ElementId` 全局存，概览页的日志与批量结果对话框那份共用一个 id 就会
+    //  共用同一个滚动句柄——在对话框里滚一下，底下概览页的日志跟着跳。
+    //  所以两个调用点各挂各的（`log-stream` / `app-log`）。
+    pub(crate) log_scroll: ScrollHandle,
+    /// ⚠️ **这里没有「用户滚过就停下」那个 bool**（阶段 21-1）。
+    ///
+    /// 早先加过一个 `log_stick_to_bottom`，实测它**只写不读**——判据其实是
+    /// `log.rs::should_follow_bottom` 每帧拿 `offset` 与 `max_offset` 比出来的，
+    /// 这个字段谁也没读。留着的后果是**两处判据、只有一处生效**，
+    /// 下一个人照着字段名去改就会改到那个没人读的地方。
+    ///
+    /// 为什么判据是「贴不贴底」而不是「滚没滚过」：用户自己滚回底部后
+    /// 跟随就该自动恢复，否则会留一个只有用户自己摸得出来的怪状态
+    /// （"滚到底之后日志再也不往下走"）。
+    /// 批量结果对话框里那份输出的滚动句柄（阶段 21-1）。
+    ///
+    /// **必须与 `log_scroll` 分开**：gpui 的滚动状态按 `ElementId` 存，
+    /// 而批量汇总与概览页日志共用同一份 `LogState`——共用一个句柄的话，
+    /// 在对话框里滚一下，底下概览页的日志视口会被一起拽走。
+    pub(crate) batch_log_scroll: ScrollHandle,
     // ---------- 「说明」页签 ----------
     //
     /// 正文的 `TextViewState`。**自己建而不用 `TextView::markdown(id, text)`
@@ -519,6 +596,34 @@ pub(crate) struct Shell {
     /// 两者都只能在下一次 `render` 里兑现——后台任务里既没有
     /// `&mut Window`，也不能重入 `Shell::update`
     pub(crate) pending_reveal: Option<String>,
+    /// 「浏览…」点过了：设上之后**下一帧**拉起系统目录选择器并清空。
+    ///
+    /// ## 为什么必须是标记而不是就地调
+    ///
+    /// `IFileOpenDialog::Show` 要一个活的 `&mut Window`（回填 `InputState` 用），
+    /// 而对话框正文那个闭包只有 `&mut App`；在 `on_click` 里调
+    /// `cx.update_window(..)` 会**静默失败**——那一刻窗口已经被
+    /// `App::update_window_id` 从 `cx.windows` 里 take 走了，整个闭包被丢掉，
+    /// 外面那个 `.ok()` 再把错误吞掉，三处都不出声，表现为"点着没反应"
+    /// （AGENTS.md 记着这个坑，`repo_head.rs` 的复制按钮也栽过）。
+    ///
+    /// 与 `pending_reveal` 同一个套路：**置位 → `Render::render` 兑现**，
+    /// 那一帧里 `&mut self` 与 `window` 都在手边。
+    pub(crate) pending_folder: bool,
+    /// 点关闭键时怎么办（阶段 22）。**从配置读一次缓存在这里**，
+    /// 不是每次关窗去 `store::load()` 读一遍文件
+    pub(crate) close_action: CloseAction,
+    /// 关窗询问面板**待弹**：由 `on_window_should_close` 置位，
+    /// 由 `Render::render` 下一帧兑现（理由与 `pending_folder` 同源：
+    /// 那个回调跑在 `WM_CLOSE` 处理过程中，不能在那儿拉起模态浮层）
+    pub(crate) pending_close_prompt: bool,
+    /// 面板里「记住我的选择」那颗勾的当前状态。**每次开面板重置为 false**——
+    /// 用户主动勾上才叫"记住"，上一次勾过不等于这一次也要记
+    pub(crate) close_remember: bool,
+    /// 「完全退出」待执行：由 `on_window_should_close` 的 `Exit` 档置位，
+    /// 下一帧调 `App::quit()`。**不直接返回 `true` 让系统关窗**——
+    /// 那样只是销毁窗口，而 `QuitMode::Explicit` 下进程会留着
+    pub(crate) pending_app_quit: bool,
     pub(crate) scanning: bool,
     /// 上次状态扫描完成的秒级时间戳，0 = 本会话还没扫完过。
     /// 状态条展示"上次扫描 …"，点它重扫。
@@ -779,6 +884,11 @@ pub(crate) struct SettingsDialog {
     /// 当前是不是深色（阶段 20）。**只认深 / 浅两态**，
     /// 存进配置的 `system` 在界面上落浅色，见 `theme` 模块头
     pub(crate) theme_dark: bool,
+    /// 点关闭键时怎么办（阶段 22）。存判据后的枚举而不是原始串：
+    /// 界面拿它做 `==` 比对，不必每次都过一遍 `close_action_of`。
+    /// **同一个值在 `Shell::close_action` 上也有一份**——那份是
+    /// `on_window_should_close` 回调真正读的（它在消息处理里，不能读盘）
+    pub(crate) close_action: CloseAction,
     /// 「检测代理」在跑（按钮转圈、防连点）
     pub(crate) probing: bool,
     /// 探测结果的一句话

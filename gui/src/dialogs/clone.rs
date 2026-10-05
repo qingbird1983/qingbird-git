@@ -19,8 +19,9 @@ use gpui_kit::component::progress::Progress;
 use gpui_kit::component::{ActiveTheme, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, AnyWindowHandle, App, AppContext, Context, Div, Entity, Focusable as _,
-    InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window,
+    div, px, AnyElement, AnyWindowHandle, App, AppContext, Context, Div, Entity,
+    Focusable as _, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window,
 };
 use qingbird_core::clone;
 use qingbird_core::git;
@@ -38,12 +39,11 @@ use crate::tokens::*;
 const OUT_MAX_LINES: usize = 200;
 
 impl Shell {
-    /// 打开「克隆仓库…」。
+    /// 打开「克隆仓库…」对话框。
     ///
     /// 目标父目录默认取当前选中仓库的父目录：绝大多数用户的仓库都住在
     /// 同一个目录下，从那儿克隆最省事；一个仓库都没有时退回家目录
-    pub(crate) fn open_clone_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let parent = self
+    pub(crate) fn open_clone_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {        let parent = self
             .selected
             .as_deref()
             .and_then(|p| std::path::Path::new(p).parent())
@@ -77,6 +77,39 @@ impl Shell {
         });
         self.build_clone_dlg(window, cx);
     }
+
+    /// 兑现「浏览…」：拉起系统目录选择器，选完回填「克隆到」那一格。
+    ///
+    /// **由 `Render::render` 调**（那里 `&mut self` 与 `window` 都齐），
+    /// 所以这里能直接拿 `&mut Shell` 与 `&mut Window`——
+    /// 按钮的 `on_click` 闭包里两样都缺（见 `folder_pick_button` 的注释）。
+    ///
+    /// **取消不动原值**：`pick_folder` 把取消给成 `Ok(None)` 而不是 `Err`，
+    /// 用户按取消是一个正常决定；这里直接 return，输入框里已经填好的
+    /// 路径原封不动。
+    pub(crate) fn pick_clone_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(d) = self.clone_dlg.as_ref() else {
+            return;
+        };
+        // 跑着的时候别让人改目标目录：这一轮的路径已经交给 git 了
+        if d.running {
+            window.push_notification("正在克隆，先停掉这一轮再改目录", cx);
+            return;
+        }
+        let current = d.parent.read(cx).value().to_string();
+        match crate::os::pick_folder(&current) {
+            Ok(Some(picked)) => {
+                let parent = self.clone_dlg.as_ref().map(|d| d.parent.clone());
+                if let Some(parent) = parent {
+                    parent.update(cx, |st, cx| st.set_value(picked, window, cx));
+                }
+                cx.notify();
+            }
+            // 取消：什么都不做，也不报错
+            Ok(None) => {}
+            Err(e) => window.push_notification(e, cx),
+        }
+    }
 }
 
 impl Shell {
@@ -95,7 +128,7 @@ impl Shell {
                     let this = this.clone();
                     move |c: DialogContent, _w, cx: &mut App| {
                         let st = this.read(cx).clone_state();
-                        c.child(clone_body(&t, &st))
+                        c.child(clone_body(&this, ghost_variant(cx), &t, &st))
                     }
                 })
                 .footer(clone_footer(&this, ghost_variant(cx)))
@@ -297,7 +330,7 @@ impl Shell {
     }
 }
 
-fn clone_body(t: &Theme, st: &CloneView) -> Div {
+fn clone_body(this: &Entity<Shell>, gv: ButtonCustomVariant, t: &Theme, st: &CloneView) -> Div {
     v_flex()
         .w_full()
         .gap(px(GAP_LG))
@@ -305,7 +338,19 @@ fn clone_body(t: &Theme, st: &CloneView) -> Div {
             b.child(field(t, "仓库地址", Input::new(&e).small().w_full()))
         })
         .when_some(st.parent.clone(), |b, e| {
-            b.child(field(t, "克隆到", Input::new(&e).small().w_full()))
+            // 阶段 21-2：**输入框 + 一颗「浏览…」**。原先只有一个裸输入框，
+            // 要用户手打一整条 Windows 路径；旧 Tauri 版有这个入口，重写时掉了。
+            // 输入框仍然留着——「浏览」是选目录，而整条路径是唯一没有父目录的场合
+            b.child(field(
+                t,
+                "克隆到",
+                h_flex()
+                    .w_full()
+                    .gap(px(GAP_TIGHT))
+                    .items_center()
+                    .child(Input::new(&e).small().flex_1())
+                    .child(folder_pick_button(this, gv)),
+            ))
         })
         .child(hint(t))
         .when(
@@ -321,6 +366,38 @@ fn clone_body(t: &Theme, st: &CloneView) -> Div {
                     .child(e),
             )
         })
+}
+
+/// 「浏览…」那颗键。
+///
+/// ## 为什么不能在这里直接拉起对话框
+///
+/// `Dialog::content` 的闭包只有 `&mut App`，拿不到 `&mut Context<Shell>`，
+/// 也拿不到活着的 `&mut Window`（`InputState::set_value` 要后者）。
+/// 而**在窗口自己的事件回调里调 `cx.update_window(..)` 会静默失败**——
+/// 那一刻窗口已经被 `App::update_window_id` 从 `cx.windows` 里 take 走了，
+/// 闭包整个被丢掉，表现为「点着没反应」（AGENTS.md 与 `repo_head.rs` 记着同一个坑）。
+///
+/// 所以走**一次性标记**（`Shell::pending_folder`）：这里只置位，
+/// 由 `Render::render` 下一帧兑现——那一帧里 `&mut self` 与 `window` 都在手边。
+/// 与 `pending_reveal` / `pending_head_copy` 同一个套路。
+fn folder_pick_button(this: &Entity<Shell>, gv: ButtonCustomVariant) -> AnyElement {
+    Button::new("clone-browse")
+        .label("浏览…")
+        .custom(gv)
+        .with_size(Size::Small)
+        .tooltip("在资源管理器里挑一个目录")
+        .accessibility_label("选择目标文件夹")
+        .on_click({
+            let this = this.clone();
+            move |_, _, cx| {
+                // 不在这里 notify：标记会在 render 那一帧兑现并自行 notify
+                this.update(cx, |this, _| {
+                    this.pending_folder = true;
+                });
+            }
+        })
+        .into_any_element()
 }
 
 fn field(t: &Theme, label: &str, input: impl IntoElement) -> Div {

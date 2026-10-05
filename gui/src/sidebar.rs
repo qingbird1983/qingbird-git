@@ -14,7 +14,9 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::sidebar::{SidebarItem as _, SidebarMenuItem};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{Icon, Selectable as _, Sizable, Size, Theme, WindowExt};
+// `ActiveTheme` 是 `cx.theme()` 的来源：suffix 闭包拿到的是 `&mut App`
+// 而不是 `&mut Context<Self>`，这个 trait 让两处都能取到主题
+use gpui_kit::component::{ActiveTheme, Selectable as _, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, percentage, px, AnyElement, App, ClipboardItem, Context, Div, Entity, FontWeight, Hsla,
@@ -92,6 +94,12 @@ impl Shell {
                 .h_full()
                 .min_w_0()
                 .bg(t.colors.popover)
+                // ⚠️ **空态也画分组标题**（阶段 21-5 的连带）。
+                // 侧栏头那一行删掉之后，「这一组叫什么」就没有别的落脚点了——
+                // 空态只剩一句「我的仓库里还没有仓库」，**筛选键也跟着消失**
+                // （它在标题的 `suffix` 上）。而"这一组是空的、但我可以筛选/添加"
+                // 是一个真实可达的状态：仓库被移走之后就是它。
+                .child(self.group_header(0, t, window, cx))
                 .child(self.sidebar_header(t, cx))
                 .child(no_repos(self.side_focus, other_has_repos, t))
                 .child(Separator::horizontal().color(t.colors.border))
@@ -109,68 +117,29 @@ impl Shell {
             .child(self.sidebar_footer(t, cx))
     }
 
-    /// 侧栏头：标题 + 仓库数 + 筛选开关。筛选框默认收起（D8）
+    /// 侧栏头：**筛选框**（默认收起，D8）。**不再有标题与计数**（阶段 21-5）。
     ///
-    /// 筛选框是**另起一行**的：塞进标题那一行会被 40px 的固定行高横向挤扁，
-    /// 而官方 `Input::small()` 本身就有 24px 高，挤不出能用的输入区。
+    /// ## 为什么上面那行整个删掉
     ///
-    /// ⚠️ **计数只数当前这一组**（`self.repos.len()` 早先是总数）。
-    /// 侧栏只画 `side_focus` 那一组，标题上却报"全部 12 个"，用户数一数
-    /// 列表里只有 3 行——那一下的不信任比少写一个数字贵得多。
-    fn sidebar_header(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
-        let mine = self
-            .repos
-            .iter()
-            .filter(|r| r.is_third_party == self.side_focus.is_third())
-            .count();
-        let title = h_flex()
-            .w_full()
-            .h(px(40.0))
-            .flex_shrink_0()
-            .px(px(GAP_LG))
-            .gap(px(GAP))
-            .items_center()
-            .child(
-                div()
-                    .text_size(px(FS_SEC))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(tier3(t))
-                    .child("仓库"),
-            )
-            .child(
-                div()
-                    .text_size(px(FS_SEC))
-                    .text_color(tier4(t))
-                    .child(format!("{mine}")),
-            )
-            .child(div().flex_1())
-            .child(
-                Button::new("side-filter-toggle")
-                    .icon(icon_sm(AssetIcon::ListFilter).text_color(tier3(t)))
-                    .custom(ghost_variant(cx))
-                    .selected(self.filter_open)
-                    // 与导航轨三颗切屏键**同一个**选中面（D60）：它俩是同类
-                    // —— 都是 ghost 图标按钮的选中态。官方 ghost 选中的底走
-                    // `button.active.background`，theme.json 没配、落基座兜底的
-                    // 深灰，两处一起换成 `selected_mask`。理由见 tokens.rs。
-                    .when(self.filter_open, |this| this.bg(selected_mask(t)))
-                    .with_size(Size::Small)
-                    .tooltip("筛选仓库")
-                    .accessibility_label("筛选仓库")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.filter_open = !this.filter_open;
-                        cx.notify();
-                    })),
-            );
-
+    /// 它原来写着「仓库」+ 数字，而**正下方一行**的分组标题又写着
+    /// 「我的仓库 · 3」——同一个数量在这一组里说了两遍，且两遍都在上方。
+    /// 用户要求取消「仓库 + 统计」这一行、把筛选键移到分组标题右边。
+    ///
+    /// ⚠️ **组标题那个数字留着**：它紧挨着列表、说的是"这一组下面有几行"，
+    /// 删掉它以后筛选框打开时**没有任何地方写着筛选结果有几句**
+    /// ——用户会以为是筛选失灵了。而上面那行是整个侧栏的总数，
+    /// 与它下面的具体分组无关，是重复的那一份。
+    ///
+    /// 筛选框仍**另起一行**：塞进标题那一行会被固定行高横向挤扁，
+    /// 而官方 `Input::small()` 本身 24px 高，挤不出能用的输入区。
+    fn sidebar_header(&self, t: &Theme, _cx: &mut Context<Self>) -> Div {
         v_flex()
             .w_full()
             .flex_shrink_0()
-            .child(title)
             .when(self.filter_open, |head| {
                 // cleanable：官方自带的小叉，别自己再画一个清空按钮
                 head.child(
-                    div().w_full().px(px(GAP_LG)).pb(px(GAP_TIGHT)).child(
+                    div().w_full().px(px(GAP)).pt(px(GAP_TIGHT)).child(
                         Input::new(&self.side_filter)
                             .prefix(icon_sm(AssetIcon::Search).text_color(tier4(t)))
                             .cleanable(true)
@@ -243,10 +212,66 @@ impl Shell {
                     .text_size(px(FS_META))
                     .font_weight(FontWeight::MEDIUM),
             )
-            .suffix(move |_, _| {
-                icon_sm(AssetIcon::ChevronRight)
-                    .text_color(caret_color)
-                    .rotate(percentage(if open { 90.0 } else { 0.0 } / 360.0))
+            .suffix({
+                // 阶段 21-5：筛选键挂到**分组标题这一行**的右侧（原来在侧栏头，
+                // 而侧栏头那一行已删）。`suffix` 只有一个槽位，所以两颗
+                // （筛选键 + 折叠箭头）塞进同一个 `h_flex`，彼此 `GAP_TIGHT`。
+                //
+                // ⚠️⚠️ **渲染期绝不能 `ent.read(cx)`**（2026-10-05 实机闪退）。
+                // 这个 suffix 闭包是在 `SidebarMenuItem::render` 里被调的，
+                // 那时 `Shell` **正被 update 持着锁**；在里面再 `read` 同一个
+                // Entity 就是重入，基座直接 panic：
+                //   `cannot read qingbird_git::state::Shell while it is already
+                //    being updated`（`entity_map.rs:156`）
+                // 表现为**点导航轨第二颗按钮直接闪退**，且 stderr 只有一个
+                // panic 消息、没有栈——很容易误判成"面板下标算错"。
+                //
+                // 所以这里**在闭包外**就把值取好捕获进去（那时 `&self` 在手边，
+                // 读的是普通字段、不碰 Entity）。闭包是 `'static` 也没关系：
+                // `bool` 是 Copy。
+                let filter_open = self.filter_open;
+                let group_open = open;
+                let ent = cx.entity();
+                move |_window: &mut Window, cx: &mut App| {
+                    let t = cx.theme().clone();
+                    // 颜色与选中面都要 `&Theme`，而 `cx.theme()` 在这个
+                    // `&mut App` 上是拿得到的（`ActiveTheme`）——不需要读 Shell
+                    h_flex()
+                        .gap(px(GAP_TIGHT))
+                        .items_center()
+                        .child(
+                            Button::new("side-filter-toggle")
+                                .icon(icon_sm(AssetIcon::ListFilter).text_color(tier4(&t)))
+                                .custom(ghost_variant(cx))
+                                .selected(filter_open)
+                                // 与导航轨三颗切屏键**同一个**选中面（D60）：同类
+                                // —— 都是 ghost 图标按钮的选中态。官方 ghost 选中的底
+                                // 走 `button.active.background`，theme.json 没配、落基座
+                                // 兜底的深灰。理由见 tokens.rs。
+                                .when(filter_open, |b| b.bg(selected_mask(&t)))
+                                .with_size(Size::Small)
+                                .tooltip("筛选仓库")
+                                .accessibility_label("筛选仓库")
+                                // 点击走 `update`：那时**不在渲染期**，
+                                // 拿得到锁（`on_click` 是独立的事件回调）
+                                .on_click({
+                                    let ent = ent.clone();
+                                    move |_, _, cx| {
+                                        ent.update(cx, |this, cx| {
+                                            this.filter_open = !this.filter_open;
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        )
+                        .child(
+                            icon_sm(AssetIcon::ChevronRight)
+                                .text_color(caret_color)
+                                .rotate(percentage(
+                                    if group_open { 90.0 } else { 0.0 } / 360.0
+                                )),
+                        )
+                }
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.group_open[group.ix()] = !this.group_open[group.ix()];
@@ -365,7 +390,7 @@ fn repo_context_menu(menu: PopupMenu, path: &str, me: &Entity<Shell>, cx: &mut A
         .when(!third, |menu| {
             menu.item(
                 PopupMenuItem::new("提交并推送…")
-                    .icon(Icon::new(AssetIcon::GitMerge))
+                    .icon(icon_sm(AssetIcon::GitMerge))
                     .on_click({
                         let me = me.clone();
                         let path = path.clone();
@@ -384,7 +409,7 @@ fn repo_context_menu(menu: PopupMenu, path: &str, me: &Entity<Shell>, cx: &mut A
             } else {
                 "移到第三方仓库"
             })
-            .icon(Icon::new(AssetIcon::ArrowUpRight))
+            .icon(icon_sm(AssetIcon::ArrowUpRight))
             .on_click({
                 let me = me.clone();
                 let path = path.clone();
@@ -395,7 +420,7 @@ fn repo_context_menu(menu: PopupMenu, path: &str, me: &Entity<Shell>, cx: &mut A
         )
         .item(
             PopupMenuItem::new("打开文件夹")
-                .icon(Icon::new(AssetIcon::FolderOpen))
+                .icon(icon_sm(AssetIcon::FolderOpen))
                 .on_click({
                     let path = path.clone();
                     move |_, window, cx| notify_err(os::open_folder(&path), window, cx)
@@ -403,7 +428,7 @@ fn repo_context_menu(menu: PopupMenu, path: &str, me: &Entity<Shell>, cx: &mut A
         )
         .item(
             PopupMenuItem::new("在终端中打开")
-                .icon(Icon::new(AssetIcon::Terminal))
+                .icon(icon_sm(AssetIcon::Terminal))
                 .on_click({
                     let path = path.clone();
                     move |_, window, cx| notify_err(os::open_terminal(&path), window, cx)
@@ -411,7 +436,7 @@ fn repo_context_menu(menu: PopupMenu, path: &str, me: &Entity<Shell>, cx: &mut A
         )
         .item(
             PopupMenuItem::new("复制远程地址")
-                .icon(Icon::new(AssetIcon::Copy))
+                .icon(icon_sm(AssetIcon::Copy))
                 .disabled(!has_remote)
                 .on_click(move |_, window, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(remote.clone()));
@@ -423,7 +448,7 @@ fn repo_context_menu(menu: PopupMenu, path: &str, me: &Entity<Shell>, cx: &mut A
     if third {
         menu = menu.item(
             PopupMenuItem::new("在云端打开")
-                .icon(Icon::new(AssetIcon::ExternalLink))
+                .icon(icon_sm(AssetIcon::ExternalLink))
                 .disabled(web_url.is_none())
                 .on_click(
                     move |_, window, cx| match web_url.as_deref().map(os::open_url) {
@@ -438,7 +463,7 @@ fn repo_context_menu(menu: PopupMenu, path: &str, me: &Entity<Shell>, cx: &mut A
     menu.item(PopupMenuItem::separator())
         .item(
             PopupMenuItem::new("重命名…")
-                .icon(Icon::new(AssetIcon::Pencil))
+                .icon(icon_sm(AssetIcon::Pencil))
                 .on_click({
                     let me = me.clone();
                     let path = path.clone();
@@ -451,7 +476,7 @@ fn repo_context_menu(menu: PopupMenu, path: &str, me: &Entity<Shell>, cx: &mut A
         )
         .item(
             PopupMenuItem::new("编辑…")
-                .icon(Icon::new(AssetIcon::SquarePen))
+                .icon(icon_sm(AssetIcon::SquarePen))
                 .on_click({
                     let me = me.clone();
                     let path = path.clone();
@@ -463,7 +488,7 @@ fn repo_context_menu(menu: PopupMenu, path: &str, me: &Entity<Shell>, cx: &mut A
         .item(PopupMenuItem::separator())
         .item(
             PopupMenuItem::new("移除")
-                .icon(Icon::new(AssetIcon::Trash))
+                .icon(icon_sm(AssetIcon::Trash))
                 .on_click({
                     let me = me.clone();
                     let path = path.clone();

@@ -1,3 +1,23 @@
+// **必须是内层属性，且必须在任何 item（含 `//!` 文档注释）之前**——
+// 放错了编译器报 "`#![...]` attributes cannot be applied here"。
+//
+// **为什么需要**：`windows_subsystem` 决定 PE 头里的 `Subsystem` 字段。
+// 不写这一行，Rust 默认编出 **console（3）** 子系统程序，Windows 会在它启动时
+// **分配一个控制台**——从资源管理器双击、或从开始菜单点，就是一个黑终端窗口
+// 跟着界面一起活到关窗口。安装版装完启动必带黑框，主因就是这里（阶段 25）。
+//
+// **为什么用 `cfg_attr(not(debug_assertions))` 而不是无条件写死**：
+// release 是用户装的那份，要 GUI 子系统（无黑框）；**debug 要保留控制台**，
+// 因为它才是我自己的验收产物——启动即崩、panic 栈、`eprintln!` 诊断
+// 全靠那个控制台（`scripts/steps.py` 抓帧、`uia_probe.py`、启动探针都拉它）。
+// 无条件写死的话，debug 里 panic 消息会**直接丢失**，"闪退"就变成一件查不了的事。
+// 这也是 Tauri 等 GUI 框架的通行写法。
+//
+// ⚠️ 连带后果记在这：release 走 GUI 子系统后，`tray.rs` / `scheduler.rs` 里
+// 那几处 `eprintln!` 在**用户手上那份安装版里不再有任何去处**。
+// debug 构建仍然看得见。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! 青鸟 Git · GPUI Kit 版入口。
 //!
 //! 主题整份来自 gui/theme.json（设计规范板的灰白 token）——改配色只动这一个文件。
@@ -6,7 +26,9 @@ mod actions;
 mod app_assets;
 mod changes;
 mod detail;
+mod diag;
 mod dialogs;
+mod drag_drop;
 mod history_tab;
 mod inspector;
 mod log;
@@ -31,6 +53,11 @@ mod widgets;
 use gpui_kit::*;
 
 fn main() {
+    // **必须第一行**：GUI 子系统没有 stderr，panic 消息默认无处可去。
+    // 装上之后每一处 panic 都会落到 `%APPDATA%\com.qingbird.git\app.log`，
+    // 见 `diag` 模块头。晚于任何可能 panic 的代码装就等于没装
+    diag::install_panic_hook();
+
     // **必须用带 `AllAssets` 的 `AppAssets` 而不是裸 `Assets`。**
     // `Assets` 只内嵌基座挑的 104 个默认图标，而这一屏要用到的
     // `git-branch` / `git-merge` / `users` 都不在那 104 个里——用 `Assets`

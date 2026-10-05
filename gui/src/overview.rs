@@ -15,6 +15,7 @@
 // 图标只认这一套：assets 里是完整 lucide，外加品牌 Bird。
 // 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
 // 混在同一屏里一眼就能看出不一致。
+use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::chart::AreaChart;
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyHeader, EmptyTitle};
@@ -281,28 +282,36 @@ impl Shell {
             .w_full()
             .flex_shrink_0()
             .gap(px(GAP))
+            // 四张卡各配一枚 lucide 图标（阶段 21-8）：**它们说的是这张卡在讲什么**，
+            // 而不是又一次重复右边那个数字。挑法是"状态"而不是"动作"——
+            // 与同步三键那几个动词图标（Download/Upload/RefreshCw）不混，
+            // 否则「已同步」那枚会和「拉取」那枚长得一样、看不出分别。
             .child(stat_card(
                 count(&|v| bucket_of(&v.status) == Bucket::Synced),
                 "已同步",
                 t.colors.success,
+                AssetIcon::CircleCheck,
                 t,
             ))
             .child(stat_card(
                 count(&|v| bucket_of(&v.status) == Bucket::Behind),
                 "落后云端",
                 orange(t),
+                AssetIcon::CloudDownload,
                 t,
             ))
             .child(stat_card(
                 count(&|v| bucket_of(&v.status) == Bucket::Ahead),
                 "有本地提交",
                 t.colors.accent,
+                AssetIcon::CloudUpload,
                 t,
             ))
             .child(stat_card(
                 count(&|v| bucket_of(&v.status) == Bucket::Forked),
                 "已分叉",
                 t.colors.danger,
+                AssetIcon::GitFork,
                 t,
             ))
     }

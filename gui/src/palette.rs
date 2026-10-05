@@ -30,7 +30,8 @@ use gpui_kit::base::v_flex;
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem};
 use gpui_kit::component::dialog::DialogContent;
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyHeader, EmptyTitle};
-use gpui_kit::component::{ActiveTheme, Disableable as _, Icon, Theme, WindowExt};
+// `Sizable` 是 `Icon::with_size` 的来源；`Size` 与 `px` 用于写死 16px 那一档
+use gpui_kit::component::{ActiveTheme, Disableable as _, Icon, Sizable as _, Size, Theme, WindowExt};
 use gpui_kit::{div, px, App, Context, Focusable as _, ParentElement, Styled, Window};
 
 use qingbird_core::run_cmd::{Slot, MAX_PINNED_CMDS};
@@ -593,21 +594,45 @@ fn with_groups(cmd: Command, groups: Vec<CommandGroup>) -> Command {
     groups.into_iter().fold(cmd, |cmd, g| cmd.group(g))
 }
 
+/// ⌘K 三种命令项的图标。**统一走本项目的 `ICON` 档（16px）**。
+///
+/// ## 这里为什么不能调 `icon_sm`
+///
+/// ⌘K 那一屏的图标与行内小图标**不同档**：行内是 14px（`icon_sm`），
+/// 命令面板的行更高、字更大，14px 的图标在里面显得缩了一圈。
+/// 这里跟左工具栏、统计卡一样取 **16px**，全站三类位置各归一档。
+///
+/// ## 为什么还要显式写，尽管写了也可能被丢弃
+///
+/// ⚠️ **基座在渲染时会无条件 `.size_4()` 覆盖调用方的尺寸**
+/// （`command/state.rs:821`：`icon.size_4().text_color(..)`），
+/// 传进去的任何尺寸**都会被丢掉**——与 `Button::icon()` 同一个毛病
+/// （AGENTS.md 已记）。而 `size_4()` 落在 tailwind 语义里正是 16px，
+/// 恰好与 `ICON` 同值，**所以最终观感是对的**。
+///
+/// 显式写出来是为了让"这行要 16px"成为**代码里的一个事实**而不是
+/// 基座实现细节的巧合：哪天基座改了 `size_4()` 的取值，
+/// 这里会跟着变，而注释告诉下一个人该去核对哪一处。
+/// ⚠️ **别改成 `icon_sm`**——那是 14px，会让 ⌘K 的图标比别处小一圈。
+fn cmd_icon(icon: AssetIcon) -> Icon {
+    Icon::new(icon).with_size(Size::Size(px(ICON)))
+}
+
 fn nav_item(label: &'static str, icon: AssetIcon) -> CommandItem {
-    CommandItem::new().label(label).icon(Icon::new(icon))
+    CommandItem::new().label(label).icon(cmd_icon(icon))
 }
 
 fn plain(label: &'static str, icon: AssetIcon, words: &[&str]) -> CommandItem {
     CommandItem::new()
         .label(label)
-        .icon(Icon::new(icon))
+        .icon(cmd_icon(icon))
         .keywords(words.iter().copied())
 }
 
 fn guarded(label: &'static str, icon: AssetIcon, words: &[&str], on: bool) -> CommandItem {
     CommandItem::new()
         .label(label)
-        .icon(Icon::new(icon))
+        .icon(cmd_icon(icon))
         .keywords(words.iter().copied())
         .disabled(!on)
 }

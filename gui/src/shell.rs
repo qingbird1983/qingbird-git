@@ -6,7 +6,7 @@
 // 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
 // 混在同一屏里一眼就能看出不一致。
 use gpui_kit::assets::IconName as AssetIcon;
-use gpui_kit::base::motion::{transition, Transition};
+use gpui_kit::base::motion::spring;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -28,7 +28,7 @@ use qingbird_core::fork;
 use qingbird_core::net;
 use qingbird_core::repos::{self};
 use qingbird_core::run_cmd::{self, Slot};
-use qingbird_core::store::RepoEntry;
+use qingbird_core::store::{self, CloseAction, RepoEntry};
 use qingbird_core::types::RepoStatus;
 use std::collections::HashMap;
 
@@ -48,6 +48,37 @@ impl Render for Shell {
         // 同样必须在这一帧兑现：后台任务里凑不齐 `&mut Shell` + `&mut Window`
         if let Some(path) = self.pending_reveal.take() {
             self.reveal_repo(path, window, cx);
+        }
+        // 「浏览…」拉起系统目录选择器（阶段 21-2）。同样在 render 里兑现：
+        // 系统选择器要活着的 `&mut Window` 回填输入框，而按钮那个 `on_click`
+        // 回调里窗口已经被 `update_window_id` take 走了——
+        // `cx.update_window` 会把整个闭包丢掉，点着没反应
+        //
+        // ⚠️ **先读再置 false，不要顺手写 `self.pending_folder.take()`**：
+        // 那是 `Option::take`，这个字段是 `bool`。`bool` 没有 `take`，
+        // 编译器会报「`bool` is not an iterator」——一个**看不出指向哪**
+        // 的错（它其实在说 `.take()` 收到了 `&mut bool` 而需要 Iterator）
+        if self.pending_folder {
+            self.pending_folder = false;
+            self.pick_clone_folder(window, cx);
+        }
+        // 关窗询问面板（阶段 22）。同样在 render 里兑现：
+        // `on_window_should_close` 的回调跑在 Win32 的 `WM_CLOSE` 处理过程中，
+        // 在那儿拉模态浮层等于消息循环嵌套，而它还必须同步返回一个值
+        // 决定这一次关闭放不放行。回调里只判档 + 置标记，这里弹窗。
+        if self.pending_close_prompt {
+            self.pending_close_prompt = false;
+            self.open_close_prompt(window, cx);
+        }
+        // 「完全退出」档的兑现。**同样不在回调里就地 `quit()`**：
+        // `QuitMode::Explicit` 下关窗只是销毁窗口、进程留着，
+        // 真正结束进程的是 `App::quit()`，而它得在正常路径上调用。
+        //
+        // `Context<T>` 实现了 `Deref<Target = App>`（`app/context.rs:27-40`），
+        // 所以这里 `cx.quit()` 就是 `App::quit()`。
+        if self.pending_app_quit {
+            self.pending_app_quit = false;
+            cx.quit();
         }
         // 「复制地址」的对号反馈到期翻回去。
         //
@@ -90,16 +121,37 @@ impl Render for Shell {
 
         // 侧栏宽度只有一个真源：`ResizableState` 里第 0 号面板的宽度。
         // 折叠 / 展开 / 切到总览都只是把"目标宽度"改成 0 或 sidebar_w，
-        // 中间值由官方 transition 补出来——不要在别处再存一份宽度。
-        let motion = cx.theme().motion_tokens();
-        let policy = Transition::new(motion.duration_fast).easing(motion.easing_move.clone());
+        // 中间值由弹簧补出来——不要在别处再存一份宽度。
+        //
+        // ⚠️ **回弹走 `spring()` 而不是 `transition()`**（阶段 21-6）：
+        // 用户要的是「缓冲回弹」——到位后有一点点过冲再收住，那正是弹簧的
+        // 行为；`transition(..).easing(easing_move)` 是匀速到位后停住。
+        //
+        // `spring_move` 的类型是 `Spring` 而**不是** `Easing`，所以它**喂不进**
+        // `Transition::easing(..)`（那是编译期就挡住的，不是运行期行为差异）。
+        // 基座给了独立的 `spring(id, target, policy, ..)`（`motion.rs:573`）。
+        //
+        // 顺带一个它比 transition 强的地方：中途改目标时**保留当前速度重新导向**，
+        // 而不会从头开始——用户连着点两下开合，动效不会"重置一下"。
+        //
+        // ⚠️⚠️ **用自订的 `spring_bounce()` 而不是官方 `spring_move`**（阶段 25）：
+        // 官方那条 ζ=0.85 ⇒ 过冲 0.63% ⇒ 侧栏 220px 行程上只有 **1.4px**，
+        // 弹簧确实在跑、用户确实看不到回弹（2026-10-05 实机反馈）。
+        // 数字与推导见 `tokens.rs` 动效段，那儿有单测钉住"过冲必须看得见"。
         let target_w: Pixels = if self.sidebar_collapsed || self.page == Page::Overview {
             px(0.0)
         } else {
             px(self.sidebar_w)
         };
-        // id 是稳定字符串：transition 的状态挂在它上面，id 一变动画就从头开始
-        let anim_w: Pixels = transition("sidebar-width", target_w, policy, window, cx);
+        // id 带代次后缀：**拖拽松手后换一份新状态，让它就地静止在新宽度上**，
+        // 而不是从旧宽度弹过去（那正是「拉大拉小时弹簧一下」的成因）。
+        // 详见 `state.rs::sidebar_gen`——包括"为什么换 id 不会泄漏 keyed state"。
+        let anim_w: Pixels =
+            spring(format!("sidebar-width-{}", self.sidebar_gen), target_w, spring_bounce(), window, cx)
+                // 夹住下界：ζ=0.6 收拢时**会真的过冲到负宽度**（约 -21px）。
+                // 显式夹成 0，而不是指望 `ResizableState` 内部替我们夹——
+                // "隐式行为"改成"显式规则"是这里唯一该做的选择。
+                .max(px(0.0));
         // 补间中 = 当前值与目标值对不上。`cx.reduce_motion()` 为真时官方
         // transition 直接返回终值，这里自然落到 false，不补间
         let animating = (anim_w - target_w).abs() > px(0.5);
@@ -191,11 +243,73 @@ impl Shell {
         // 不关掉它会把主区挤走（`resizable/panel.rs:318-322` 与官方文档同一句）
         let mut main_group = h_resizable("insp-split").with_state(&self.insp_split);
         main_group = main_group.child(resizable_panel().child(body));
+        //
+        // ⚠️ **检视列走的是与侧栏同一套补间**（阶段 21-6）。原先这里是
+        // `if … { child(...) }` **一帧到位**：用户说「以前有点动效」，
+        // 实测左栏那条动效一直在、右栏这条**从来就没有**——
+        // 两栏手感不一致的根源就在这一行。
+        // ⚠️ **与左栏同一套的三处（阶段 25）**，别只改一处：
+        // ① `spring_move`（ζ=0.85 ⇒ 过冲 0.63% ⇒ 320px 行程上 2px，**看不见**）
+        //    → 改自订的 `spring_bounce()`（ζ=0.60 ⇒ 约 30px，一眼能看出弹了一下）
+        // ② id 带代次后缀：拖拽松手后换一份新状态**就地静止在新宽度**，
+        //    而不是从旧宽度弹过去——不换的话 `resize_panel` 会把面板
+        //    **拽回去再弹过来**，每次拖拽必现（用户 2026-10-05 实机报的
+        //    「右栏拉大拉小时会弹簧一下」）
+        // ③ 显式夹住 0：ζ=0.6 收拢时会真的过冲到负宽度
+        let insp_target: Pixels = if self.page == Page::Repos
+            && self.inspector_open
+            && self.selected.is_some()
+        {
+            px(self.inspector_w)
+        } else {
+            px(0.0)
+        };
+        let insp_anim_w: Pixels =
+            spring(format!("inspector-width-{}", self.insp_gen), insp_target, spring_bounce(), window, cx)
+                .max(px(0.0));
+        let insp_animating = (insp_anim_w - insp_target).abs() > px(0.5);
+        // 与左栏 `sidebar_mounted` 同一处理：宽度到 0 才把面板整个摘掉。
+        // 留一个 0 宽面板在 flex 里，那条按了没用的拖拽把手还挂在原处
+        let inspector_mounted = insp_anim_w > px(0.5);
+
         // 检视抽屉只在仓库页有——总览页没有当前仓库，这一列里没有东西可看
-        if self.page == Page::Repos && self.inspector_open && self.selected.is_some() {
+        if inspector_mounted {
+            if insp_animating {
+                // 补间期间由 transition 说话。**不在非补间时写**：
+                // 那时宽度归拖拽，写进去会把用户刚拖出来的宽度一帧拽回去
+                //
+                // ⚠️ **下标是写死的 1，不是 `len() - 1`**（2026-10-05 实机闪退）。
+                // 这一组里**主区永远占 0 号位**（`main_group` 先挂它，
+                // 检视列第二个挂），所以检视列的下标恒为 1。
+                // 早先图省事写 `sizes().len().saturating_sub(1)`——在面板
+                // 还没挂上的那一帧 `len()` 是 1，减出来 **0**，于是把检视列
+                // **插到 0 号位顶掉了主区**；基座 `sync_panels_count`
+                // 下一帧按子元素个数对齐，列数与下标就此错位，
+                // 表现是**点导航轨第二颗按钮直接闪退**
+                // （实机 12:15 复现，事件日志 `ucrtbase.dll` +
+                // 异常码 `0xc0000409`，即 `/GS` 栈保护命中——
+                // 不是 Rust panic，所以 stderr 一个字都没有）
+                self.insp_split.update(cx, |s, cx| {
+                    if s.sizes().len() < 2 {
+                        // 面板这一帧才挂上。状态里还没有第 1 号面板，
+                        // `resize_panel` 是空操作，面板会退回 `initial_size`（= 全宽）
+                        // 闪一下再缩回去。直接按当前动画值插入 1 号位，省掉那一帧
+                        s.insert_panel(Some(insp_anim_w), Some(1), cx);
+                    } else {
+                        s.resize_panel(1, insp_anim_w, window, cx);
+                    }
+                });
+            }
             main_group = main_group.child(
                 resizable_panel()
-                    .size_range(px(INSPECTOR_MIN_W)..px(INSPECTOR_MAX_W))
+                    // 补间中下限放开成 0（滑进滑出都要经过窄于最小宽的一段），
+                    // 与左栏 `min_w` 那条同一理由：不放开的话收起时会停在最小宽，
+                    // 凭空多出一条空槽——正好是这一步要消灭的东西
+                    .size_range(if insp_animating {
+                        px(0.0)..px(INSPECTOR_MAX_W)
+                    } else {
+                        px(INSPECTOR_MIN_W)..px(INSPECTOR_MAX_W)
+                    })
                     // 只在这一列**首次挂上**、状态里还没有它那一格时起作用
                     // （`panel.rs:341-349`：`panel_state.size` 为 None 才吃
                     // `initial_size`）。之后就归 `ResizableState` 自己管，
@@ -222,6 +336,38 @@ impl Shell {
             .min_h_0()
             .bg(t.colors.background)
             .text_color(t.colors.foreground)
+            // 落点提示卡是 `.absolute().inset_0()`，没有定位上下文它会贴到窗口原点
+            .relative()
+            // ---------- 从资源管理器拖文件夹进来（阶段 25，补旧 Tauri 版）----------
+            //
+            // 挂根 div = 拖到窗口任意位置都能放，与旧版一致。原理与那一长串
+            // 注释在 `drag_drop.rs` 模块头（冒泡阶段 + 命中即触发 + stop_propagation，
+            // 本项目没有任何子元素注册 drop 监听，所以事件一路冒到根）。
+            //
+            // ⚠️ **类型参数必须是 `ExternalPaths`，不是 `PathBuf`**：写错一行不报错，
+            // 只是永远不触发。`PathBuf` 是本应用自己往外拖文件时的 payload。
+            .on_drag_move(cx.listener(
+                |this, _: &gpui_kit::DragMoveEvent<gpui_kit::ExternalPaths>, _, cx| {
+                    if !this.dragging {
+                        this.dragging = true;
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_drop(cx.listener(
+                |this, e: &gpui_kit::ExternalPaths, window, cx| {
+                    // **松手这一下必须把标志落回去**：漏了的话提示卡会一直挂着，
+                    // 而它是 `.absolute().inset_0()`，正好盖住整个界面
+                    this.dragging = false;
+                    this.on_paths_dropped(e.paths(), window, cx);
+                },
+            ))
+            .on_file_drop_exit(cx.listener(|this, _: &gpui_kit::FileDropEvent, _, cx| {
+                if this.dragging {
+                    this.dragging = false;
+                    cx.notify();
+                }
+            }))
             // 必须 `track_focus`，否则这个节点不在派发路径上（`state.rs` 的 `focus` 字段有详述）
             .track_focus(&self.focus)
             // ⚠️ Action 监听器必须挂在**元素**上，不能用 `Context::on_action`。
@@ -275,6 +421,9 @@ impl Shell {
                     .child(div().flex_1().min_w_0().min_h_0().child(main_group)),
             )
             .child(self.status_bar(&t, cx))
+            // 落点提示卡。**放最后**：它是整窗绝对定位的一层，
+            // 前面那些都是正常流式内容，先挂它会被后来的兄弟盖住
+            .when(self.dragging, |this| this.child(crate::drag_drop::drop_overlay(&t)))
             .into_any_element()
     }
 }
@@ -374,10 +523,57 @@ impl Shell {
                     .window_control_area(gpui_kit::WindowControlArea::Drag),
             )
             .on_double_click(|_, window, _| window.zoom_window())
+            .child(self.theme_toggle(t, cx))
             .child(self.window_controls(supported, maximized, cx))
             .into_any_element()
     }
 
+    /// 明暗主题切换（阶段 21-4）。**放在窗口控件之前**，也就是紧挨着最小化键。
+    ///
+    /// ## 为什么不是"移动"而是"新增"
+    ///
+    /// 阶段 20 只把开关做进了**设置对话框**（`dialogs/settings.rs:763` 的
+    /// `Switch`），标题栏上原来那颗是**侧栏开关**、与主题无关。
+    /// 所以这一条是新增一个常驻入口，不是把某个已有按钮挪过来。
+    ///
+    /// ## 为什么放在右端而不是跟着左边那组
+    ///
+    /// 左边那组（图标 + 「青鸟 Git」+ 侧栏开关）是**应用身份**，
+    /// 主题是**全局偏好**——和右边那三颗窗口控件同属"这台窗口的操作"。
+    /// 用户把它放在最小化键前面，理由就是"它是一个开关，
+    /// 挨着另外几个开关/窗口控件更顺手"，这一条照办。
+    ///
+    /// ⚠️ **不能挂 `window_control_area(Drag)`**——那会让整颗键点不动
+    /// （AGENTS.md 记着官方 `TitleBar` 的那个坑：Windows 侧翻成 `HTMINBUTTON`
+    /// 那一类，非客户区命中不派发到子元素）。它是个普通 `Button`，
+    /// 标题栏那行的拖拽区是**左右两组之间的空白**，这一颗在空白左边，
+    /// 不受影响。
+    fn theme_toggle(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // 图标随**当前主题**翻：现在亮着就摆月亮（点了变暗），
+        // 现在暗着就摆太阳。这是"按下会发生什么"的说法，与侧栏开关那颗
+        // "按了会收起来"同一个约定
+        let icon = if t.is_dark() {
+            AssetIcon::Sun
+        } else {
+            AssetIcon::Moon
+        };
+        let label = if t.is_dark() {
+            "切到浅色主题"
+        } else {
+            "切到深色主题"
+        };
+        Button::new("titlebar-theme-toggle")
+            .icon(icon_sm(icon).text_color(tier3(t)))
+            .custom(ghost_variant(cx))
+            .with_size(Size::Small)
+            .tooltip(label)
+            .accessibility_label(label)
+            .on_click(cx.listener(|_, _, window, cx| {
+                let dark = !cx.theme().is_dark();
+                Shell::toggle_theme_static(dark, window, cx);
+            }))
+            .into_any_element()
+    }
     /// 侧栏展开 / 收起开关。
     ///
     /// **为什么用裸 `Button` 而不用官方 `SidebarToggleButton`**：
@@ -534,6 +730,13 @@ impl Shell {
             return;
         }
         self.sidebar_w = w;
+        // **必须换弹簧的 id 代次**（2026-10-05 实机：「侧栏在拉大拉小时会弹簧一下」）。
+        // 不换的话弹簧的内部位置还停在拖之前的宽度，松手这一刻它会从旧宽度
+        // 起步往新宽度弹，而 `resize_panel` 每帧把面板按在弹簧值上——
+        // 面板被**拽回去再弹过来**。整段回抽稳定复现，不是偶发抖动。
+        // 换 id = 换一份初值 `position = target` 的全新状态，就地静止。
+        // 详见 `state.rs::sidebar_gen`
+        self.sidebar_gen = self.sidebar_gen.wrapping_add(1);
         self.persist_sidebar_layout();
         cx.notify();
     }
@@ -552,6 +755,10 @@ impl Shell {
             return;
         }
         self.inspector_w = w;
+        // **与 `commit_sidebar_width` 同一件事**（2026-10-05 实机：左栏修完，
+        // 用户立刻报「右栏还是会弹簧一下」——同一个 bug 的第二份拷贝）。
+        // 不换弹簧 id 的后果一样：面板被拽回旧宽度再弹过来，每次拖拽必现
+        self.insp_gen = self.insp_gen.wrapping_add(1);
         self.persist_inspector_layout();
         cx.notify();
     }
@@ -813,12 +1020,19 @@ impl Shell {
             side_focus: Group::Mine,
             sidebar_collapsed: saved.sidebar_collapsed,
             sidebar_w: qingbird_core::store::clamp_sidebar_w(saved.sidebar_w),
+            // 弹簧 id 的后缀。启动这一份状态的目标就是 `sidebar_w`，本来就是静止的，
+            // 所以 0 就对（见 `state.rs` 里 `sidebar_gen` 的注释）
+            sidebar_gen: 0,
+            dragging: false,
             split: cx.new(|_| ResizableState::default()),
             // 右栏两件都从配置读，与侧栏同一口径：宽度夹过、展开态是用户自己的选择。
             // 默认展开（core 的 `inspector_open` 是 `default_true`）——
             // 收起的右栏只有仓库头那颗按钮能叫回来，默认为收等于新装用户看不到这列
             inspector_open: saved.inspector_open,
             inspector_w: qingbird_core::store::clamp_inspector_w(saved.inspector_w),
+            // 与 `sidebar_gen` 同理：启动这一份的目标就是 `inspector_w`，静止的，0 就对。
+            // **两个弹簧的 id 必须各自独立**（见 `state.rs::insp_gen`）
+            insp_gen: 0,
             // 模块可见性（阶段 19）：同样是"启动读一次、设置里改完写回来"。
             // **不存合并后的结果**——归属基线（第三方天生没有「空间」与分叉条）
             // 每次问的时候现并，免得基线改了就有一份旧的躺在内存里
@@ -839,8 +1053,18 @@ impl Shell {
             // 真嫌挤可以自己点标题折起来
             group_open: [true, true],
             tree_scroll: ScrollHandle::new(),
+            log_scroll: ScrollHandle::new(),
+            batch_log_scroll: ScrollHandle::new(),
             reveal: None,
             pending_reveal: None,
+            pending_folder: false,
+            // 关窗那三档**只在构造期读一次**：`on_window_should_close` 的回调
+            // 每次点 X 都会跑，而那个回调在消息处理里，多一次 `store::load()`
+            // 就是一次同步读盘。改档的地方（面板 / 设置）会同步更新这个字段
+            close_action: store::close_action_of(&store::load().settings.close_action),
+            pending_close_prompt: false,
+            close_remember: false,
+            pending_app_quit: false,
             scanning: false,
             last_scan_ts: 0,
             scan: None,
@@ -880,6 +1104,45 @@ impl Shell {
             palette_actions: Vec::new(),
             palette_open: false,
         };
+        // 关窗询问（阶段 22）。**这个钩子在 Windows 上是真的**——
+        // 详见 `dialogs/close_prompt.rs` 模块头那段更正：
+        // `window.rs:6658` 挂上 → Windows 消息泵 `events.rs:110` 的
+        // `WM_CLOSE => self.handle_close_msg()` 调它 → `events.rs:336-341`
+        // 返回 `false` 时回 `Some(0)`，DefWindowProc 不跑，窗口就不关。
+        //
+        // **回调里只判档 + 置标记，绝不拉浮层**：它跑在 Win32 的消息处理里，
+        // 而弹窗必须能在用户点完那颗键之后继续活。
+        //
+        // 三档（`store::close_action_of`，默认 `Ask`）：
+        // ① `Tray` → 返回 `true` 放行，系统照旧销毁窗口、进程留着（今天的行为）
+        // ② `Ask` → 返回 `false` **这一次**关不掉，置标记，下一帧弹面板
+        // ③ `Exit` → 也返回 `false` + 置 `pending_app_quit`：
+        //    **不能放行**——放行只是销毁窗口，`QuitMode::Explicit` 下
+        //    进程会留着，那就成了"点了完全退出却还在托盘里"的那种幽灵
+        window.on_window_should_close(cx, {
+            let this = cx.entity();
+            move |_window, cx| {
+                let mut allow = false;
+                this.update(cx, |this, cx| match this.close_action {
+                    CloseAction::Tray => allow = true,
+                    // ⚠️ **置了标记就必须 `cx.notify()`**（2026-10-05 实机撞出来的）：
+                    // `Entity::update` **不会**自动安排下一帧。少了它，标记躺在
+                    // 字段里没人消费——表现是 `exit` 档点了 X 既不关窗也不退出
+                    // （`WM_CLOSE` 已被这次返回的 `false` 挡住了），
+                    // 而 `cargo check` 零错、单测全绿、**抓帧完全正常**。
+                    // 与 `pending_folder` / `pending_reveal` 同一条纪律
+                    CloseAction::Ask => {
+                        this.pending_close_prompt = true;
+                        cx.notify();
+                    }
+                    CloseAction::Exit => {
+                        this.pending_app_quit = true;
+                        cx.notify();
+                    }
+                });
+                allow
+            }
+        });
         // 全部走官方 action + key binding，不自己 `on_key_down` 判键：
         // 自己判的那份不知道当前焦点在输入框还是按钮上，会在打字时把侧栏折了。
         // `context` 传 None = 全局生效；命令面板自己那个 Dialog 上下文里

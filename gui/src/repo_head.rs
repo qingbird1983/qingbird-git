@@ -25,13 +25,14 @@ use gpui_kit::component::{Disableable as _, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, AnyElement, ClipboardItem, Context, Div, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement, StatefulInteractiveElement as _, Styled,
+    IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled,
 };
 use qingbird_core::net;
 use qingbird_core::types::RepoStatus;
 
 use crate::detail::DetailTab;
 use crate::os;
+use crate::log::QUICK_SLOTS;
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::ghost_variant;
@@ -84,6 +85,22 @@ impl Shell {
                         if third { orange_text(t) } else { tier3(t) },
                         if third { orange_bg(t) } else { track(t) },
                     ))
+                    // ⚠️ **停止键挂在仓库头，不挂在日志段**（2026-10-05 用户反馈：
+                    // 「构建卡死没有终止按钮，以前是有的」）。
+                    //
+                    // **原先它挂在日志段的状态行上**（`log.rs::log_status_row`），
+                    // 而日志段同时受两件事约束：① 只在**概览页签**里；
+                    // ② 受设置里「显示哪些模块 → 日志」那个开关控制。
+                    // 于是用户切到「说明 / 历史 / 空间」——或者干脆把日志段关掉——
+                    // 那颗键就**整个消失**，而构建还在跑。
+                    // **一个"救命键"挂在可关掉的模块里，本身就是设计错。**
+                    //
+                    // 仓库头是**常驻**的（切页签不重画），才是"这个仓库正在跑东西"
+                    // 该出现的地方。日志段里那颗保留——两处同一个入口，
+                    // 用户在哪一屏都能停。
+                    .when(self.log().running, |row| {
+                        row.child(self.stop_button(cx))
+                    })
                     .when(!status.branch.is_empty(), |row| {
                         row.child(self.branch_badge(&status.branch, t))
                     })
@@ -105,6 +122,8 @@ impl Shell {
                     // 与磁盘摘要同一类问题（这东西怎么样），所以挂在同一行
                     .when(third, |row| row.child(self.activity_chip(t)))
                     .child(div().flex_1())
+                    // 常用命令组（2026-10-05 用户反馈：「常用命令没有入口了」）
+                    .child(self.quick_cmds(t, cx))
                     // 右侧只留「展开检视」——原来那四颗（打开文件夹 / 终端 /
                     // 云端 / 复制）里三颗已经进了下面的地址区（用户要求），
                     // 剩下的「终端」并进了日志工具行
@@ -149,6 +168,134 @@ impl Shell {
             .gap(px(GAP_TIGHT))
             .child(self.activity_chart(t))
             .child(meta_text(note, t))
+    }
+
+    /// 仓库头右侧的常用命令组：**「常用命令」+ 一颗展开键**。
+    ///
+    /// ## 为什么这里要有，而不是只留 ⌘K
+    ///
+    /// 阶段 21-5 把概览页的「常用命令」段撤了（同一对入口摆两遍），
+    /// 改入口落在 ⌘K。**但 ⌘K 只能靠键盘进**——项目文档明写「命令面板只能靠
+    /// 键盘进」是个已知取舍，而用户反馈回来的原话是「**现在没有入口了**」。
+    /// 那条取舍对「低频动作」成立，对**构建/测试**不成立：
+    /// 它是日常要用的，而它唯一的入口是一个用户不一定记得快捷键的面板。
+    ///
+    /// ## 为什么是「一颗键 + 菜单」而不是平铺四个
+    ///
+    /// 四个槽位（开发运行 / 编译构建 / 测试 / 安装依赖）全平铺在仓库头
+    /// 会把标题行撑成一排按钮。**平铺两颗最常用的、其余收进菜单**——
+    /// 与项目一贯的「高频常显、低频进菜单」是同一条。
+    ///
+    /// ## 编辑入口跟着一起给
+    ///
+    /// 用户明确要「手动设置开发和构建的命令」。**能跑不能改同样是残废的**
+    /// ——而且更隐蔽：命令配错了用户只会看到"跑了个错的命令"，
+    /// 不会想到要去改。所以编辑键与运行键**并排**，不能藏在更深的地方。
+    fn quick_cmds(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(path) = self.selected.clone() else {
+            return div().into_any_element();
+        };
+        let running = self.log().running;
+        // 跑着的时候与日志段那两颗同口径禁用：同仓库已有活在跑，
+        // 再起一个会撞掉 core 那个进程级全局锁
+        let mut group = h_flex().gap(px(GAP_TIGHT)).items_center();
+
+        for (slot, label) in QUICK_SLOTS {
+            let cmd = self.effective_cmd(&path, slot);
+            let busy = running && self.log().op == Some(Op::Cmd(slot));
+            group = group.child(
+                Button::new(SharedString::from(format!("head-cmd-{}", slot.key())))
+                    .label(label)
+                    .custom(ghost_variant(cx))
+                    .with_size(Size::XSmall)
+                    .loading(busy)
+                    .disabled(running)
+                    .tooltip(if cmd.is_empty() {
+                        format!(
+                            "这个仓库还没认出{}，点右边的「常用命令…」去设",
+                            slot.default_label()
+                        )
+                    } else {
+                        cmd
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.run_slot(slot, cx))),
+            );
+        }
+
+        group
+            // 「常用命令…」：编辑四个槽位 + 跑钉住的自定义命令。
+            // **它就是 ⌘K 里那两条入口的可见版**（`RunSlot` / `EditCmds`），
+            // 走的是同两个动作，不另写一套逻辑
+            .child(
+                Button::new("head-cmds-more")
+                    .icon(icon_sm(AssetIcon::SlidersHorizontal).text_color(tier3(t)))
+                    .custom(ghost_variant(cx))
+                    .with_size(Size::XSmall)
+                    .tooltip("常用命令…（跑钉住的命令 / 编辑四个槽位的命令）")
+                    .accessibility_label("常用命令")
+                    // 闭包要 `'static`，所以先把路径 clone 一份再捕获——
+                    // 直接捕获 `path` 会借用本函数的局部变量（E0373）
+                    .on_click({
+                        let p = path.clone();
+                        cx.listener(move |this, _, window, cx| {
+                            this.open_cmds_dlg(p.clone(), window, cx, None);
+                        })
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// 仓库头右侧那颗常驻「停止」键（只在有活跑着时出现）。
+    ///
+    /// ## 为什么用危险色
+    ///
+    /// 「停止」不是普通动作：它会**打断**一个正在进行的操作。
+    /// 与旁边那些"看 / 复制 / 打开"的键同规格同底色的话，
+    /// 误触一次就是白跑一遍构建。危险色 + tooltip 说明"停止当前操作"，
+    /// 让它在视觉上就比别的键重一档。
+    ///
+    /// ## ⛔ 为什么**绝对不能**带 `loading`（2026-10-05 实机抓出来的）
+    ///
+    /// 第一版给这颗键写了 `.loading(lg.running)`，想让它顺带当"正在跑"的指示器。
+    /// **结果这颗键永远点不动**——而抓帧看着完全正常：按钮在、红色对的、
+    /// hover 也变，`cargo check` 零错，单测全绿。
+    ///
+    /// 根因在基座，源码 `gpui-component-0.7.0/src/button/button.rs:1679` 写死了
+    /// 而且**有单测锁着这条约束**：
+    /// > A loading button must be as inert as a disabled one. `interactive` is what
+    /// > gates the hover and active styling, the `cursor_pointer` of link buttons
+    /// > and the `mouse_down` handler.
+    /// ```ignore
+    /// assert!(!Button::new("test").loading(true).interactive());
+    /// ```
+    ///
+    /// 于是 `loading` 与「只要 running 就出现」这两个条件叠在一起 = **这颗键
+    /// 出现的那一帧起就是死的**。而它恰恰是构建卡死时唯一的救命键。
+    ///
+    /// **语义上它俩就是反的**：`loading` 说的是"这个操作正在自己进行中，
+    /// 别再点"；「停止」说的恰恰是"打断现在进行中的这个"。
+    /// 同理 `.disabled(running)` 也不能加——那更直白地自杀。
+    ///
+    /// **"正在跑"这件事已经不用它表达了**：这颗键**只在 running 时出现**，
+    /// 它的存在本身就是指示器（旁边还常驻着状态栏的「运行中 · 仓库名」）。
+    /// 要额外的视觉重量就加个静态图标，别动 `loading`。
+    fn stop_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let what = match self.log().op {
+            Some(op) => op.label().to_string(),
+            None => "当前操作".to_string(),
+        };
+        Button::new("head-stop")
+            .label("停止")
+            // ⚠️ 用 `danger` 档而不是 ghost：见上面「为什么用危险色」。
+            // 官方 Button 有 `danger` 变体（`ButtonVariants::danger`），不用自研
+            .danger()
+            .with_size(Size::Small)
+            // ⚠️ **这里刻意没有 `.loading(..)`**：不是漏了，是加了键就废了。
+            // 根因与证据见上面那段注释。改这颗键前先把它读完。
+            .tooltip(format!("停止{what}"))
+            .accessibility_label(format!("停止{what}"))
+            .on_click(cx.listener(|this, _, window, cx| this.stop_current(window, cx)))
+            .into_any_element()
     }
 
     /// 仓库名后面那枚磁盘摘要徽标（用户要求把磁盘统计从底排那张卡搬上来）。

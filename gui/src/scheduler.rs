@@ -109,7 +109,7 @@ async fn persist(cx: &mut AsyncApp, r: &AutoSyncResult) {
         })
         .await;
     if let Err(e) = res {
-        eprintln!("自动同步结果写回配置失败：{e}");
+        crate::diag::note(&format!("自动同步结果写回配置失败：{e}"));
     }
 }
 

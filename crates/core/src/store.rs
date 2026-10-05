@@ -143,6 +143,18 @@ pub struct Settings {
     /// 「第三方」这一类仓库藏了哪些模块。**同样存「藏了哪些」**，理由同上
     #[serde(default)]
     pub hidden_modules_third: Vec<String>,
+
+    /// 点窗口关闭键时怎么办（阶段 22）。
+    ///
+    /// **存字面量而不是 bool**：要表达的是**三态**——每次都问 / 总是关到托盘 /
+    /// 总是完全退出。bool 装不下"问"这一档（"这次不记住"和"记住关到托盘"
+    /// 是两回事），硬压成 bool 就得拆两个字段，而两个字段必然能读出
+    /// 互相矛盾的组合。
+    ///
+    /// **默认 `ask`**：老配置读出来就是这一档，零迁移；而且这一档是
+    /// **最安全的兜底方向**——见 [`close_action_of`] 的注释。
+    #[serde(default = "default_close_action")]
+    pub close_action: String,
 }
 
 // ---- 模块可见性（阶段 19）----
@@ -227,6 +239,45 @@ fn default_true() -> bool {
 
 /// 侧栏宽度的 serde 缺省值。见 `Settings::sidebar_w` 的注释：
 /// 走独立函数而不是 `Settings::default()`，否则反序列化路径与新建路径会给出不同的宽度
+
+// ---- 关窗行为（阶段 22）----
+
+/// 点关闭键时怎么办。**存字面量而不是 bool**：理由见 `Settings::close_action`。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CloseAction {
+    /// 每次都问（默认）
+    Ask,
+    /// 直接关到托盘：窗口销毁、进程留着，托盘图标能把它叫回来
+    Tray,
+    /// 直接完全退出：进程结束，后台自动同步也跟着停
+    Exit,
+}
+
+/// 配置里存的那三个字面量。**键名是界面与配置之间唯一的约定**，所以放 core
+pub const CLOSE_ASK: &str = "ask";
+pub const CLOSE_TRAY: &str = "tray";
+pub const CLOSE_EXIT: &str = "exit";
+
+/// 配置里那个字符串 -> 判据。
+///
+/// **认不出的值一律落 `Ask`**，与 `module_shown` 同一取向：
+/// **兜底到需要用户在场的那一档**。反过来兜底（认不出 = 直接执行）的话，
+/// 一次手改配置或旧版本留下的非法值，就能让用户"点了 X 软件就没了"，
+/// 而他什么也没选过——那是不可撤销的那种错。
+pub fn close_action_of(raw: &str) -> CloseAction {
+    match raw.trim() {
+        CLOSE_TRAY => CloseAction::Tray,
+        CLOSE_EXIT => CloseAction::Exit,
+        _ => CloseAction::Ask,
+    }
+}
+
+/// serde 缺省值。走独立函数而不是 `Settings::default()`，
+/// 理由与 `default_sidebar_w` 一样：反序列化路径与新建路径必须给出同一个值
+fn default_close_action() -> String {
+    CLOSE_ASK.to_string()
+}
+
 fn default_sidebar_w() -> f32 {
     DEFAULT_SIDEBAR_W
 }
@@ -255,6 +306,7 @@ impl Default for Settings {
             inspector_open: false,
             hidden_modules_mine: Vec::new(),
             hidden_modules_third: Vec::new(),
+            close_action: default_close_action(),
         }
     }
 }
@@ -699,5 +751,32 @@ mod tests {
         let (mins, daily) = normalize_auto_sync(&AutoSync::Daily("09:00".into()));
         assert_eq!(mins, 0);
         assert_eq!(daily, "09:00");
+    }
+
+
+    #[test]
+    fn close_action_recognizes_the_three_literals() {
+        assert_eq!(close_action_of(CLOSE_ASK), CloseAction::Ask);
+        assert_eq!(close_action_of(CLOSE_TRAY), CloseAction::Tray);
+        assert_eq!(close_action_of(CLOSE_EXIT), CloseAction::Exit);
+    }
+
+    #[test]
+    fn an_unrecognized_close_action_falls_back_to_asking() {
+        // 空串是**老配置**读出来的样子（字段刚加，旧 config.json 里没有这一项），
+        // 它必须落 Ask 而不是 Exit——见 close_action_of 的注释
+        assert_eq!(close_action_of(""), CloseAction::Ask);
+        assert_eq!(close_action_of("TRay"), CloseAction::Ask);
+        assert_eq!(close_action_of("quit"), CloseAction::Ask);
+        // 收尾空白容错：这份字段是人手改的 config.json
+        assert_eq!(close_action_of("tray "), CloseAction::Tray);
+    }
+
+    #[test]
+    fn the_default_is_asking_not_exiting() {
+        // 这一条是**安全断言**：默认值改错方向的话，老用户升级后
+        // "点一下 X 软件就没了"，而他从没选过
+        assert_eq!(close_action_of(&default_close_action()), CloseAction::Ask);
+        assert_eq!(close_action_of(""), CloseAction::Ask);
     }
 }

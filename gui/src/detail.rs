@@ -196,7 +196,18 @@ impl Shell {
             .h_full()
             .bg(t.colors.background)
             .p(px(GAP_LG))
-            .gap(px(GAP_LG))
+            // 阶段 21-7：**头部与页签之间那一处收紧**（`GAP` 而非 `GAP_LG`）。
+            //
+            // ⚠️ **别把整条 `.gap()` 都改小**：它同时管着「页签 → 内容区」，
+            // 那两样是**不同的东西**之间的分组，用 `GAP_LG` 没错；
+            // 而「仓库头 → 页签」这一处管的是**一个整体的头部与其下的分段**，
+            // 12px 在这里就是用户反馈的"离得太远"——仓库头自己已经是
+            // 一个 v_flex 收好的块，页签是它的下级，两者该更紧。
+            //
+            // 这与 tokens.rs 里 `GAP_DENSE` / `GAP_TIGHT` 的分工是同一条：
+            // **同类相邻**与**不同物分组**不是同一个数，早先混用就会出现
+            // "标题离说明比离正文还近"。
+            .gap(px(GAP))
             .child(self.repo_head(path, t, cx))
             .child(
                 // 页签间距（用户要求放大）走**官方的 `Size` 档**，不自己加
@@ -221,7 +232,17 @@ impl Shell {
                     }))
                     .children(tabs.iter().map(|tb| Tab::new().label(tb.label()))),
             )
-            .child(self.detail_body(path, cur, t, cx))
+            // 页签与内容之间**仍然是 GAP_LG**：上面那个 `.gap(GAP)` 只管
+            // 「仓库头 → 页签」这一处（阶段 21-7）。页签是导航、内容是主体，
+            // 两者是**不同的东西**之间的分组，紧了会让内容像页签的一部分。
+            // 所以这里显式补回一档，而不是靠外层那个统一的 gap 顺带管
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .mt(px(GAP_TIGHT))
+                    .child(self.detail_body(path, cur, t, cx)),
+            )
     }
 
     /// 页签内容。五个页签都有实现，这里不留"还没接"的兜底分支——

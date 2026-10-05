@@ -107,13 +107,13 @@ pub(crate) fn start(cx: &mut App) {
     for item in [&show, &scan, &quit] {
         if let Err(e) = menu.append(item) {
             // 托盘菜单建不起来不算致命：图标还在，只是不带菜单
-            eprintln!("托盘菜单项加入失败：{e}");
+            crate::diag::note(&format!("托盘菜单项加入失败：{e}"));
         }
     }
 
     // 图标建不出来（尺寸不合法之类）不该让整个托盘没掉——
     // 没图标的托盘仍然能用，只是不好看，比什么都没有强
-    let icon = tray_icon::Icon::from_rgba(app_icon_rgba(), APP_ICON, APP_ICON).ok();
+    let icon = Some(tray_icon());
     let mut builder = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip(TOOLTIP)
@@ -128,8 +128,10 @@ pub(crate) fn start(cx: &mut App) {
         Ok(tray) => TRAY.with(|t| *t.borrow_mut() = Some(tray)),
         Err(e) => {
             // 建不出托盘就不能设 QuitMode::Explicit，否则就成了没有入口的幽灵。
-            // 这条只能记日志——此刻界面还没开，没有任何地方能报给用户
-            eprintln!("托盘图标创建失败：{e}");
+            // 这条只能记日志——此刻界面还没开，没有任何地方能报给用户。
+            // `diag::note` 落到 `%APPDATA%\com.qingbird.git\app.log`：
+            // release 是 GUI 子系统，**没有 stderr**，`eprintln!` 会凭空消失
+            crate::diag::note(&format!("托盘图标创建失败：{e}"));
             return;
         }
     }
@@ -205,7 +207,7 @@ fn open_main_window(cx: &mut AsyncApp) {
     if let Err(e) = cx.open_window(opts, |window, cx| {
         cx.new(|cx| crate::state::Shell::new(window, cx))
     }) {
-        eprintln!("重开主窗口失败：{e}");
+        crate::diag::note(&format!("重开主窗口失败：{e}"));
     }
 }
 
@@ -237,183 +239,91 @@ fn rescan(cx: &mut AsyncApp) {
     }
 }
 
-/// 托盘图标尺寸。Windows 托盘在 100% 缩放下是 16px、150% 是 24px，
-/// 32px 够两边缩放（系统自己缩），再大只是白占内存
-const APP_ICON: u32 = 32;
+/// 托盘位图的边长。`tray_icon` 不解码图片、系统按任务栏密度缩放，
+/// 32 够 100%（16px）与 150%（24px）两档，再大只是白占内存。
+const TRAY_EDGE: u32 = 32;
 
-/// 品牌主色，取 `gui/theme.json` 的 `accent.background`——
-/// 与界面上"待推送 / 未提交"那档蓝是同一个色，托盘与主区一眼认得出是一家人
-const BRAND: [u8; 3] = [0x5B, 0x7A, 0x99];
+/// 托盘图标的像素。**由 `build.rs` 从 `assets/app-icon.png` 缩到 32×32 生成**，
+/// 与窗口标题栏左上角那一枚、桌面图标**同一张源图**。
+static TRAY_ICON_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/app-tray.rgba"));
 
-/// 托盘图标：主题色圆底 + 白色 git 分支。
+/// 建托盘图标。
 ///
-/// **为什么是分支图而不是鸟。** 应用叫"青鸟"，但 `assets/icon-source.png`
-/// 里**根本没有鸟**——logo 是一个带 git 分支的立体箱子。托盘图标要跟
-/// 窗口/任务栏那一套对得上，所以取的是品牌里真正有辨识度的那部分：分支图。
-/// （先按"青鸟"画了飞鸟，白白调了三轮参数，方向一开始就错了。）
+/// **为什么不再手绘**（2026-10-05 定）：以前这里是**程序化画**的
+/// "品牌色圆底 + 白色 git 分支"——理由是"托盘只有 16px，那张位图缩下来是一坨"。
+/// 代价是**托盘图标与标题栏那颗长得不一样**（一个是墨底箱子，一个是青蓝圆底分支），
+/// 而它们本该是同一个软件的同一张脸。
 ///
-/// **为什么带圆底。** 托盘图标浮在任务栏上，而任务栏有深浅两套。
-/// 不带底的纯色字形在深色任务栏上会直接消失（试过：墨色分支、墨色箱轮廓
-/// 在 `#202020` 上一点不剩）。圆底自带底色，两种任务栏都成立，
-/// 也就**不必读 `AppsUseLightTheme` 注册表切深浅两套图标**。
+/// 现在改成**一份源图派三份**（`build.rs`）：标题栏读原始 PNG、托盘读缩到 32 的
+/// RGBA、桌面读多尺寸 `.ico` 资源。三处永远一致，换图只改 `assets/app-icon.png`。
 ///
-/// **为什么手绘位图而不是加载 `icons/32x32.png`。** 那张图在托盘的 16px 下
-/// 是一坨青蓝色块，认不出是什么；而要解 PNG 就得为一张 16px 的图拖一个
-/// 图像解码依赖进二进制。托盘图标就在 16–32px 上看，矢量简化版才读得出来。
-///
-/// **几何一律以圆心为原点**（下面所有常数都是相对 `n` 的比例，无 `CENTER +`）。
-/// 这一点是踩过的坑：第一版按"原点在左上角"写，谷底掉到画布外被裁掉，
-/// 两翼正好在圆底被切断，渲出来是"圆底被啃两口"。`icon_coverage` 下面
-/// 的测试就是钉这件事的。
-fn app_icon_rgba() -> Vec<u8> {
-    let n = APP_ICON as f32;
-    let center = n / 2.0;
-    let radius = n / 2.0 - 0.5;
-    let curve = branch_curve(n);
-    let mut out = Vec::with_capacity((APP_ICON * APP_ICON * 4) as usize);
-    for y in 0..APP_ICON {
-        for x in 0..APP_ICON {
-            let (fx, fy) = (x as f32 - center + 0.5, y as f32 - center + 0.5);
-            // 圆边抗锯齿：托盘会缩到 16px，硬边会锯得很难看
-            let a = (radius - (fx * fx + fy * fy).sqrt()).clamp(0.0, 1.0);
-            let cov = icon_coverage(n, fx, fy, &curve);
-            let px = [
-                blend(BRAND[0], cov),
-                blend(BRAND[1], cov),
-                blend(BRAND[2], cov),
-            ];
-            out.extend_from_slice(&[px[0], px[1], px[2], (a * 255.0) as u8]);
-        }
-    }
-    out
-}
-
-/// 把字形覆盖率当白色叠在品牌色上
-fn blend(base: u8, cov: f32) -> u8 {
-    (base as f32 + (255.0 - base as f32) * cov).round() as u8
-}
-
-/// 笔画半宽 / 节点半径，都按尺寸取比例
-const STROKE: f32 = 0.048;
-const NODE: f32 = 0.100;
-
-/// 贝塞尔采样段数。24 段在 32px 上单段不足 1.5px，肉眼看不出折线
-const CURVE_STEPS: usize = 24;
-
-/// 从上节点向右再向下弯的那条分支（`git-branch` 的标志性弧线）。
-/// 直着画会读成"Γ"角标：水平出发再急转，左上角糊成一团
-fn branch_curve(n: f32) -> [(f32, f32); CURVE_STEPS + 1] {
-    let p0 = (-n * 0.19, -n * 0.21);
-    let ctrl = (n * 0.21, -n * 0.21);
-    let p2 = (n * 0.21, -n * 0.01);
-    let mut out = [(0.0f32, 0.0f32); CURVE_STEPS + 1];
-    for (i, slot) in out.iter_mut().enumerate() {
-        let t = i as f32 / CURVE_STEPS as f32;
-        let u = 1.0 - t;
-        *slot = (
-            u * u * p0.0 + 2.0 * u * t * ctrl.0 + t * t * p2.0,
-            u * u * p0.1 + 2.0 * u * t * ctrl.1 + t * t * p2.1,
-        );
-    }
-    out
-}
-
-/// 点到线段的距离
-fn dist_to_seg(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let len2 = dx * dx + dy * dy;
-    let t = if len2 <= f32::EPSILON {
-        0.0
-    } else {
-        (((px - a.0) * dx + (py - a.1) * dy) / len2).clamp(0.0, 1.0)
-    };
-    let (qx, qy) = (a.0 + t * dx, a.1 + t * dy);
-    ((px - qx) * (px - qx) + (py - qy) * (py - qy)).sqrt()
-}
-
-/// 白色分支图的覆盖率 0..1。抗锯齿靠"半宽外扩半像素"
-fn icon_coverage(n: f32, x: f32, y: f32, curve: &[(f32, f32)]) -> f32 {
-    let top = (-n * 0.19, -n * 0.21);
-    let bottom = (-n * 0.19, n * 0.22);
-    let right = (n * 0.21, -n * 0.01);
-    let mut d = dist_to_seg(x, y, top, bottom);
-    for w in curve.windows(2) {
-        d = d.min(dist_to_seg(x, y, w[0], w[1]));
-    }
-    let mut cov = (n * STROKE - d + 0.5).clamp(0.0, 1.0);
-    for p in [top, bottom, right] {
-        let dist = ((x - p.0) * (x - p.0) + (y - p.1) * (y - p.1)).sqrt();
-        cov = cov.max((n * NODE - dist + 0.5).clamp(0.0, 1.0));
-    }
-    cov
+/// ⚠️ 源图带**深色底**。托盘浮在浅色任务栏上时它是一块深色小方块——
+/// 这是"三处同一个图标"必然带来的观感，不是画错了。**真要按任务栏深浅切两套，
+/// 得先有第二张浅底图**，而不是在托盘上另画一个。
+fn tray_icon() -> tray_icon::Icon {
+    tray_icon::Icon::from_rgba(TRAY_ICON_RGBA.to_vec(), TRAY_EDGE, TRAY_EDGE)
+        .expect("托盘图标字节数与 32×32 对不上（build.rs 没跑？）")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 钉住"几何必须落在画布内且大致居中"——第一版就是坐标原点用错，
-    /// 字形掉到画布外被裁成"圆底被啃两口"，而 `cargo check` 一点都看不出来。
-    ///
-    /// 判据用**包围盒**而不是重心：竖直主干是根长条，全压在左边，
-    /// 重心天生偏左约 2px（实测 13.7 vs 圆心 15.5）——那是形状本身，
-    /// 不是缺陷。包围盒才对应"有没有掉出画布、有没有偏到边上"。
+    /// 钉住"build.rs 真的产出了 32×32×4 字节"。
+    /// 少了这条，`from_rgba` 会在**运行期启动那一瞬**才报字节数不对——
+    /// 症状是"程序起来但托盘空着"，而那时日志已经被窗口占住了
     #[test]
-    fn icon_glyph_lands_inside_the_disc() {
-        let px = app_icon_rgba();
-        assert_eq!(px.len(), (APP_ICON * APP_ICON * 4) as usize);
-
-        let (mut min_x, mut min_y) = (APP_ICON, APP_ICON);
-        let (mut max_x, mut max_y) = (0u32, 0u32);
-        let mut lit = 0u32;
-        for y in 0..APP_ICON {
-            for x in 0..APP_ICON {
-                let i = ((y * APP_ICON + x) * 4) as usize;
-                // 字形处已被 blend 成白色；只看亮度高于品牌色的像素
-                if px[i] > BRAND[0] + 40 {
-                    lit += 1;
-                    min_x = min_x.min(x);
-                    max_x = max_x.max(x);
-                    min_y = min_y.min(y);
-                    max_y = max_y.max(y);
-                }
-            }
-        }
-        // 32×32 的圆里，一个分支图大约占一到两成
-        assert!(lit > 120, "字形像素只有 {lit} 个，八成是掉出画布了");
-        assert!(lit < 420, "字形像素 {lit} 个，多半是糊成一片了");
-
-        // 包围盒要四边都在圆内，且左右上下大致对称
-        assert!(
-            min_x >= 2 && max_x <= APP_ICON - 3,
-            "包围盒 x {min_x}..{max_x} 出界"
-        );
-        assert!(
-            min_y >= 2 && max_y <= APP_ICON - 3,
-            "包围盒 y {min_y}..{max_y} 出界"
-        );
-        let span = (APP_ICON - 1) as f32;
-        assert!(
-            ((min_x + max_x) as f32 - span).abs() <= 1.0,
-            "字形左右不对称"
-        );
-        assert!(
-            ((min_y + max_y) as f32 - span).abs() <= 1.0,
-            "字形上下不对称"
+    fn tray_rgba_is_a_32x32_buffer() {
+        assert_eq!(
+            TRAY_ICON_RGBA.len(),
+            (TRAY_EDGE * TRAY_EDGE * 4) as usize,
+            "托盘字节数不对，build.rs 那一步多半没跑"
         );
     }
 
-    /// 圆底必须在图内，且四角完全透明——否则托盘上会出现一个方块
+    /// 钉住"这张图是**满幅不透明**的"——而这条是**一条反直觉的事实**，
+    /// 2026-10-05 第一次写这条断言时按"圆角方块 = 四角透明"写的，当场红了。
+    ///
+    /// `assets/app-icon.png` 的四角 alpha 是 **252**（不是 0）：那个圆角是
+    /// **画在图里的**——白底 + 圆角深墨方块，整张满幅不透明。
+    /// 后果有三件，都得记着：
+    /// ① 托盘上是**一块 16px 的深色方块**（不是圆底），这与"三处统一"的
+    ///    要求一致，见 `tray_icon` 那段注释
+    /// ② **深色主题下标题栏那枚会露出白色四角**（缩到 22px 后白边只剩一两像素，
+    ///    浅色主题上看不出来）
+    /// ③ 想要"透明圆角"得**先有一张真正带 alpha 的源图**，
+    ///    不能在托盘这头做遮罩——那会让三处又不一致了
     #[test]
-    fn icon_corners_are_transparent() {
-        let px = app_icon_rgba();
-        let n = APP_ICON;
+    fn tray_icon_is_opaque_edge_to_edge() {
+        let n = TRAY_EDGE as usize;
+        let at = |x: usize, y: usize| TRAY_ICON_RGBA[((y * n + x) * 4 + 3) as usize];
         for &(x, y) in &[(0, 0), (n - 1, 0), (0, n - 1), (n - 1, n - 1)] {
-            let a = px[((y * n + x) * 4 + 3) as usize];
-            assert_eq!(a, 0, "({x},{y}) 不透明");
+            assert!(at(x, y) >= 200, "({x},{y}) alpha={}，源图不该有透明角", at(x, y));
         }
-        // 圆心必须完全不透明，否则底色没铺满
-        let c = ((n / 2) * n + n / 2) * 4 + 3;
-        assert!(px[c as usize] >= 250, "圆心 alpha={}", px[c as usize]);
+        assert!(at(n / 2, n / 2) >= 250, "圆心该是实底");
+    }
+
+    /// 钉住"它不是一张全透明的空图"。
+    ///
+    /// 这是 D39 那条教训的正向版本：当年手绘的托盘图标渲出来是个对话气泡，
+    /// 而判据（长度对、alpha 对、不 panic）**全部通过**。
+    /// 唯一能分开"画对了"与"画歪了"的，是**把产物本身看一眼**——
+    /// 而这里能落成一条机械判据的是"确实有内容、且深浅两色都在"。
+    #[test]
+    fn tray_icon_is_not_blank() {
+        let px = TRAY_ICON_RGBA;
+        let mut opaque = 0usize;
+        let mut min = u8::MAX;
+        let mut max = 0u8;
+        for c in px.chunks_exact(4).filter(|c| c[3] > 200) {
+            opaque += 1;
+            min = min.min(c[0]);
+            max = max.max(c[0]);
+        }
+        // 32×32 的圆角方块大约铺掉 90% 以上；给足余量防 Lanczos 的边角
+        assert!(opaque > (TRAY_EDGE as usize) * (TRAY_EDGE as usize) * 3 / 4,
+            "几乎全透明 —— 托盘上会是空的（不透明像素 {opaque}）");
+        // 源图有深色底 + 青色箱体，红通道上两者差得开
+        assert!(max - min > 60, "只有一个色阶，多半是一块纯色（红通道 {min}..{max}）");
     }
 }

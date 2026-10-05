@@ -7,6 +7,7 @@
 pub(crate) mod batch_log;
 pub(crate) mod clean;
 pub(crate) mod clone;
+pub(crate) mod close_prompt;
 pub(crate) mod cmds;
 pub(crate) mod commit;
 pub(crate) mod fork;
