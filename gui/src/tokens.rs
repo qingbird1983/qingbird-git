@@ -12,44 +12,90 @@ use gpui_kit::{px, rgb, Hsla};
 // 设计规范：正文 #37352F / 三级 #787871 / 四级 #A4A099 / 占位 #BBB8B1，
 // 以及选中暖灰面 #EDEBE7、条轨 #EDEAE5、可更新暖橙底 #FDEFE4。
 // theme.json 的 token 覆盖不了这几级，集中在这里定义，禁止散落魔法数字。
+//
+// ---------- 每一档都有深色值（阶段 20）----------
+//
+// **这不是"深色下把浅色反过来"就成立的**：深色底上正文要**变亮而不是变暗**；
+// 徽标那种浅色 wash 要变成**深底 + 亮字**（浅色 wash 铺在深色卡上会是一块
+// 刺眼的白斑）。每档的深色值是照着"同一语义、同一暖调、在深底上还要够对比"
+// 单独定的，不是机械取反。**新增一档颜色时深色值必须一起给**——
+// 只给浅色值的档位就是一处"在深色下不成立"的地方。
 
-/// 正文 / 行内主要文字（比 foreground #1A1A1A 柔一档）
-pub(crate) fn body(_t: &Theme) -> Hsla {
-    rgb(0x37352F).into()
+/// 正文 / 行内主要文字（浅色下比 foreground #1A1A1A 柔一档；
+/// 深色下比 foreground #E9E7E2 柔一档）
+pub(crate) fn body(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0xC9C6BF).into()
+    } else {
+        rgb(0x37352F).into()
+    }
 }
 /// 三级：元信息、说明文字
-pub(crate) fn tier3(_t: &Theme) -> Hsla {
-    rgb(0x787871).into()
+pub(crate) fn tier3(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0x97948C).into()
+    } else {
+        rgb(0x787871).into()
+    }
 }
 /// 四级：弱提示、上次结果
-pub(crate) fn tier4(_t: &Theme) -> Hsla {
-    rgb(0xA4A099).into()
+pub(crate) fn tier4(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0x6E6B64).into()
+    } else {
+        rgb(0xA4A099).into()
+    }
 }
 /// 构成条 / 进度条的轨道
-pub(crate) fn track(_t: &Theme) -> Hsla {
-    rgb(0xEDEAE5).into()
+pub(crate) fn track(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0x2E2D2B).into()
+    } else {
+        rgb(0xEDEAE5).into()
+    }
 }
 /// 「可更新」徽章 / 清理条的暖橙底
-pub(crate) fn orange_bg(_t: &Theme) -> Hsla {
-    rgb(0xFDEFE4).into()
+pub(crate) fn orange_bg(t: &Theme) -> Hsla {
+    // 深色下是**深棕底 + 亮橙字**（配 `orange_text`），不是浅色 wash
+    if t.is_dark() {
+        rgb(0x3A2A1C).into()
+    } else {
+        rgb(0xFDEFE4).into()
+    }
 }
 /// 清理条上的深橙文字
-pub(crate) fn orange_text(_t: &Theme) -> Hsla {
-    rgb(0x9A4500).into()
+pub(crate) fn orange_text(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0xF0A868).into()
+    } else {
+        rgb(0x9A4500).into()
+    }
 }
 /// 「运行中 / 未提交」徽章的蓝灰底
-pub(crate) fn blue_bg(_t: &Theme) -> Hsla {
-    rgb(0xEDF1F5).into()
+pub(crate) fn blue_bg(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0x232A31).into()
+    } else {
+        rgb(0xEDF1F5).into()
+    }
 }
 /// 「失败」徽章的浅红底。跟 orange_bg / blue_bg 是同一套 wash 逻辑，
 /// 只是色相对齐 theme.json 的 `danger.background` #C2373B——
 /// 文字色直接用 `t.colors.danger`，底和字必须是同一个红的两档
-pub(crate) fn red_bg(_t: &Theme) -> Hsla {
-    rgb(0xFBEBEC).into()
+pub(crate) fn red_bg(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0x3A2224).into()
+    } else {
+        rgb(0xFBEBEC).into()
+    }
 }
 /// 次按钮描边（比 hairline 深一档）
-pub(crate) fn edge(_t: &Theme) -> Hsla {
-    rgb(0xC8C4BE).into()
+pub(crate) fn edge(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0x45443F).into()
+    } else {
+        rgb(0xC8C4BE).into()
+    }
 }
 
 // ---------- 选中面：全站同类高亮的唯一出处 ----------

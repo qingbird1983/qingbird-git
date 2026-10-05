@@ -776,6 +776,9 @@ pub(crate) struct SettingsDialog {
     pub(crate) ssh_key: Entity<InputState>,
     pub(crate) proxy: Entity<InputState>,
     pub(crate) notify: bool,
+    /// 当前是不是深色（阶段 20）。**只认深 / 浅两态**，
+    /// 存进配置的 `system` 在界面上落浅色，见 `theme` 模块头
+    pub(crate) theme_dark: bool,
     /// 「检测代理」在跑（按钮转圈、防连点）
     pub(crate) probing: bool,
     /// 探测结果的一句话

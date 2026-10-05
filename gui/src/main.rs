@@ -23,13 +23,12 @@ mod shell;
 mod sidebar;
 mod space_tab;
 mod state;
+mod theme;
 mod tokens;
 mod tray;
 mod widgets;
 
-use gpui_kit::component::{Theme, ThemeSet};
 use gpui_kit::*;
-use std::rc::Rc;
 
 fn main() {
     // **必须用带 `AllAssets` 的 `AppAssets` 而不是裸 `Assets`。**
@@ -57,17 +56,12 @@ fn main() {
             // 必须在碰任何组件之前
             gpui_kit::init(cx);
 
-            // 主题：把 theme.json 里那套灰白 token 应用到全局。
-            // 刻意用 include_str! 内嵌——配色跟代码一起进版本，不依赖磁盘上有没有这个文件。
-            let set: ThemeSet =
-                serde_json::from_str(include_str!("../theme.json")).expect("解析 gui/theme.json");
-            let cfg = Rc::new(
-                set.themes
-                    .into_iter()
-                    .next()
-                    .expect("gui/theme.json 里至少要有一套主题"),
-            );
-            Theme::update(cx, |t| t.apply_config(&cfg));
+            // 主题：整份来自 gui/theme.json（内嵌，配色跟代码一起进版本）。
+            // **按配置里的 `settings.theme` 取那一套**，不再是"永远拿第一套"
+            // ——theme.json 的 `themes` 本来就是数组，阶段 20 加了第二套
+            // `qingbird-dark` 之后，`.next()` 会让深色永远选不中。
+            // 认哪几个值、以及为什么 `system` 落浅色，见 `theme` 模块头
+            crate::theme::apply_saved(cx);
 
             // 托盘必须在**主线程**建：Windows 上托盘图标是一个隐藏 HWND，
             // 靠 gpui 那套标准消息泵（`GetMessageW` + `DispatchMessageW`）派发它的消息

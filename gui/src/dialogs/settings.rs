@@ -20,11 +20,13 @@
 //! **显示**（主题 / 显示哪些模块）。正文**定高**且右栏自带滚动条——
 //! 平铺那一版是被外层 `max_h` 裁死的，根因见 `settings_body` 的函数头。
 //!
-//! ## 主题这一项暂时还是只读（阶段 20 会换成真开关）
+//! ## 主题：深浅两套（阶段 20）
 //!
-//! 早先的理由是"只有一套配色，给一个深色开关却拿不出配套的深色 token"。
-//! **这条理由本轮不成立了**——配套 token 正是阶段 20 要做的东西，
-//! 路线表 Q10 已被用户重开。眼下先在「显示」页写清当前是哪一套与出处。
+//! 「显示」页那颗开关换的是**全局** `Theme`，因此**开着的这个弹窗会跟着一起
+//! 变色**——那是必须的：`Theme::update` 之后没有别的路让浮层重画，
+//! "外壳变了、弹窗还是老的"看着就像坏了。即时落盘，不挂「保存」。
+//! 配色两套都在 `gui/theme.json` 里；`theme.json` 覆盖不到的那几级灰阶
+//! 在 `tokens.rs`，两套值都在那儿。
 
 use gpui_kit::component::button::ButtonCustomVariant;
 use gpui_kit::base::{h_flex, v_flex};
@@ -120,6 +122,7 @@ impl Shell {
             ssh_key,
             proxy: proxy_input,
             notify: s.notify_auto_sync,
+            theme_dark: s.theme == crate::theme::DARK,
             probing: false,
             probe_note: None,
             mod_mine,
@@ -314,6 +317,30 @@ impl Shell {
         cx.notify();
     }
 
+    /// 深色主题开关。**即时落盘 + 即时换整套配色**，与系统通知同口径。
+    ///
+    /// 换的是**全局** `Theme`，所以开着这个对话框时它自己也一起变色——
+    /// 那是必须的，`Theme::update` 之后没有别的路能让浮层跟着重画，
+    /// 而"外壳变了、弹窗还是老的"看着就像坏了
+    pub(crate) fn toggle_theme(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let mut cfg = store::load();
+        cfg.settings.theme = if on {
+            crate::theme::DARK
+        } else {
+            crate::theme::LIGHT
+        }
+        .to_string();
+        if let Err(e) = store::save(&cfg) {
+            window.push_notification(format!("保存失败：{e}"), cx);
+            return;
+        }
+        if let Some(d) = self.settings_dlg.as_mut() {
+            d.theme_dark = on;
+        }
+        crate::theme::apply(&cfg.settings.theme, cx);
+        cx.notify();
+    }
+
     /// 「检测代理」。
     ///
     /// 填了地址就只试那一个；留空就按 core 的候选顺序（手动 → 上次成功 →
@@ -386,6 +413,8 @@ pub(crate) struct SettingsState {
     pub(crate) ssh_key: Entity<InputState>,
     pub(crate) proxy: Entity<InputState>,
     pub(crate) notify: bool,
+    /// 当前是不是深色（阶段 20）
+    pub(crate) theme_dark: bool,
     pub(crate) probing: bool,
     pub(crate) probe_note: Option<String>,
     /// 勾上 = 显示的模块，两套各一份（阶段 19）
@@ -407,6 +436,7 @@ impl Shell {
             ssh_key: d.ssh_key.clone(),
             proxy: d.proxy.clone(),
             notify: d.notify,
+            theme_dark: d.theme_dark,
             probing: d.probing,
             probe_note: d.probe_note.clone(),
             mod_mine: d.mod_mine.clone(),
@@ -719,24 +749,23 @@ fn network_page(
 }
 
 fn display_page(t: &Theme, st: &SettingsState, this: &Entity<Shell>) -> Div {
+    let theme_me = this.clone();
     v_flex()
         .w_full()
         .gap(px(GAP_LG))
         .child(section(
             t,
             "主题",
-            "这一版只有一套配色，写死在 gui/theme.json 里（改配色只动那一个文件）。",
+            "深浅两套配色都写死在 gui/theme.json 里（改配色只动那一个文件，\
+             两套都在里面）。这个开关即时生效，不受下面的「保存」约束。",
         ))
-        // ⚠️ **不用官方 `DescriptionList`**：它是一个定宽表格，最小内容宽度
-        // 约 500px，而右栏只有 486——flex 项默认不肯缩到 min-content 以下，
-        // 于是整个右栏被它顶宽、每段说明文字都溢出到弹窗外被裁掉
-        // （加 `min_w_0` 之后是它自己被裁）。一行文字说清同样的事
         .child(
-            div()
-                .w_full()
-                .text_size(px(FS_BODY))
-                .text_color(tier3(t))
-                .child("当前：浅色 · 灰白"),
+            Switch::new("set-theme")
+                .checked(st.theme_dark)
+                .label("深色主题")
+                .on_click(move |on, window, cx| {
+                    theme_me.update(cx, |this, cx| this.toggle_theme(*on, window, cx));
+                }),
         )
         .child(section(
             t,

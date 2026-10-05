@@ -84,7 +84,11 @@ pub struct Settings {
     /// 用户手动指定的代理，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080；为空表示全自动探测
     #[serde(default)]
     pub manual_proxy: String,
-    /// 界面主题：dark / light / system
+    /// 界面主题：`dark` / `light`。
+    ///
+    /// 老 Tauri 版留过一个 `system` 分支，**GPUI 这一侧从来不认它**——
+    /// 真实配置里存的是 `"light"`，而设置那颗开关是两态的。
+    /// 空串与任何别的值都落浅色（= 保持今天的样子），见 `gui/src/theme.rs`。
     #[serde(default)]
     pub theme: String,
     /// Git 提交身份（提交时未在全局配置时使用）
