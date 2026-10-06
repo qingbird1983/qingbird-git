@@ -248,7 +248,7 @@ mod rotation_tests {
         // 造一个已经超过上限的旧日志
         std::fs::write(&path, vec![b'x'; MAX_BYTES as usize + 16]).unwrap();
 
-        let mut f = std::fs::OpenOptions::new()
+        let f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)

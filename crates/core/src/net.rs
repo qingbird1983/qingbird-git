@@ -47,7 +47,11 @@ fn route_of(msg: &str) -> String {
         let addr = rest.trim_end_matches(" 重试…");
         return format!("经代理 {addr}");
     }
-    if msg.contains("代理并行") {
+    // **只认「并行」两个字，不认「代理并行」**。2026-10-06 之前赛跑提示写的是
+    // 「直连与**已缓存代理**并行尝试中…」，赛跑对手扩到系统代理后文案变成
+    // 「直连与**代理 127.0.0.1:7897** 并行尝试中…」——代理与并行被地址隔开，
+    // 那个连续子串不成立了，而后半句又确实只有并行这一种形态
+    if msg.contains("并行") {
         return "并行".into();
     }
     "直连".into()
@@ -493,28 +497,36 @@ pub fn run_net_op(
     git_config.push("http.lowSpeedLimit=1000".into());
     git_config.push("http.lowSpeedTime=45".into());
 
+    // 赛跑对手：缓存优先，其次系统代理（`proxy::race_candidate` 里有"为什么要
+    // 加系统代理这一档"的完整理由——冷启动缓存为空时，串行直连会被卡满
+    // NET_TIMEOUT 300 秒，因为低速让位机制在 TLS/HTTP 响应那一步还没进传输循环）
+    let mut raced: Option<String> = None;
     if allow_race && mode == NetMode::Auto {
-        if let Some(last_good) = cfg.last_good_proxy.clone() {
+        if let Some(race_with) = proxy::race_candidate(&cfg.settings, &cfg.last_good_proxy) {
             if let Some(cb) = on_stage {
-                cb("直连与已缓存代理并行尝试中…");
+                // **文案里带上地址**：这个赛跑对手可能是缓存、也可能是系统代理，
+                // 说"已缓存代理"在后者那一刻是句假话，而用户正要靠这一句判断
+                // 代理软件有没有生效
+                cb(&format!("直连与代理 {race_with} 并行尝试中…"));
             }
             let (out, proxy_url) = race_direct_vs_proxy(
                 repo_path,
                 args,
                 &git_config,
                 ssh.as_deref(),
-                &last_good,
+                &race_with,
                 on_line,
                 timeout,
             );
             if out.success {
                 if proxy_url.is_some() {
                     let mut cfg = store::load();
-                    cfg.last_good_proxy = Some(last_good);
+                    cfg.last_good_proxy = Some(race_with.clone());
                     let _ = store::save(&cfg);
                 }
                 return (out, proxy_url);
             }
+            raced = Some(race_with);
         }
     }
 
@@ -550,9 +562,14 @@ pub fn run_net_op(
         proxy::gather_candidates(&cfg.settings, &cfg.last_good_proxy)
     };
     for candidate in candidates {
-        // 仅当赛跑真的跑过（allow_race 且 last_good 存在）才跳过重复候选；
-        // clone 等禁用赛跑的操作若也跳过，last_good 代理就永远没机会被尝试
-        if allow_race && Some(&candidate) == cfg.last_good_proxy.as_ref() {
+        // 仅当赛跑真的跑过才跳过重复候选（`raced` 为 None 就是没跑过）；
+        // clone 等禁用赛跑的操作若也跳过，last_good 代理就永远没机会被尝试。
+        // **两个都要跳**：赛跑对手可能是缓存、也可能是系统代理，
+        // 少跳一个就是同一个地址连试两遍
+        if allow_race
+            && (Some(&candidate) == cfg.last_good_proxy.as_ref()
+                || Some(&candidate) == raced.as_ref())
+        {
             continue;
         }
         // 探测偶尔卡在超时红线上（clash 建连 3~5 秒波动），失败再给一次机会
@@ -702,7 +719,7 @@ mod tests {
             stage("直连失败，正在通过代理 127.0.0.1:7897 重试…");
             forward("Receiving objects:  60% (160/273), 1.6 MiB | 2.9 MiB/s");
             // 赛跑那一条的标签是「并行」，不能退化成「直连」
-            stage("直连与已缓存代理并行尝试中…");
+            stage("直连与代理 127.0.0.1:7897 并行尝试中…");
             forward("Receiving objects:  70% (190/273), 1.9 MiB | 3.1 MiB/s");
         }
         // ⚠️ 那个块不能省：`sink` 借着 `evs`，而下面要把它 move 走
@@ -717,6 +734,25 @@ mod tests {
         // 切路径那几条是**我们自己说的**，raw 必须空着——
         // 否则日志里会多出一行和输出流重复的东西
         assert!(v[0].raw.is_empty() && v[2].raw.is_empty() && v[4].raw.is_empty());
+    }
+
+    /// 赛跑提示的文案 2026-10-06 变了（「直连与**已缓存代理**并行尝试中…」→
+    /// 「直连与**代理 127.0.0.1:7897** 并行尝试中…」，因为赛跑对手扩到了系统代理）。
+    /// **`route_of` 原先认的是「代理并行」这个连续子串**，新文案里代理与并行
+    /// 被地址隔开 ⇒ 那一帧的路径标签会退化成「直连」，**而那恰恰是赛跑阶段**，
+    /// 用户看到的路径标签全程说"直连"。判据改成只认「并行」两个字
+    #[test]
+    fn race_stage_is_labelled_parallel_not_direct() {
+        // 新文案
+        assert_eq!(route_of("直连与代理 127.0.0.1:7897 并行尝试中…"), "并行");
+        // 旧文案仍要认（配置里可能还有历史文案对应的路径）
+        assert_eq!(route_of("直连与已缓存代理并行尝试中…"), "并行");
+        // 两种常见提示不受影响
+        assert_eq!(route_of("正在尝试直连…"), "直连");
+        assert_eq!(
+            route_of("直连失败，正在通过代理 127.0.0.1:7897 重试…"),
+            "经代理 127.0.0.1:7897"
+        );
     }
 
     /// 认不出的原文行**不该把上一次的路径标签与网速冲掉**。

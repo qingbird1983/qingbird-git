@@ -77,6 +77,71 @@ pub fn is_network_error(out: &GitOutput) -> bool {
     NETWORK_ERRORS.iter().any(|k| hay.contains(k))
 }
 
+/// SSH 公钥被拒时的人话结论；**None = 不是这类问题**。
+///
+/// **纯函数**（`pubkey_path` 由调用方给）：单测不许去读 `HOME` 或扫磁盘，
+/// 路径是参数不是函数自己找的——同 `diag` 那条「把被依赖的值收成参数」。
+///
+/// ## 为什么值得单独判一类
+///
+/// `Permission denied (publickey)` 是网络操作里**唯一一种「连上了但进不去」**：
+/// TCP 通了、ssh 握手也通了，是服务端不认你这把钥匙。而
+/// - `is_network_error` 对它返回 **false** ⇒ 应用**不去试代理**——**这是对的**，
+///   换十个代理结果一样；
+/// - 但界面给的那句「无法连接远端」是**假的**（连上了），「未找到可用代理」
+///   更假（代理跟这事没关系）。
+///
+/// 顺带说清楚一件容易白查的事：**SSH 远端压根不需要代理**。实测同一台机器上
+/// `ssh -T git@github.com` 无代理 4.1 秒就认证成功——22 端口不被墙。
+/// 被代理挡住的只有 HTTPS 远端。所以"给 SSH 加无感代理"是在解决一个不存在的问题。
+///
+/// `pubkey_path` 只在用户真有钥匙时才有意义，所以调用方给的是**实际存在的那个**
+/// `.pub` 路径；一个都没找到时传空串，这一句就退成"去生成一把"。
+pub fn ssh_auth_hint(stderr: &str, pubkey_path: &str) -> Option<String> {
+    let hay = stderr.to_lowercase();
+    // 只认 `publickey` 这一个词：HTTPS 侧的认证失败措辞完全不同
+    // （`could not read Username` / `Authentication failed`），不沾边
+    if !hay.contains("publickey") {
+        return None;
+    }
+    let tail = if pubkey_path.is_empty() {
+        "本机还没找到 SSH 密钥，先生成一对再把公钥贴上去".to_string()
+    } else {
+        format!("把 {pubkey_path} 的内容贴到该平台的「设置 → SSH 公钥」")
+    };
+    Some(format!(
+        "SSH 公钥没被接受——这不是网络问题，代理帮不上忙。{tail}"
+    ))
+}
+
+/// 用户 `~/.ssh` 下第一个真实存在的公钥文件（完整路径）。
+///
+/// **只报存在的那个**：报一个不存在的路径比不报更糟，用户会去 `notepad` 那个
+/// 路径、发现没有、然后以为程序在骗人。常见文件名按 ed25519 → rsa → ecdsa 排。
+/// 一个都没有时返回 `None`，由 `ssh_auth_hint` 退成"先生成一对"。
+pub fn existing_pubkey() -> Option<String> {
+    let home = std::env::var("USERPROFILE")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok())?;
+    let dir = std::path::Path::new(&home).join(".ssh");
+    for name in ["id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"] {
+        let p = dir.join(name);
+        if p.is_file() {
+            return Some(p.display().to_string());
+        }
+    }
+    None
+}
+
+/// 加上公钥那句，返回 `None` 的场合原样返回。
+///
+/// 存在是因为**三处失败出口都要判同一件事**（检测 / 拉取 / 推送），
+/// 而漏一处的后果不是编译错误、不是测试红，是**用户在其中两个操作上
+/// 看到一句假话**。
+pub fn ssh_auth_hint_or(stderr: &str, pubkey_path: &str, base: &str) -> String {
+    ssh_auth_hint(stderr, pubkey_path).unwrap_or_else(|| base.to_string())
+}
+
 /// 执行一条 git 命令。proxy_url 为 Some 时仅对本次子进程注入代理环境变量，
 /// 命令结束即失效，不影响系统与其他程序。
 pub fn run_git(repo_path: &str, args: &[&str], proxy_url: Option<&str>, timeout: Duration) -> GitOutput {
@@ -442,5 +507,50 @@ mod tests {
         )));
         assert!(!is_network_error(&output("error: Your local changes to the following files", false)));
         assert!(!is_network_error(&output("", false)));
+    }
+
+    /// 2026-10-06：gitee 那个仓库一直是 `Permission denied (publickey)`，
+    /// 而界面给的是「拉取失败」/「无法连接远端」——**两句都是假的**
+    /// （连上了，代理也压根不相关）。本条钉住"认得出 + 说人话 + 指出公钥在哪"
+    #[test]
+    fn publickey_failure_gets_a_human_hint_with_the_key_path() {
+        // 真实 git 输出原样（gitee 实测）
+        let stderr = "git@gitee.com: Permission denied (publickey).\r\n\
+                       fatal: Could not read from remote repository.\r\n";
+        let key = r"C:\Users\42527\.ssh\id_ed25519.pub";
+        let h = ssh_auth_hint(stderr, key).expect("这行必须认得出");
+        assert!(h.contains("不是网络问题"), "要点破代理帮不上忙：{h}");
+        assert!(h.contains("代理帮不上忙"), "{h}");
+        assert!(h.contains(key), "必须指出公钥文件的真实路径：{h}");
+    }
+
+    /// 三个都要避开的：**空串占位**（用户一把钥匙都没有时说路径是骗人）、
+    /// **HTTPS 侧的认证失败**（措辞完全不同，不该被 SSH 那条判据吃掉）、
+    /// **普通网络错误**。
+    #[test]
+    fn publickey_hint_fires_only_on_publickey_and_falls_back_cleanly() {
+        let key = r"C:\Users\42527\.ssh\id_ed25519.pub";
+        // 一把钥匙都没有 ⇒ 退成「先生成一把」，而不是报一个不存在的路径
+        let h = ssh_auth_hint("Permission denied (publickey).", "").unwrap();
+        assert!(h.contains("先生成一对"), "{h}");
+        assert!(!h.contains(".ssh"), "没有钥匙时不该出现任何 .ssh 路径：{h}");
+
+        // HTTPS 认证失败：措辞不同，**不归这条判据管**（它有自己的出口，
+        // 见 sync.rs 里 "认证未通过，可在设置里填写访问令牌" 那一档）
+        assert_eq!(
+            ssh_auth_hint("fatal: Authentication failed for 'https://github.com/x/y/'", key),
+            None
+        );
+        assert_eq!(ssh_auth_hint("fatal: could not read Username for 'https://…'", key), None);
+        // 普通网络错误同理
+        assert_eq!(ssh_auth_hint("fatal: unable to access 'https://…': Could not resolve host", key), None);
+        // 大小写不敏感（OpenSSH 的措辞在不同版本间有出入）
+        assert!(ssh_auth_hint("permission denied (publickey)", key).is_some());
+        // `_or` 版本：不是这类问题时原样返回 base，**三个失败出口共用**
+        assert_eq!(
+            ssh_auth_hint_or("fatal: unrelated", key, "拉取失败"),
+            "拉取失败"
+        );
+        assert!(ssh_auth_hint_or("Permission denied (publickey)", key, "拉取失败").contains("公钥"));
     }
 }

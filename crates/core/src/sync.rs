@@ -41,9 +41,15 @@ pub fn begin_user_op() -> Option<MutexGuard<'static, ()>> {
     None
 }
 
+/// 三处失败出口（检测 / 拉取 / 推送）都要判"SSH 公钥被拒"，
+/// 所以取公钥路径也收成一处。**只在这条分支上被调用**——
+/// 一次网络操作失败才可能需要它，平时不扫磁盘。
+fn pubkey_path() -> String {
+    git::existing_pubkey().unwrap_or_default()
+}
+
 /// 检查云端更新（用户触发）。on_progress 为 None 时进度静默丢弃。
-pub fn check_update(path: &str, on_progress: Option<&dyn Fn(&ProgressEvent)>) -> OpResult {
-    let Some(_guard) = begin_user_op() else {
+pub fn check_update(path: &str, on_progress: Option<&dyn Fn(&ProgressEvent)>) -> OpResult {    let Some(_guard) = begin_user_op() else {
         return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
     };
     do_check(path, on_progress)
@@ -85,7 +91,9 @@ pub fn do_check(path: &str, on_progress: Option<&dyn Fn(&ProgressEvent)>) -> OpR
         }
         return OpResult {
             ok: false,
-            message: msg,
+            // **公钥被拒要顶掉整句**：它是唯一一种「连上了但进不去」，
+            // 说"无法连接远端"是假的（连上了），追加"未找到可用代理"更假
+            message: git::ssh_auth_hint_or(&fetch_out.stderr, &pubkey_path(), &msg),
             output: combined(&fetch_out),
             used_proxy,
             status: Some(status),
@@ -219,6 +227,11 @@ pub fn do_pull(
         let fork = fork::fork_info(path, &status, &|a| run_local(path, a));
         let message = if pull_out.stderr.contains("no tracking information") {
             "当前分支没有上游分支，无法拉取".to_string()
+        } else if let Some(h) = git::ssh_auth_hint(&pull_out.stderr, &pubkey_path()) {
+            // 分支顺序有讲究：公钥判据排在 `fork.is_some()` **前面**。
+            // 分叉那档给的是"可以用下面的方式合流"，而公钥失败时压根
+            // 没拉到东西，**谈合流是把一个认证问题说成了历史问题**
+            h
         } else if fork.is_some() {
             "本地与云端历史分叉，ff 拉取失败——可以用下面的方式合流".to_string()
         } else if used_proxy.is_none() && git::is_network_error(&pull_out) {
@@ -341,6 +354,8 @@ fn do_push(path: &str) -> OpResult {
         let message =
             if push_out.stderr.contains("fetch first") || push_out.stderr.contains("rejected") {
                 "推送被拒绝：云端有新提交，请先拉取".to_string()
+            } else if let Some(h) = git::ssh_auth_hint(&push_out.stderr, &pubkey_path()) {
+                h
             } else if used_proxy.is_none() && git::is_network_error(&push_out) {
                 "推送失败：无法连接远端，且未找到可用代理".to_string()
             } else if push_out.stderr.contains("could not read Username")
