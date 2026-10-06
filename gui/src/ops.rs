@@ -34,7 +34,16 @@ use crate::widgets::auto_sync_text;
 #[derive(Clone)]
 enum LogEvent {
     Line(String),
-    Stage { stage: String, percent: Option<f32> },
+    /// `detail` 是传输量与网速（`已传输 1.21 MiB · 56.00 KiB/s`）。
+    /// ⚠️ **它必须在这一层就有位置**——2026-10-05 之前这个变体只有
+    /// `stage` 与 `percent`，于是 core 已经解析好的网速在这里被整条丢掉，
+    /// 界面只剩一根光条。**core 一行都不用改，丢的是 GUI 这一侧**：
+    /// `ProgressEvent` 三个字段一直都在（`stage` / `detail` / `percent`）
+    Stage {
+        stage: String,
+        detail: String,
+        percent: Option<f32>,
+    },
 }
 
 impl Shell {
@@ -99,8 +108,23 @@ impl Shell {
                 for ev in batch {
                     match ev {
                         LogEvent::Line(l) => lg.lines.push(l),
-                        LogEvent::Stage { stage, percent } => {
-                            lg.stage = Some(stage);
+                        LogEvent::Stage {
+                            stage,
+                            detail,
+                            percent,
+                        } => {
+                            // 空 stage = core 没认出这一行（只有 git 原文），
+                            // 不该把上一次认出来的阶段冲掉。`clone.rs` 的
+                            // `drain_into` 早就是这么判的（那里有注释），
+                            // 同一条链上两处判据得一样
+                            if !stage.is_empty() {
+                                lg.stage = Some(stage);
+                            }
+                            // 网速同理：`done.` / 纯计数行没有速度信息，
+                            // 让它们把上一条的网速清掉 ⇒ 数字在闪
+                            if !detail.is_empty() {
+                                lg.detail = detail;
+                            }
                             lg.percent = percent;
                         }
                     }
@@ -131,6 +155,7 @@ impl Shell {
                 }
                 lg.running = false;
                 lg.percent = None;
+                lg.detail.clear();
                 // 命令跑完仓库状态可能变了（生成了构建产物、改了文件），顺手重扫
                 this.repos = repos::list_repos();
                 this.refresh_status(cx);
@@ -186,10 +211,11 @@ impl Shell {
                             }
                             g.push(LogEvent::Line(line));
                         }
-                        // 进度条只吃 stage/percent，跟日志是不是原文无关
+                        // 进度条只吃 stage/detail/percent，跟日志是不是原文无关
                         if !ev.stage.is_empty() || ev.percent.is_some() {
                             g.push(LogEvent::Stage {
                                 stage: ev.stage.clone(),
+                                detail: ev.detail.clone(),
                                 percent: ev.percent,
                             });
                         }
@@ -225,8 +251,23 @@ impl Shell {
                 for ev in batch {
                     match ev {
                         LogEvent::Line(l) => lg.lines.push(l),
-                        LogEvent::Stage { stage, percent } => {
-                            lg.stage = Some(stage);
+                        LogEvent::Stage {
+                            stage,
+                            detail,
+                            percent,
+                        } => {
+                            // 空 stage = core 没认出这一行（只有 git 原文），
+                            // 不该把上一次认出来的阶段冲掉。`clone.rs` 的
+                            // `drain_into` 早就是这么判的（那里有注释），
+                            // 同一条链上两处判据得一样
+                            if !stage.is_empty() {
+                                lg.stage = Some(stage);
+                            }
+                            // 网速同理：`done.` / 纯计数行没有速度信息，
+                            // 让它们把上一条的网速清掉 ⇒ 数字在闪
+                            if !detail.is_empty() {
+                                lg.detail = detail;
+                            }
                             lg.percent = percent;
                         }
                     }
@@ -258,6 +299,8 @@ impl Shell {
                     lg.used_proxy = result.used_proxy.clone();
                     lg.running = false;
                     lg.percent = None;
+                    // 网速跟着 percent 一起收：留着就是一句已经过时的谎话
+                    lg.detail.clear();
                 }
                 // **落进 `op_history`（阶段 16）**：这一句是**跨会话**的。
                 // 没有它的话重启一次，日志卡就写「还没有操作记录」——
@@ -821,6 +864,7 @@ impl Shell {
                 lg.used_proxy = r.used_proxy.clone();
                 lg.running = false;
                 lg.percent = None;
+                lg.detail.clear();
                 if let Some(d) = this.commit_dlg.as_mut() {
                     d.running = false;
                     if !r.ok {

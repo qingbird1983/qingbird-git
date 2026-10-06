@@ -680,6 +680,61 @@ mod tests {
         );
     }
 
+    /// 路径标签（`（直连）` / `（经代理 127.0.0.1:7897）`）与网速是
+    /// 进度行上"现在走哪条路、多快"的**唯一来源**。
+    ///
+    /// 2026-10-05 用户报「进度条上没有直连/代理字样，也没有网速」——
+    /// core 这一半一直是好的（`route_of` 一直在拼、`transfer_detail`
+    /// 一直在抽），**坏的是 GUI 侧把它丢了**。这条测试把 core 这一半钉住：
+    /// 走完 `on_stage` → `forward` 这条真实链路，断言两样都到了
+    /// `ProgressEvent` 上。以后谁动 `route_of` 或 `parse_progress`，
+    /// 少了哪一样都会在这里红，而不是等到用户发现界面上少了一行字
+    #[test]
+    fn route_tag_and_speed_reach_progress_events() {
+        let evs: std::cell::RefCell<Vec<ProgressEvent>> = std::cell::RefCell::new(Vec::new());
+        {
+            let sink = |ev: &ProgressEvent| evs.borrow_mut().push(ev.clone());
+            let (_tag, forward, stage) = progress_hooks(Some(&sink));
+
+            // `run_net_op` 每次切路径前都会先回调一次 `on_stage`（net.rs:524 / :563 / :612）
+            stage("正在尝试直连…");
+            forward("Receiving objects:  45% (123/273), 1.2 MiB | 2.3 MiB/s");
+            stage("直连失败，正在通过代理 127.0.0.1:7897 重试…");
+            forward("Receiving objects:  60% (160/273), 1.6 MiB | 2.9 MiB/s");
+            // 赛跑那一条的标签是「并行」，不能退化成「直连」
+            stage("直连与已缓存代理并行尝试中…");
+            forward("Receiving objects:  70% (190/273), 1.9 MiB | 3.1 MiB/s");
+        }
+        // ⚠️ 那个块不能省：`sink` 借着 `evs`，而下面要把它 move 走
+        let v = evs.into_inner();
+        // 事件顺序：stage, forward, stage, forward, stage, forward
+        assert_eq!(v[1].stage, "接收对象（直连）", "直连时路径标签要跟在阶段后面");
+        assert_eq!(v[1].detail, "已传输 1.2 MiB · 2.3 MiB/s", "网速要送到 detail");
+        assert_eq!(v[3].stage, "接收对象（经代理 127.0.0.1:7897）");
+        assert_eq!(v[3].detail, "已传输 1.6 MiB · 2.9 MiB/s");
+        assert_eq!(v[5].stage, "接收对象（并行）", "赛跑那一条的标签是「并行」");
+
+        // 切路径那几条是**我们自己说的**，raw 必须空着——
+        // 否则日志里会多出一行和输出流重复的东西
+        assert!(v[0].raw.is_empty() && v[2].raw.is_empty() && v[4].raw.is_empty());
+    }
+
+    /// 认不出的原文行**不该把上一次的路径标签与网速冲掉**。
+    ///
+    /// 这条是 GUI 侧 `LogEvent::Stage` 那个守卫（`ops.rs`：空 stage / 空 detail
+    /// 都不覆盖）的理由——`remote: Total 42 (delta 0)…` 这类行里既没有阶段
+    /// 也没有速度，覆盖下去会让「经代理 xxx」在进度刷新时一闪一闪
+    #[test]
+    fn unrecognized_lines_carry_no_stage_or_detail() {
+        // ⚠️ 别拿 `Enumerating objects` 试——**它在白名单里**（`net.rs` 的关键词表），
+        // 会解析出「枚举对象」。认不出的是这种汇总行
+        let ev = parse_progress(" remote: Total 42 (delta 0), reused 0 (delta 0), pack-reused 0")
+            .unwrap();
+        assert_eq!(ev.stage, "", "认不出的行不该带阶段");
+        assert_eq!(ev.detail, "", "认不出的行不该带网速");
+        assert!(!ev.raw.is_empty(), "但原文一定要带回来");
+    }
+
     /// 进度刷新行不进日志（每秒十几条会冲掉真正的记录），
     /// **到 100% 那一条要进**——它是"这一步做完了"。
     #[test]

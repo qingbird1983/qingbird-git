@@ -9,8 +9,9 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::ButtonCustomVariant;
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyHeader, EmptyTitle};
 use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::progress::Progress;
 use gpui_kit::component::skeleton::Skeleton;
-use gpui_kit::component::{ActiveTheme, Theme};
+use gpui_kit::component::{ActiveTheme, Sizable, Size, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, AnyElement, App, Div, FontWeight, Hsla, IntoElement, ParentElement, Styled, Window,
@@ -336,4 +337,131 @@ impl CardHeader {
 /// 表头里那条 1px 竖细线：把右侧操作分成两组
 pub(crate) fn vdivider(t: &Theme) -> Div {
     div().w(px(1.0)).h(px(16.0)).flex_shrink_0().bg(track(t))
+}
+
+/// 进度行左侧那行字：`阶段（路径） · 已传输 1.21 MiB · 56.00 KiB/s`
+///
+/// **抽成纯函数是为了单测得掉**（D48 那条规律：判据不抽出来就只能靠抓帧看，
+/// 而抓帧证明不了"三样都在"）。判据就是这三段：阶段、网速、` · ` 连接。
+/// 这三样在 Tauri 版是同一行里的三段（`BusyPop.tsx`），
+/// 重写成 GPUI 时日志卡那段**整条漏了，只剩一根光条**。
+///
+/// **缺哪段就不补连接符**——core 的路径标签是拼在阶段尾巴上的，
+/// 阶段空的时候单拎网速出来是对的，补个 ` · ` 会变成没有主语的碎片
+pub(crate) fn progress_text(stage: &str, detail: &str) -> String {
+    match (stage.trim().is_empty(), detail.trim().is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => stage.trim().to_string(),
+        (true, false) => detail.trim().to_string(),
+        (false, false) => format!("{} · {}", stage.trim(), detail.trim()),
+    }
+}
+
+/// 进度读数：上面一行「阶段（路径）· 网速」+ 右对齐百分比，下面一根条。
+///
+/// ⚠️ **别和 `dialogs/clone.rs` 里那个同名形状的 `progress_block` 搞混**：
+/// 那一个是克隆框的**进度区**（读数 + 实时输出流），这一个只有读数与条，
+/// 日志卡要的也正是这个。两个都留着，名字分开——它们是包含关系，不是重复
+///
+/// **全应用只有这一个出处**（日志卡与克隆框共用）。原先日志卡那份只画条：
+/// `stage` 进了 `accessibility_label`（读屏专用，**肉眼看不见**）、
+/// `percent` 进了 `bar.value()`（一个不可见的数），而克隆框那份有文字——
+/// 同一份 `ProgressEvent`、同一个 core，两处渲染却不一样。这正是
+/// `AGENTS.md` 记的「两处用了同一套写法」的形状，收到一个函数里就不可能再漂。
+///
+/// **有没有 `percent` 就是两种形态**：有走确定态，没有走官方自带的不定态扫光。
+/// 跑常用命令给不出可信百分比，造一个假的只会让人以为快好了，然后越等越焦
+///
+/// `id` 由调用方给（`log-progress` / `clone-progress`）：gpui 的滚动与动画状态
+/// 按 `ElementId` 全局存，**一帧里出现两次同一个 id 就是 debug 构建 panic**
+/// （`Duplicate a11y node id`），两处必须各给各的
+pub(crate) fn progress_readout(
+    t: &Theme,
+    id: &'static str,
+    text: &str,
+    percent: Option<f32>,
+) -> AnyElement {
+    let bar = Progress::new(id)
+        .w_full()
+        .with_size(Size::XSmall)
+        .color(t.colors.accent)
+        .loading(percent.is_none())
+        .accessibility_label(if text.is_empty() {
+            "操作进行中".to_string()
+        } else {
+            text.to_string()
+        });
+    let bar = match percent {
+        Some(pct) => bar.value(pct).into_any_element(),
+        None => bar.into_any_element(),
+    };
+    v_flex()
+        .w_full()
+        .flex_shrink_0()
+        .gap(px(GAP_TIGHT))
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap(px(GAP))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(FS_SEC))
+                        .text_color(tier3(t))
+                        .child(text.to_string()),
+                )
+                // 百分比右对齐 + 等宽，跟左侧那行字分开重量；
+                // 没有 percent 就不画——空着的百分比位比没有更让人以为卡在 0%
+                .when_some(percent, |row, p| {
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(FS_SEC))
+                            .font_family(t.mono_font_family.clone())
+                            .text_color(tier3(t))
+                            .child(format!("{p:.0}%")),
+                    )
+                }),
+        )
+        .child(bar)
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progress_text;
+
+    /// 三段都在：阶段（带路径标签）+ 网速。这是 Tauri 版 `BusyPop` 那一行的形状，
+    /// 也是 2026-10-05 丢的那三样
+    #[test]
+    fn stage_and_speed_are_joined() {
+        assert_eq!(
+            progress_text("接收对象（经代理 127.0.0.1:7897）", "已传输 1.2 MiB · 2.3 MiB/s"),
+            "接收对象（经代理 127.0.0.1:7897） · 已传输 1.2 MiB · 2.3 MiB/s"
+        );
+    }
+
+    /// 只有阶段（我们自己发的路径切换提示、`done.` 之后那类）
+    #[test]
+    fn stage_alone_has_no_dangling_separator() {
+        assert_eq!(progress_text("正在尝试直连…", ""), "正在尝试直连…");
+    }
+
+    /// 只有网速（理论上不该发生，但别拼出「 · 已传输…」这种没有主语的碎片）
+    #[test]
+    fn speed_alone_does_not_lead_with_a_separator() {
+        assert_eq!(progress_text("", "已传输 1.2 MiB"), "已传输 1.2 MiB");
+    }
+
+    /// 两样都空 = 这一行什么都不画。**判据是空串**，
+    /// 不是那行文字里有没有 ` · `——调用方靠这个决定左半边给不给占位
+    #[test]
+    fn both_empty_is_empty() {
+        assert_eq!(progress_text("", ""), "");
+        // 空白也算空：core 那几处是 `trim` 过的，别让一个空格顶出「 · 」
+        assert_eq!(progress_text("   ", "  "), "");
+    }
 }

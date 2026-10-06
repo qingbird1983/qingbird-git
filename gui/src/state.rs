@@ -172,8 +172,17 @@ pub(crate) struct LogState {
     /// 走代理用的地址；None = 直连。值得单列：代理是"连上了但绕了一圈"，
     /// 混在成功里会让人以为一切正常，排查网络问题时也就没有线索了
     pub(crate) used_proxy: Option<String>,
-    /// 当前阶段文案（拉取 / 检测会报阶段名）
+    /// 当前阶段文案（拉取 / 检测会报阶段名）。
+    ///
+    /// **这一栏已经带着网络路径**：`net::route_of` 把路径拼在阶段后面
+    /// （`接收对象（经代理 127.0.0.1:7897）`），所以它一并回答"走的哪条路"——
+    /// 路径切换提示只闪现一瞬间，光看那一句记不住
     pub(crate) stage: Option<String>,
+    /// 传输量与网速（`已传输 1.21 MiB · 56.00 KiB/s`）。
+    /// **空串 = 本行没有速度信息**：`done.`、纯计数行、以及我们自己发的
+    /// 阶段提示都是空的。它与 `percent` 是两个独立来源——百分比定进度条，
+    /// 这一栏报"传了多少、现在多快"
+    pub(crate) detail: String,
     /// 确定态百分比 0–100。**None = 不定态**：跑命令给不出可信百分比，
     /// 造一个假的只会让人以为快好了，然后越等越焦
     pub(crate) percent: Option<f32>,
@@ -196,6 +205,7 @@ pub(crate) static LOG_EMPTY: LogState = LogState {
     verdict: None,
     used_proxy: None,
     stage: None,
+    detail: String::new(),
     percent: None,
     ts: 0,
 };
@@ -1009,8 +1019,11 @@ pub(crate) struct CloneDialog {
     pub(crate) parent: Entity<InputState>,
     /// 正在克隆（按钮转圈、防连点）
     pub(crate) running: bool,
-    /// 当前阶段词（"接收对象" / "正在取消…" …）
+    /// 当前阶段词（"接收对象" / "正在取消…" …）。
+    /// **路径标签已经拼在里面**（`接收对象（经代理 127.0.0.1:7897）`），同 `LogState::stage`
     pub(crate) stage: String,
+    /// 传输量与网速（`已传输 1.21 MiB · 56.00 KiB/s`）；空串 = 这行没有速度信息
+    pub(crate) detail: String,
     /// 确定态百分比 0–100。**None = 不定态**，界面走官方的不定态条
     pub(crate) percent: Option<f32>,
     /// 实时输出（只留文字变了的那些行）

@@ -15,7 +15,6 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogContent;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::progress::Progress;
 use gpui_kit::component::{ActiveTheme, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -30,7 +29,7 @@ use qingbird_core::repos;
 use qingbird_core::types::ProgressEvent;
 
 use crate::state::*;
-use crate::widgets::ghost_variant;
+use crate::widgets::{ghost_variant, progress_readout, progress_text};
 use crate::tokens::*;
 
 /// 实时输出最多留多少行。git 的进度行按 \r 反复刷新同一句，
@@ -71,6 +70,7 @@ impl Shell {
             parent: parent_input,
             running: false,
             stage: String::new(),
+            detail: String::new(),
             percent: None,
             output: Vec::new(),
             error: None,
@@ -169,6 +169,7 @@ impl Shell {
         if let Some(d) = self.clone_dlg.as_mut() {
             d.running = true;
             d.stage = "准备中…".into();
+            d.detail.clear();
             d.percent = None;
             d.output.clear();
             d.error = None;
@@ -300,6 +301,7 @@ pub(crate) struct CloneView {
     parent: Option<Entity<InputState>>,
     running: bool,
     stage: String,
+    detail: String,
     percent: Option<f32>,
     output: Vec<String>,
     error: Option<String>,
@@ -313,6 +315,7 @@ impl Shell {
                 parent: Some(d.parent.clone()),
                 running: d.running,
                 stage: d.stage.clone(),
+                detail: d.detail.clone(),
                 percent: d.percent,
                 output: d.output.clone(),
                 error: d.error.clone(),
@@ -322,6 +325,7 @@ impl Shell {
                 parent: None,
                 running: false,
                 stage: String::new(),
+                detail: String::new(),
                 percent: None,
                 output: Vec::new(),
                 error: None,
@@ -491,53 +495,25 @@ fn progress_block(t: &Theme, st: &CloneView) -> Div {
         }
     }
 
-    let bar = Progress::new("clone-progress")
-        .w_full()
-        .with_size(Size::XSmall)
-        .color(t.colors.accent)
-        .loading(st.percent.is_none())
-        .accessibility_label(if st.stage.is_empty() {
-            "克隆进行中".to_string()
-        } else {
-            st.stage.clone()
-        });
-    let bar = match st.percent {
-        Some(pct) => bar.value(pct).into_any_element(),
-        None => bar.into_any_element(),
+    // 跑的时候是「阶段（路径） · 网速」，跑完是「…（已结束）」。
+    //
+    // **委托给共用的 `widgets::progress_readout`**：原先这里是手搓的第二份，
+    // 而日志卡那份只画了一根条——同一份 `ProgressEvent`、同一个 core，
+    // 两处渲染却不一样（2026-10-05 收到一个函数里）。
+    // 顺带统一了一处配色：原先"正在跑"用 `body(t)`、"已结束"用 `tier4(t)`，
+    // 现在两处进度读数都用 `tier3(t)`，跑完那句话不再单独暗一档
+    let text = if st.running {
+        progress_text(&st.stage, &st.detail)
+    } else if st.stage.is_empty() {
+        "已结束".to_string()
+    } else {
+        format!("{}（已结束）", st.stage)
     };
 
     v_flex()
         .w_full()
         .gap(px(GAP))
-        .child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap(px(GAP))
-                .child(
-                    div()
-                        .text_size(px(FS_SEC))
-                        .text_color(if st.running { body(t) } else { tier4(t) })
-                        .child(if st.running {
-                            st.stage.clone()
-                        } else if st.stage.is_empty() {
-                            "已结束".to_string()
-                        } else {
-                            format!("{}（已结束）", st.stage)
-                        }),
-                )
-                .child(div().flex_1())
-                .when_some(st.percent, |row, p| {
-                    row.child(
-                        div()
-                            .text_size(px(FS_SEC))
-                            .font_family(t.mono_font_family.clone())
-                            .text_color(tier3(t))
-                            .child(format!("{p:.0}%")),
-                    )
-                }),
-        )
-        .child(bar)
+        .child(progress_readout(t, "clone-progress", &text, st.percent))
         .child(log)
 }
 
@@ -589,10 +565,13 @@ fn clone_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
 /// 后台线程把 `ProgressEvent` 攒在这里，主线程一次性取走。
 #[derive(Default)]
 struct ProgressSink {
-    /// `(阶段, 展示文本)` 成对存。**不要靠 `split_once(" · ")` 从展示
+    /// `(阶段, 网速, 展示文本)` 成对存。**不要靠 `split_once(" · ")` 从展示
     /// 文本里反解阶段**——展示文本换成 git 原文之后那个分隔符就不存在了，
     /// 阶段会整个退化成整行原文（2026-10-05 改输出为原文时踩到）。
-    events: Vec<(String, String)>,
+    ///
+    /// 网速单独一栏：它要上进度条旁边那行可见文字（`已传输 1.21 MiB · 56.00 KiB/s`），
+    /// 而展示文本那一列是 git 原文，从那里拆不出速度
+    events: Vec<(String, String, String)>,
     last: String,
     percent: Option<f32>,
 }
@@ -613,7 +592,7 @@ impl ProgressSink {
         };
         if text != self.last {
             self.last = text.clone();
-            self.events.push((ev.stage.clone(), text));
+            self.events.push((ev.stage.clone(), ev.detail.clone(), text));
         }
         if let Some(p) = ev.percent {
             self.percent = Some(p);
@@ -621,11 +600,15 @@ impl ProgressSink {
     }
 
     fn drain_into(&self, d: &mut CloneDialog) {
-        for (stage, text) in &self.events {
+        for (stage, detail, text) in &self.events {
             // 阶段词取最后一条非空的：它才是"现在在干什么"。
             // 空 stage = 认不出的原文行，不该把上一次的阶段冲掉
             if !stage.is_empty() {
                 d.stage = stage.clone();
+            }
+            // 网速同理：没有速度的行（`remote: Enumerating…`）不该把上一条清掉
+            if !detail.is_empty() {
+                d.detail = detail.clone();
             }
             d.output.push(text.clone());
         }

@@ -3613,10 +3613,120 @@ env = dict(os.environ); env["QB_APPDATA"] = sandbox   # ❌
 **新写任何起子进程的脚本都照这个来，不自己拼 env。**
 
 ---
+
+## 阶段 26：代理进度显示 —— 老版本那行字，GPUI 重写时整条漏了（D73）
+
+**用户报的是两句**：①「点击拉取默认直连、不检测代理所以必然失败」；
+②「老版本拉取代理进度条会有**直连还是代理、还有网速、百分比**的文字显示，
+你现在就一个光进度条，**所以你估计很多线没接上啊**」。
+
+**②是对的，①先不下结论。** 按「深读，不靠表面检查下结论」那条，
+先把四层逐行读完再判：core 的 `run_net_op` 决策链、`race_direct_vs_proxy`、
+`git.rs` 进程层、`sync.rs` 操作互斥、调度器节奏 —— **五处与 Tauri 版逐行一致**
+（`--ipv4` 插在 index 1、`http.version=HTTP/1.1`、`direct_cfg`(30720/20) vs
+`git_config`(1000/45)、赛跑仅当 `allow_race && Auto && last_good_proxy` 有值、
+`if out.success || !is_network_error { return }`、三个调度常量一字不差）。
+**core 是框架无关的纯 Rust，换框架根本碰不到它** —— 这也正好解释了为什么
+`lowSpeedLimit` / `HTTP/1.1` / `--ipv4` / 操作锁全部原样保留。
+⇒ 差异只可能在 GUI 那一层，**core 一行都不用改**。
+
+### 26-1 · 断点找到了：在**中间结构体的字段声明**里，不在逻辑里
+
+从源头一路读到人眼能看见的那一格，三个断点：
+
+| # | 位置 | 断了什么 |
+|---|---|---|
+| 1 | `ops.rs` `LogEvent::Stage { stage, percent }` | **变体里没有 `detail` 字段** ⇒ core 解析好的网速在这一层被整条丢掉 |
+| 2 | `state.rs` `LogState` | **也没有 `detail` 字段** ⇒ 就算传下来也无处存 |
+| 3 | `log.rs` `progress_bar()` | **只画条**：`stage` 塞进 `accessibility_label`（读屏专用，**肉眼不可见**）、`percent` 塞进 `bar.value()`（一个不可见的数） |
+
+**core 那半边一直是好的**：`route_of()` 把路径拼在阶段尾巴上
+（`接收对象（经代理 127.0.0.1:7897）`），`transfer_detail()` 从 git 进度行里
+抽网速（`已传输 1.2 MiB · 2.3 MiB/s`），`ProgressEvent` 三个字段一直都在，
+连 core 自己的单测都断言了 `detail == "已传输 1.2 MiB · 2.3 MiB/s"`。
+
+⇒ **这不是"功能没做"，是"字段没接全"，而字段没接全不是错误**：
+上游照常构造、少填一个，编译器不报；上游单测照绿，因为那一层确实有值；
+界面能跑能点。**缺陷只在"末端看不见"这一点上。**
+
+#### D73 · 判据是「末端有没有用出来」，不是「上游有没有填」
+
+**同项目内的不一致是最强的线索**：`dialogs/clone.rs` 那份进度块**三样全有**
+（阶段文字 + 网速 + 百分比），用的是**同一个 `ProgressEvent`、同一个 core**。
+⇒ 这证明**不是设计取舍，是某条线没接全**。
+`AGENTS.md` 早就记了「凡是两处用了同一套写法，改一处要回头改另一处」——
+这次是那次纪律的**反面教材**：不是漏抄，是**压根没写过**。
+
+修法收到一处：`widgets::progress_readout(t, id, text, percent)`
+（读数行 + 条）+ 纯函数 `progress_text(stage, detail) -> String`。
+日志卡与克隆框都调它，**从结构上不可能再漂**。
+⚠️ **别撞名**：`clone.rs` 里本地那个 `progress_block` 是**进度区**
+（读数 + 实时输出流），是**包含关系不是重复**，两个都留着、名字分开。
+
+顺带两处判据对齐（原先两边不一致）：
+- **空 stage / 空 detail 不覆盖上一次的值**（`ops.rs` 两处消费点 + `clone.rs`
+  的 `drain_into`）——认不出的原文行（`remote: Total 42 (delta 0)…`）里既没有
+  阶段也没有速度，覆盖下去会让「经代理 xxx」在进度刷新时**一闪一闪**。
+  `clone.rs` 早就是这么判的（那儿有注释），同一条链上两处判据得一样。
+- 收尾时 `detail` 跟着 `percent` 一起清（三处）——留着是一句**已经过时的谎话**。
+- 克隆框那处配色统一：原先「正在跑」用 `body(t)`、「已结束」用 `tier4(t)`，
+  现在两处读数都用 `tier3(t)`。
+
+### 26-2 · 关于「点拉取必然失败」：代码上这条路是通的，但**先修显示**
+
+`net.rs:522-545` 直连用 `http.lowSpeedLimit=30720` / `lowSpeedTime=20`
+（**20 秒低于 30KB/s 就让位**），随后 `gather_candidates` 取系统代理
+（`HKCU\...\Internet Settings` 的 `ProxyEnable`/`ProxyServer`）重试，
+成功后写回 `last_good_proxy`。用户实测环境：系统代理 `127.0.0.1:7897` 在听、
+关掉代理就拉不动 ⇒ **直连不通、代理必需**，而这条回退路径本来就在。
+⇒ **但因为三处全丢，界面上看不出它走到哪一步、走的哪条路**——
+这恰好是老版本能一眼看出来的信息。**先修显示，再看它实际报什么**，
+比在看不见输出的情况下盲猜靠谱。
+
+**顺带查清、本轮不动的两件**（都不是回归）：
+- **SSH 远端无感代理两版皆无**：`git.rs` 只注入 `HTTP_PROXY`/`HTTPS_PROXY`，
+  `GIT_SSH_COMMAND` **只**从 `ssh_key_path` 设置构造、**从不构造
+  `ProxyCommand`**。用户 8 个仓库里 4 个是 SSH 远端。⇒ 给 SSH 接代理是
+  **新特性不是清理**，本轮不塞进来（用户拍板「其它清理干净」）。
+- `last_good_proxy` 为空 ⇒ 不赛跑 ⇒ 被墙仓库首次必先直连撞满
+  `NET_TIMEOUT=300s`。**两版共有的冷启动老毛病**，非回归。
+- `Permission denied (publickey)`（gitee 那个）**不是网络错误** ⇒
+  `is_network_error` 返回 false、不试代理，**应用此行为正确**。
+
+### 26-3 · 本轮连着踩的两件小事
+
+① **Tauri 版就在 git 历史里**：`da6a3fb`（删掉 Tauri 实现）**前一刻**
+`11d56d0` 就是它的最后状态。`git worktree add` 取出来对照用完要
+`git worktree remove` —— **worktree 与主仓库共享 `.git`**，留在那儿算弄脏仓库。
+对照读的是 `11d56d0:src/components/panel/BusyPop.tsx`，那三段
+（`· {stage} · {detail}` + `{percent}%` + 条）就是这次修回来的形状。
+② **`edit` 的 `replace_all` 在 `ops.rs` 上不生效**（同样的字符串报
+「not found」，而不带该参数时又能正确报出两处位置）。改法：**先用带唯一
+锚点的长片段改掉第一处**，剩下那处自然唯一。**两次不成就换手法**，
+别在同一招上耗。
+
+- ✅ `cargo check --workspace` 零错零警；`cargo test --workspace` 全绿
+      （core **169 → 171**，gui **72 → 76**：新增 core 2 条端到端
+      ——`on_stage → forward` 真实链路上断言路径标签与网速都到了事件上、
+      认不出的行不带阶段也不带网速；gui 4 条 `progress_text` 纯函数）；
+      gui 单测**连跑 5 遍 5/5 绿**且真实 `app.log` 长度 **0 → 0 不变**
+- ⚠️ **写测试时自己踩了一次**：`unrecognized_lines_carry_no_stage_or_detail`
+      第一版拿 `Enumerating objects` 当"认不出的行"，**它在关键词白名单里**
+      （`net.rs` 的表），解析得出「枚举对象」⇒ 第一次跑就红。
+      **红的正是我那个没核过的假设**，换成 `remote: Total 42 (delta 0)…`
+      才对。**测试抓出的是判据选错，不是代码有问题**——同 D72 那条的形状。
+- ⛔ **实机验证未做**：装软件有副作用，留给用户双击。**要看的三样**：
+      ① 拉取/检测时进度条那行是不是出现「接收对象（直连）」、
+      ② 切代理后是不是变成「接收对象（经代理 127.0.0.1:7897）」、
+      ③ 网速与百分比有没有跟着刷新。**这三样都对了，才轮得到查
+      「点拉取到底失败不失败」**——那要另开一轮。
+
+---
 ## 变更记录
 
 | 日期 | 阶段 | 做了什么 | 结果 |
 |---|---|---|---|
+| 2026-10-05 | 26 | **代理进度显示：老版本那行字，GPUI 重写时整条漏了（D73）**。用户报「点拉取默认直连所以必然失败」+「老版本有**直连/代理、网速、百分比**的文字，你现在就一个光进度条，**很多线没接上**」。**②是对的，①先不下结论**——按「深读不靠表面检查」把四层逐行读完：`run_net_op` 决策链 / `race_direct_vs_proxy` / `git.rs` 进程层 / `sync.rs` 操作互斥 / 调度器节奏**五处与 Tauri 版逐行一致**（`--ipv4` 插 index 1、`http.version=HTTP/1.1`、`direct_cfg`(30720/20) vs `git_config`(1000/45)、赛跑仅当 `last_good_proxy` 有值、三个调度常量一字不差）。**core 是框架无关的纯 Rust，换框架根本碰不到它** ⇒ 差异只可能在 GUI，**core 一行不用改**。**断点在中间结构体的字段声明里，不在逻辑里**：① `ops.rs` 的 `LogEvent::Stage` **变体里没有 `detail` 字段** ⇒ core 解析好的网速在这一层被整条丢掉；② `LogState` 也没有 `detail` 字段；③ `log.rs::progress_bar()` **只画条**——`stage` 塞进 `accessibility_label`（读屏专用，**肉眼不可见**）、`percent` 塞进 `bar.value()`（不可见的数）。**core 那半边一直好**：`route_of()` 把路径拼在阶段尾巴上（`接收对象（经代理 127.0.0.1:7897）`）、`transfer_detail()` 抽网速（`已传输 1.2 MiB · 2.3 MiB/s`），core 自己的单测**还断言了** `detail == "已传输 1.2 MiB · 2.3 MiB/s"`。**D73：判据是「末端有没有用出来」不是「上游有没有填」**——字段没接全**不是错误**，上游照常构造少填一个、编译器不报、上游单测照绿、界面能跑能点，**缺陷只在末端看不见这一点上**。**同项目内的不一致是最强线索**：`clone.rs` 那份**三样全有**、同一个 `ProgressEvent` 同一个 core ⇒ 证明**不是设计取舍，是某条线压根没写过**（`AGENTS.md`「两处用了同一套写法」那条纪律的反面教材）。收成一处：`widgets::progress_readout(t, id, text, percent)` + 纯函数 `progress_text(stage, detail)`，日志卡与克隆框都调它。⚠️ **别撞名**：`clone.rs` 本地的 `progress_block` 是**进度区**（读数 + 输出流），**包含关系不是重复**，两个都留、名字分开。顺带对齐两处判据：**空 stage / 空 detail 不覆盖上一次的值**（认不出的原文行覆盖下去会让「经代理 xxx」**一闪一闪**，`clone.rs` 早有此判据）；`detail` 跟着 `percent` 一起清（**留着是已经过时的谎话**）。**关于「必然失败」：代码上这条路是通的**（直连 20 秒低于 30KB/s 让位 → `gather_candidates` 取系统代理 `127.0.0.1:7897` 重试 → 写回 `last_good_proxy`），**但因为三处全丢，界面上看不出走到哪一步、走的哪条路** ⇒ **先修显示再看它实际报什么**。**查清但不动的三件**（都不是回归）：**SSH 远端无感代理两版皆无**（`git.rs` 只注入 `HTTP_PROXY`/`HTTPS_PROXY`，`GIT_SSH_COMMAND` **从不构造 `ProxyCommand`**）——接它是**新特性不是清理**，本轮不塞；`last_good_proxy` 为空 ⇒ 不赛跑 ⇒ 首次必先撞满 300s（**两版共有的冷启动老毛病**）；`Permission denied (publickey)`（gitee）**不是网络错误**、不试代理，**应用此行为正确**。**另两件小事**：Tauri 版就在 git 历史里（`da6a3fb^` = `11d56d0`），`git worktree add` 取出来对照完**必须 `git worktree remove`**——**它与主仓库共享 `.git`**，留着算弄脏仓库；`edit` 的 `replace_all` 在 `ops.rs` 上不生效（同样字符串报 not found），改用**带唯一锚点的长片段先改第一处**、剩下那处自然唯一 | ✅ `cargo check --workspace` 零错零警；`cargo test --workspace` 全绿（core **169→171**、gui **72→76**：core 2 条端到端断言 `on_stage → forward` 真实链路上路径标签与网速都到了事件上 + 认不出的行不带阶段也不带网速，gui 4 条 `progress_text` 纯函数）；gui 单测**连跑 5 遍 5/5 绿**且真实 `app.log` **0→0 不变**。⚠️ 写测试时**自己踩了一次**：`unrecognized_lines_carry_no_stage_or_detail` 第一版拿 `Enumerating objects` 当"认不出的行"，**它在关键词白名单里**、解析得出「枚举对象」，**第一次跑就红——红的正是我没核过的假设**，换成 `remote: Total 42 (delta 0)…` 才对（**测试抓出的是判据选错，不是代码有问题**）。⛔ **实机验证未做**（装软件有副作用留给用户双击），**要看的三样**：进度条那行有没有出现「接收对象（直连）」、切代理后有没有变成「接收对象（经代理 127.0.0.1:7897）」、网速与百分比有没有跟着刷新。**这三样都对了，才轮得到查「点拉取到底失败不失败」**——那要另开一轮 |
 | 2026-10-05 | 25 | **用户装完阶段 24 的包后连报三条**，一轮做完。 **① 黑框（D69）**：`gui/src/main.rs` **没有** `#![windows_subsystem = "windows"]` ⇒ Rust 默认编出 **console 子系统**（PE 头 `Subsystem=3`）程序，Windows 启动它就**分配一个控制台** ⇒ 双击必带黑终端窗口。修法 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`——**用 `cfg_attr` 不写死**：release 是用户那份要 GUI 子系统，**debug 要保留控制台**，因为它才是 agent 自己的验收产物（`steps.py` 抓帧 / `startup_probe.py` / panic 栈全靠 stderr），写死会让 debug 的 panic 消息直接丢失、「闪退」变成查不了的事。**判据不取「代码写了」而取产物自己的头**：新增 `scripts/pe_subsystem.py` 读 PE Optional Header 偏移 68 的 WORD，实测 **3 → 2**（与 D68、阶段 24 那四条同类）。 **② 顺带修四处 spawn 闪黑框**：`os.rs` 的 `explorer` / 开文件 / 浏览器 / **选文件夹**（后者挂 powershell 黑框**阻塞 200–400ms** 等用户选）都没带 `CREATE_NO_WINDOW`；`open_terminal` 的 `wt` / `cmd start powershell` **故意不加**——用户点的就是「开终端」，加了功能等于作废，判据是「这颗操作交付的东西本身是不是一个窗口」。 **③ app.log（D70）**：①那个属性有个**自己引入的副作用**——GUI 子系统没有 stderr，`tray.rs`/`scheduler.rs` 4 处 `eprintln!`（托盘建不出来、重开窗口失败…）在用户那份里**不再有任何去处**，变成完全静默。新增 `gui/src/diag.rs`，**零新依赖**（`chrono` 本就是 `gui` 的直接依赖）：带本地时间戳落 `%APPDATA%\com.qingbird.git\app.log`、超 512KB 轮转成 `app.log.1`、**永不 panic 永不阻塞**（诊断通道绝不能自己把程序带崩）、debug 仍同打一份到 stderr；`install_panic_hook()` 装在 `main()` 第一行，**只写日志不弹窗也不吞 panic**（`MessageBox` 会让后台 panic 变成模态框卡死消息泵）。 **④ 拖拽补回来（D71）**：查实 `gui/` **一处拖拽代码都没有**，旧 Tauri 版走 `getCurrentWebview().onDragDropEvent`（窗口级）。底下三层**早就通**只是没人挂监听：平台 `gpui-pre-windows/src/window.rs:1517` **每个窗口都调了 `RegisterDragDrop`**、`DragEnter/Over/Leave/Drop` 全实现；框架 `FileDropEvent::Entered{paths}` → `cx.active_drag.value = Arc<ExternalPaths>`（`window.rs:5478`）、`Submit` 翻成 `MouseUpEvent`（`:5499`）所以元素级 `on_drop` 天然收得到；光标侧对 `CF_HDROP` 直接给 `DROPEFFECT_COPY`（`gpui-pre-windows/…:1169`）**不用自己挂 `can_drop`**。⚠️ **本轮最容易踩的坑：类型参数是 `ExternalPaths` 不是 `PathBuf`**——写错一行不报错只是**永远不触发**，后者是本应用自己往外拖文件时的 payload（`window.rs:8203` 那个测试容易看成是外部拖放）。**挂根 div = 窗口任意位置**（用户拍板保持旧行为）：drop 监听在冒泡阶段 + 命中即触发 + `stop_propagation`（`div.rs:2897-2924`），本项目无任何子元素注册 drop 监听，事件一路冒到根。**逐条复用「添加仓库」既有分支**，不另写一套判据。**通知只在「没成」时出**——成功那侧的反馈是「仓库出现在左栏」本身，再弹通知是重复打断视线（同 `repo_head.rs` 复制地址的先例）。 **⑤ 侧栏弹簧两个症状同源（D72）**：用户那句「滑出后没有回弹 / 反而拉大拉小时会弹簧一下」是对比结构，查下来是**两个独立缺陷叠加**。**症状 A 不是没动画，是过冲算得出但看不见**：`spring_move` 是 damping **0.85**，欠阻尼第一次过冲 ≈ 行程的 `exp(-πζ/√(1-ζ²))` = **0.63%** ⇒ 侧栏 220px 行程上只有 **1.4px**；而 `Spring::new` 默认 damping=**1.0** 所以 `spring_control` 压根零过冲；`theme.json` **没有 motion 段**所以动效只能落代码里 ⇒ 新增 `SPRING_BOUNCE_DAMPING=0.60` / `RESPONSE=200ms`（过冲 9.5% ≈ 21px）。**症状 B 是弹簧内部位置与面板脱节**：`spring()` 静止在目标时**直接返回不推进**（`motion.rs:609`），用户把面板 220→300 而弹簧内部还停在 220，松手时目标变了、`resize_panel` 每帧把面板按在弹簧值上 ⇒ **拽回 220 再弹过去，每次拖拽必现**。外部无 API 能写它的 position（state 在 `use_keyed_state` 里）⇒ 修法是**换一份 id**，新 id 初值就是 `position = target`（`motion.rs:586-592`）＝「就地静止在新宽度上」，加 `Shell::sidebar_gen` **只在拖拽松手时自增**；⚠️ 换 keyed state **不泄漏**（`window.rs:3347` 每帧 `next_frame.clear()`）。另把动画值**显式夹住 0**——ζ=0.6 收拢时会真的过冲到 -21px。**「回弹看得见」钉成可计算的断言**（过冲必须落在 5%–15%）：这类缺陷 check 零错、单测全绿、弹簧确实在跑、抓帧看着正常，**任何以「有没有报错 / 有没有在动」为判据的自查都拦不住它**。 **⚠️ 而且它是两份拷贝**：我先只改左栏，用户立刻报「左栏好了，**右栏**还是会弹簧一下」——`insp_split` 那段是**逐字重复**的同一套 ⇒ 同样三处都改（`spring_bounce()` / `insp_gen` 代次 / 夹住 0），`commit_inspector_width` 也自增。**两个代次必须各留一份**：两个独立的 `ResizableState` 若共用 id，两个弹簧会抢同一份 keyed state 互相把对方拽走。**纪律：凡「两处用了同一套写法」，改完一处要回头改另一处，并在字段注释里写明「为什么必须各留一份」**，否则下一个人会当漏抄去"统一"它。 **⑥ 本轮我自己犯的两件「写到沙箱外」**（详见 25-8）：① `startup_smoke.py` 另起炉灶拼 `env["QB_APPDATA"]=…`——而 **`QB_APPDATA` 是脚本之间的约定、只有 `qbguard.py` 认识它**，由它翻译成子进程的 `APPDATA`（应用读的是 `APPDATA` 本身）⇒ 15 秒里改写了用户真实 `config.json`。**闸门是有效的，正是它的收尾指纹核对报出来的；坏的不是纪律，是我绕过纪律。** ② `diag` 的单测改进程级全局 `APPDATA`，与 `scan_cache` 的用例互踩——**第一次跑是绿的，绿是侥幸**（`scan_cache` 自己就带 `APPDATA_LOCK` 并写明「并行跑会偶发红」），重跑时红的原因是**别的用例**。③ 修好 flaky 后那条用例仍在调 `note()`，**每跑一次 `cargo test` 就往用户真实 `app.log` 追加一行**——冒烟把内容打出来才发现（只报「7 行」这个数字解释不了任何事）。**三条共同修法是同一个：别让被测代码去读那个全局，把依赖收成参数**（`log_path_in` / `note_at` / `note_to`），**并行安全由构造保证，不靠运行时锁**；判据是**连跑 5 遍 + 同时核对真实 `app.log` 长度 260→260 不变**（「跑绿一次」对 flaky 零证明力）。顺带又踩一次「查过不生效就连注释一起删」：留了个 `log_path()` 当分界，它在非测试构建里没人用（`warning: function log_path is never used`）——**留着就是留一句会骗人的话**，已删 | ✅ `cargo check` 零错零警；`cargo build --release` **零 warning**；`cargo test --workspace` 全绿（core **169** / gui **72**，新增 14 条：拖拽判定+文案 10、`diag` 4、回弹档 2——拆开写是为了让每条只钉一件事）；**gui 单测连跑 5 遍 5/5 绿**且真实 `app.log` 长度 **260→260 不变**；**release exe PE `Subsystem` = 2（WINDOWS_GUI）**（读 PE 头确认，非看代码）；release **32,690,176 字节**；安装包 **9,621,188 字节**、`RT_ICON` 七档齐全、`ExtractIconExW` 报 1 个图标组；**debug 启动冒烟 15 秒**全过（进程存活 / 窗口句柄非零 / 未挂起 / stderr 0 字节 / 无 panic / 真实 config 未被碰）；⛔ **panic hook 未在活进程里被观测到真的触发**（4 条单测覆盖写入逻辑，但没有「应用真的调用了它」的活证据）；⛔ **用户真实 `app.log` 里有 7 行本轮留下的垃圾**，要清留给用户自己删；⛔ **实机安装验证未做**（装软件有副作用，留给用户双击：黑框消失 / 拖入能加仓库 / **左栏与右栏**都有可见回弹且拖拽不再抽搐） |
 | 2026-10-05 | 24 | **用户要一个安装版 exe。** 先回答那个问题：命令还是 `cargo build --workspace`，但**发布要多一步而且不是 debug 那条**——`--release` 32 MB（gpui 那棵树约 5 分半），debug 是 66 MB。**选型**：查过本机 **Inno Setup 6 已装**，NSIS / WiX / cargo-wix / cargo-bundle **一个都没有**；现成的能用就不引第二套工具链（装软件要用户批准）。按用户安装、**免 UAC**，装到 `{localappdata}\Programs`，仍保留「仅为我 / 为所有用户」选择框。**顺带查实应用是真正的单文件 exe**：运行期 `fs::read` / `File::open` / `current_exe` **全项目零命中**（`theme.json` 走 `include_str!`、图标走 `include_bytes!`、托盘位图来自 `OUT_DIR`、桌面图标由 build.rs 链接期进 PE），所以 `[Files]` 就一条；用户配置在 `%APPDATA%` 而**不在安装目录**，卸载**不会**带走它（故意的）。 **本轮四件「编成功了但不是想要的那个」**（与 D68 同一类）：① `.iss`/`.isl` 没有 UTF-8 BOM → **中文全变乱码而 ISCC 照样报 Successful compile**（Inno 无 BOM 就按系统 ANSI 读，本机 GBK）；② **`OutputDir` / `MessagesFile` 相对 ISCC 的工作目录解析、不是相对 .iss** ——写 `..\dist` 把包吐到 `F:\AIwork\dist\`**仓库外面**，而仓库里 git 干干净净（`dist` 被 ignore），**产物从哪来都看不出来**；③ `{cm:xxx}` 只查 `[CustomMessages]` 不查语言文件的 `[Messages]`，照抄 `Default.isl` 里的 `CreateDesktopIcon` 报未定义；④ `DirDoesntExistWarning` 这个指令根本不存在。 **中文向导**：Inno 官方发行**没有**简体语言包；先写最小覆盖版，结果 ISCC 对 **280 个缺键**逐条警告并回落英文（会中英混排）——手工翻不划算，改用社区完整翻译（kira-96/Inno-Setup-Chinese-Simplified-Translation，374 行零警告）。⚠️ `raw.githubusercontent.com` 在本机不通而 **`git clone` 通**。新增 `installer.iss` + `packaging/lang/zhCN.isl` + `scripts/build_installer.ps1` + `scripts/add_bom.py` | ✅ release 5m25s 通过；安装包 **9.16 MB**、PE 头正常；安装包自身图标 = 那张源图（`RT_GROUP_ICON` 七档齐全）；语言文件零条回落英文；⛔ **尚未实机安装验证**（装软件是有副作用的动作，留给用户双击） |
 | 2026-10-05 | 23 | **用户要求「托盘和桌面图标都换成软件左上角相同的图标」。**查到的现状是**三处三张脸**：标题栏读 `assets/app-icon.png`、托盘是**另一套手绘矢量**（青蓝圆底 + 白分支，阶段 12 补的那套）、桌面**压根没有图标**（`gui/` 无 `build.rs`，裸 exe 零资源，Windows 给的是通用蓝白「应用程序」图标）。⇒ 落成**一份源图派三份**：新建 `gui/build.rs`，构建期把源图 Lanczos3 缩到 32×32 给托盘、编 16/24/32/48/64/128/256 七档 `.ico` 交给 `embed-resource` 塞进 PE，标题栏那一处不动。**构建期解 PNG 而非运行期拖 `image`**——它与 `embed-resource` 本来就在 `Cargo.lock` 里，进 `[build-dependencies]` 零额外编译成本，**主依赖表一个图像库都没加**。托盘那段手绘代码 **-160 行**已删。 **D68（本轮最值钱的一条）**：`embed_resource::compile()` 吃的是 **`.rc` 脚本**而不是 `.ico`——我第一版直接把 `.ico` 喂给它，**构建全程绿灯、exe 正常产出，而 exe 里一个图标都没有**。根因：它把参数**原样交给 `rc.exe`**（`windows_msvc.rs:36`），`rc.exe` 见到二进制就当"这脚本里没有资源语句"处理，**不报错、只产出一个零条目的空 `.res` 文件。更早一层的判据是**文件头 32 字节**：`DataSize=0` + `HeaderSize=0x20` 就是空资源文件——本轮 `app.lib` 从 **32 字节**变成 **121332 字节**，`ExtractIconExW` 从报不到图标变成报 1 个图标组。修法是先落一份真的 rc 脚本（`1 ICON DISCARDABLE "…"`，路径换正斜杠，rc 的预处理里 `\` 是续行符）。 **验法分三层**（D39 + D48）：① PE 资源树里 `RT_GROUP_ICON` 七档齐全，条目字节 839→76276 B；② **托盘那份与 exe 32px 那档逐像素相同**（差分包围盒 `None`、单通道最大差 **0**）——这是"三处真的是同一张图"的机械判据，比眼力强；③ **让 Explorer 亲自画一张**（`explorer_icon_check.py`，只验 PE 会漏掉系统图标缓存那一层），第一格就是它。 **托盘那枚默认在「隐藏的图标」折叠面板里**，为它连栽三次：截整条任务栏求差 → 应用一启动任务栏中间多出窗口按钮，差出 525px 宽一长条把 16px 小图标淹了；只截通知区求差 → 差出来的是**输入法「中/英」在闪的 15×15**；点开面板肉眼看 → 一屏 8 个陌生图标，认错一个就得出了"图标没出来"。收法是 `Shell_NotifyIconGetRect`（托盘 crate 用无 GUID 的老式身份，`uID` 是进程内自增计数器，扫一小圈就撞上）+ 按 `TopLevelWindowForOverflowXamlIsland` 的矩形抓面板。新增 5 个验收工具，全部写明各自挡的是哪一类误判。 **如实登记三条代价**：16px 下「Git」字样与分支图糊掉只剩青色箱体轮廓（原来那套手绘的在 16px 下其实更清楚）；**源图四角 alpha=252 满幅不透明**，那个圆角是画在图里的 ⇒ 托盘上是**一块深色方块**，深色任务栏上会融掉（已钉成单测 `tray_icon_is_opaque_edge_to_edge`），要透明圆角得先有第二张带 alpha 的源图，不能在托盘这头做遮罩——那会让三处又不一致了 | ✅ `cargo check` 零错零警；`cargo test --workspace` 全绿（core **169** / gui **58**，新增 3 条托盘图标单测）；exe 资源树七档齐全 + `ExtractIconExW` 报 1 个图标组；托盘与 exe 32px **逐像素相同**（差分 None / 最大差 0）；Explorer 实画确认桌面图标；托盘实机确认折叠面板第一格就是它；stderr 全 0 字节；真实 config 指纹全程未变 |

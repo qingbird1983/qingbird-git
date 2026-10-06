@@ -18,12 +18,11 @@
 // 混在同一屏里一眼就能看出不一致。
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::progress::Progress;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Disableable as _, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, ClipboardItem, Context, Div, FontWeight, InteractiveElement, IntoElement,
+    div, px, AnyElement, ClipboardItem, Context, Div, FontWeight, InteractiveElement, IntoElement,
     ParentElement, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
 };
 use qingbird_core::run_cmd::Slot;
@@ -31,7 +30,9 @@ use qingbird_core::run_cmd::Slot;
 use crate::os;
 use crate::shell::{OpenTerminal, StopOp};
 use crate::state::*;
-use crate::widgets::{card, ghost_variant, meta_text, vdivider, CardHeader};
+use crate::widgets::{
+    card, ghost_variant, meta_text, progress_readout, progress_text, vdivider, CardHeader,
+};
 use crate::tokens::*;
 
 /// 表头上**常显**的两条命令键。**这一对就是全部的常驻命令入口**：
@@ -242,23 +243,24 @@ impl Shell {
     }
 }
 
-/// 进度条。**有 `percent` 走确定态，没有走不定态**——
-/// 跑命令给不出可信的百分比，造一个只会让人以为快好了，然后越等越焦。
-/// 官方 `Progress::loading(true)` 自带来回扫的动画，不另写 `with_animation`
+/// 进度读数。**委托给 `widgets::progress_readout`**，日志卡与克隆框共用一份。
 ///
-/// ⚠️ 官方 `Progress` **没有实现 `FluentBuilder`**，所以这里不能用 `.when()`
-/// 分支，只能先算出 `value` 再一次成型
-fn progress_bar(t: &Theme, lg: &LogState) -> impl IntoElement {
-    let bar = Progress::new("log-progress")
-        .w_full()
-        .with_size(Size::XSmall)
-        .color(t.colors.accent)
-        .loading(lg.percent.is_none())
-        .accessibility_label(lg.stage.clone().unwrap_or_else(|| "操作进行中".to_string()));
-    match lg.percent {
-        Some(pct) => bar.value(pct).into_any_element(),
-        None => bar.into_any_element(),
-    }
+/// 这里的 `lg.stage` 已经带着网络路径（`接收对象（经代理 127.0.0.1:7897）`），
+/// `lg.detail` 是网速——两样都是 core 解析好送过来的，
+/// **2026-10-05 之前它们在这一层全被丢掉**：函数只返回一根条，
+/// `stage` 进了 `accessibility_label`（读屏专用，肉眼不可见）、
+/// `percent` 进了 `bar.value()`。所以用户看到的是"光进度条"，
+/// 而老版本同一行上还有路径标签、网速与百分比文字
+///
+/// 阶段还没来时给一句「准备中…」：常用命令那条路永远不发进度事件，
+/// 空着的一行比一句实话更让人以为渲染坏了
+fn progress_bar(t: &Theme, lg: &LogState) -> AnyElement {
+    progress_readout(
+        t,
+        "log-progress",
+        &progress_text(lg.stage.as_deref().unwrap_or("准备中…"), &lg.detail),
+        lg.percent,
+    )
 }
 
 // ================= 输出流 =================
