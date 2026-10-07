@@ -175,7 +175,11 @@ impl Shell {
                 .rounded(px(r_xl(t)))
                 .bg(red_bg(t))
                 .border_1()
-                .border_color(t.colors.border)
+                // 这一圈边按 v4 §2 取 `line_soft`（卡/卡内盒一档），不取 `line`。
+                // ⚠️ **原型 `.sync-alert` 根本没有四周一圈边**，只有
+                // `border-left: 3px solid var(--warn)` + `--r-inner` 圆角 + `12/15` 内距
+                // ——那是**改形态**（色条替代描边），不在这一轮擅动的范围，登记待他认
+                .border_color(track(t))
                 .child(
                     h_flex()
                         .items_center()

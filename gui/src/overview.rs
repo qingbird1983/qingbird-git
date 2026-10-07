@@ -17,6 +17,7 @@
 // 混在同一屏里一眼就能看出不一致。
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::chart::AreaChart;
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyHeader, EmptyTitle};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
@@ -52,13 +53,18 @@ pub(crate) const OV_COL_MIN: [f32; 7] = [140., 68., 80., 88., 56., 60., 60.];
 /// 再宽的余量全给那两列——它们本来就是会随窗口变长的文本列
 pub(crate) const OV_COL_SCALE_MAX: f32 = 1.6;
 
-/// 表格外面那一圈固定开销（从窗口宽里扣掉的那一条）：导航轨 + 分隔线 +
-/// 页面左右内边距 + 卡片左右描边 + 纵向滚动条。
+/// 表格外面那一圈固定开销（从窗口宽里扣掉的那一条）：**逐项列出来，不要写凑出来的数**。
+///
+/// 2026-10-08 这一条错过一次：给表格卡补上 `card()` 的 `p(GAP_XL)` 之后，
+/// 卡内左右各吃掉 16，而这一项还是旧的 83 ⇒ 列宽合计比可用宽多 32 ⇒
+/// **整张卡顶到窗口右缘**（用户定的"右 9"实测变 0）。
+/// 旧的 `2. * GAP_LG` 是"页面左右内边距各 12"，那一格现在归壳层（左 0 + 右 `GAP`）。
 ///
 /// **宁可多扣也不要少扣**（D56）：少扣 = 合计大于可用宽度 = 冒出横向滚动条，
 /// 而横向滚动条会把内容区再压窄——那正是自激的起点。多扣只是右边空十几像素，
 /// 是一次定死的静态状态，不会自己动
-pub(crate) const OV_TABLE_CHROME: f32 = NAV_W + 1. + 2. * GAP_LG + 2. + 16.;
+pub(crate) const OV_TABLE_CHROME: f32 =
+    NAV_W + 1. + GAP + 2. * GAP_XL + 2. + 16.;
 
 /// 把可用宽度摊到七列上，合计正好等于 `avail`。
 ///
@@ -285,7 +291,9 @@ impl Shell {
         h_flex()
             .w_full()
             .flex_shrink_0()
-            .gap(px(GAP))
+            // 卡间 4（帧上视觉 6）——与外层那条 gap 同一个数，**四张卡彼此、四张卡与
+            // 下面两张卡，全屏幕只有这一档卡间**（2026-10-08 用户定"统一成 6px"）
+            .gap(px(GAP_TIGHT))
             // 四张卡各配一枚 lucide 图标（阶段 21-8）：**它们说的是这张卡在讲什么**，
             // 而不是又一次重复右边那个数字。挑法是"状态"而不是"动作"——
             // 与同步三键那几个动词图标（Download/Upload/RefreshCw）不混，
@@ -331,6 +339,15 @@ pub(crate) struct ActivityBar {
     pub(crate) count: u32,
 }
 
+/// 活跃度**图区**的高度。**不是拍的，是从改前的帧上量出来的**：
+/// 这张卡原来写死 `.h(px(160.0))`，实测卡内那一格图区占 y=272..377 = **105**，
+/// 而图真正画掉的只有 99（同一帧上网格线 4 条在 y=276/297/318/339、间距 21，
+/// 轴基线 y=360，x 轴标签底 y=375）。
+/// 卡高改由内容撑之后，这一档就是图区自己的高度，取整到 **100**。
+/// ⚠️ 它是**图区**的高，不是**卡**的高——卡由「内边距 + 表头 + gap + 这一档」
+/// 推出来，写死卡高才会出现"卡 160 而图只有 99、多出来的一截全成了空白"那种账
+const OV_CHART_H: f32 = 100.0;
+
 impl Shell {
     /// 近 14 天全仓库提交数。空数据给一句说明，不画一张空图——
     /// 空坐标系看起来像"程序坏了"
@@ -338,40 +355,50 @@ impl Shell {
     /// 两者数据源不同：那个读 `ProfileState`，这个读全仓库合并的结果
     fn ov_activity_chart(&self, t: &Theme) -> Div {
         let bars = fill_days(&self.ov_activity, ACTIVITY_DAYS);
+        // 卡头右上那枚胶囊报的是**总数**——柱状图只给得出形状，给不出"这两周一共多少次"
+        let total: u32 = bars.iter().map(|b| b.count).sum();
 
         let card = v_flex()
             .w_full()
             .flex_shrink_0()
-            .h(px(160.0))
+            // 卡高**不写死**：由「上下内边距 + 表头行 + gap + 图区 `OV_CHART_H`」
+            // 推出来。原来这里钉着 `.h(px(160.0))`，比内容高出一截，
+            // 多出来的那一段全变成图区上下的空白（2026-10-07 用户挑出来的那条）
             .p(px(GAP_LG))
             .gap(px(GAP_TIGHT))
-            .rounded(px(r_lg(t)))
-            .bg(t.colors.popover)
+            // 外壳与上面那 4 张 `widgets::stat_card` 同一套（底 `card_face` /
+            // 圆角 `r_xl` / 1px `track` 边 / `sh_2`）——同一屏里同类卡片不许
+            // 手搓第二份外壳。内边距这一轮不动
+            .rounded(px(r_xl(t)))
+            .bg(card_face(t))
             .border_1()
-            .border_color(t.colors.border)
+            .border_color(track(t))
+            .shadow(sh_2(t))
+            // 表头走全站唯一的 `CardHeader`（原来这里手搓了一份 h_flex：
+            // 标题 + 附注，右侧什么都没有）。**卡头右上那枚胶囊是原型有的，
+            // 我一直没落**——它报的是"这两周一共多少次提交"，
+            // 而柱状图本身只看得出形状、看不出总数
             .child(
-                h_flex()
-                    .items_baseline()
-                    .gap(px(GAP))
-                    .child(
-                        div()
-                            .text_size(px(fs_body()))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(t.colors.foreground)
-                            .child("提交活跃度"),
+                CardHeader::new("提交活跃度")
+                    .note(format!("近 {ACTIVITY_DAYS} 天 · 全部仓库合计"), false)
+                    .right(
+                        pill_icon(
+                            AssetIcon::TrendingUp,
+                            &format!("{} 次提交", total),
+                            t.colors.accent,
+                            wash(t),
+                        )
+                        .into_any_element(),
                     )
-                    .child(
-                        div()
-                            .text_size(px(fs_meta()))
-                            .text_color(tier4(t))
-                            .child(format!("近 {ACTIVITY_DAYS} 天 · 全部仓库合计")),
-                    ),
+                    .build(t),
             );
 
         if bars.is_empty() {
             return card.child(
                 div()
-                    .flex_1()
+                    // 空态也占**同一个图区高度**：不给高的话卡会塌成一条，
+                    // 有数据与没数据就变成两张不同高的卡
+                    .h(px(OV_CHART_H))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -392,8 +419,12 @@ impl Shell {
         // 曲线默认就是 `Curve::Natural`（`plot/mod.rs:229-238`，d3 的
         // curveNatural），所以**不用显式 `.natural()`**——写出来也只是把
         // 默认值再说一遍。
+        //
+        // 图区给的是**明确高度** `OV_CHART_H` 而不是 `flex_1`：外层卡高现在由
+        // 内容撑，`flex_1` 在没有固定高的父容器里会塌成 0（`PlotElement` 只会
+        // 填满父容器，不会自己挣出高度）
         card.child(
-            div().flex_1().min_h_0().child(
+            div().h(px(OV_CHART_H)).child(
                 AreaChart::new(bars)
                     .id("ov-activity")
                     // 14 个 x 标签全写日期会挤成一团：只留 M/D。
@@ -422,7 +453,7 @@ impl Shell {
     /// 而"只在变化时更新"要自己判断什么算变化——判断错了就是表格少一行，
     /// 而少一行是那种用户不会报、只会自己绕开的 bug
     pub(crate) fn sync_ov_rows(&mut self) {
-        let rows: Vec<OvRow> = self
+        let mut rows: Vec<OvRow> = self
             .repos
             .iter()
             .map(|e| {
@@ -443,9 +474,20 @@ impl Shell {
                     behind: v.status.behind,
                     ahead: v.status.ahead,
                     changed: v.changed,
+                    last_used: e.last_used,
                 }
             })
             .collect();
+        // 行序由卡头那颗键定（两档，见 `OvSort`）。**名称那一档不区分大小写**——
+        // 仓库名里拉丁与中文混着，直接 `cmp` 会把大写全排到小写前面，看着像没排
+        match self.ov_sort {
+            OvSort::LastUsed => rows.sort_by(|a, b| b.last_used.cmp(&a.last_used)),
+            OvSort::Name => {
+                rows.sort_by(|a, b| {
+                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                })
+            }
+        }
         self.ov_rows = rows;
     }
 
@@ -519,89 +561,158 @@ impl Shell {
     }
 
     /// 总览页。数据全部来自已有状态缓存（状态扫描那份 + 后台算的活跃度），不另扫一遍
-    pub(crate) fn overview_page(&self, t: &Theme, _cx: &mut Context<Self>) -> impl IntoElement {
-        let mine = self.repos.iter().filter(|r| !r.is_third_party).count();
-        let third = self.repos.len() - mine;
-
-        let head = v_flex()
-            .w_full()
-            .flex_shrink_0()
-            .gap(px(GAP_TIGHT))
-            .child(
-                div()
-                    .text_size(px(fs_head()))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(t.colors.foreground)
-                    .child("总览"),
-            )
-            .child(
-                div()
-                    .text_size(px(fs_sec()))
-                    .text_color(tier3(t))
-                    .child(format!(
-                        "{} 个仓库 · 我的 {} · 第三方 {}",
-                        self.repos.len(),
-                        mine,
-                        third
-                    )),
-            );
-
-        let table = if self.repos.is_empty() {
-            v_flex()
-                .w_full()
-                .flex_1()
-                .min_h_0()
-                .rounded(px(r_lg(t)))
-                .bg(t.colors.popover)
-                .border_1()
-                .border_color(t.colors.border)
-                .child(
-                    Empty::new()
-                        .border_0()
-                        .header(EmptyHeader::new().title(EmptyTitle::new().child("还没有仓库")))
-                        .content(
-                            EmptyContent::new().child(
-                                div()
-                                    .text_size(px(fs_meta()))
-                                    .text_color(tier4(t))
-                                    .child("回到「我的仓库」加一个，总览才有东西可看"),
+    pub(crate) fn overview_page(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        // 表格那张卡**原来没有卡头**——原型有（`.card-head`：标题「全部仓库」+ 右上那颗排序键），
+        // 而我一直在拿页头那句「N 个仓库 · …」当它的说明。2026-10-08 照原型补回来。
+        // ⚠️ 空态与有数据**共用同一个卡头**，只差右上那颗键：没有行可排的时候
+        // 摆一颗排序键就是一颗点了没反应的假键
+        let head = CardHeader::new("全部仓库");
+        let (body, head) = if self.repos.is_empty() {
+            (
+                v_flex()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .rounded(px(r_lg(t)))
+                    .bg(t.colors.popover)
+                    .border_1()
+                    // **卡内的框跟卡同一个描边档**（`line_soft`，v4 §2 用途表）：
+                    // 这一格坐在 `card(t)` 里面，它外圈已经是卡边，
+                    // 里圈再深一档就成了"一张卡两圈不同重的边"
+                    .border_color(track(t))
+                    .child(
+                        Empty::new()
+                            .border_0()
+                            .header(EmptyHeader::new().title(EmptyTitle::new().child("还没有仓库")))
+                            .content(
+                                EmptyContent::new().child(
+                                    div()
+                                        .text_size(px(fs_meta()))
+                                        .text_color(tier4(t))
+                                        .child("回到「我的仓库」加一个，总览才有东西可看"),
+                                ),
                             ),
-                        ),
-                )
+                    )
+                    .into_any_element(),
+                head,
+            )
         } else {
+            let sort_btn = Button::new("ov-sort")
+                .icon(icon_sm(AssetIcon::ListFilter).text_color(tier3(t)))
+                .label(self.ov_sort.label())
+                .custom(ghost_variant(cx))
+                .with_size(Size::Small)
+                .tooltip("切换排序：按最后使用 / 按名称")
+                .accessibility_label("仓库排序")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.ov_sort = this.ov_sort.next();
+                    this.sync_ov_rows();
+                    cx.notify();
+                }))
+                .into_any_element();
             // 官方 `DataTable` 同样没有 `Styled`，撑高交给外层
-            div()
-                .w_full()
-                .flex_1()
-                .min_h_0()
-                .rounded(px(r_lg(t)))
-                .overflow_hidden()
-                .border_1()
-                .border_color(t.colors.border)
-                .child(
-                    // 官方 `DataTable` 没有 `accessibility_label`（那是 `table::Table`
-                    // 才有的），裸 `div` 也没有——所以这块不硬凑一个可访问名，
-                    // 上面的页头「N 个仓库 · 我的 X · 第三方 Y」已经把表格在讲什么说清了
-                    div().size_full().child(
-                        DataTable::new(&self.ov_table)
-                            .with_size(Size::Small)
-                            .bordered(false)
-                            .stripe(true),
-                    ),
-                )
+            (
+                div()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .rounded(px(r_lg(t)))
+                    .overflow_hidden()
+                    .border_1()
+                    // 与上面那格同理：**卡内的框取 `line_soft`**（v4 §2）
+                    .border_color(track(t))
+                    .child(
+                        // 官方 `DataTable` 没有 `accessibility_label`（那是 `table::Table`
+                        // 才有的），裸 `div` 也没有——所以这块不硬凑一个可访问名，
+                        // 卡头那句「全部仓库」已经把这张表在讲什么说清了
+                        div().size_full().child(
+                            DataTable::new(&self.ov_table)
+                                // **行高从 `Small`(30) 提到 `Large`(40)**（2026-10-08 用户令：
+                                // 状态那一列的胶囊"比表格行距还大"）。
+                                // 官方档：XSmall 26 / Small 30 / Medium 32 / Large 40
+                                // （`gpui-component/src/sizing.rs:57`），**最高就是 40**——
+                                // 原型 `tbody td { height: 50px }` 那 50 只能靠
+                                // `Size::Size(px(50.))` 拿到，而那条自定义 px 档
+                                // 会联动把单元格里文字与图标一起放大（`AGENTS.md` 为按钮记过这笔账），
+                                // 所以宁可用 40 这一档，不越那条禁令
+                                .with_size(Size::Large)
+                                .bordered(false)
+                                .stripe(true),
+                        ),
+                    )
+                    .into_any_element(),
+                head.right(sort_btn),
+            )
         };
+        let table = card(t).flex_1().min_h_0().child(head.build(t)).child(body);
 
         v_flex()
             .flex_1()
             .min_h_0()
             .h_full()
             .bg(t.colors.background)
-            .p(px(GAP_LG))
-            .gap(px(GAP_LG))
-            .child(head)
+            // **四边缩进按 2026-10-08 用户定的那四条落**（同参照 = 窗口客户区边）：
+            // 左 41 = 导航轨 40 + 轨边框 1 + 主区 **0**
+            // 右 9  = 卡自身边框 1 + 壳层那一格 `pr`（**写在 `shell.rs`，不在这里**）
+            // 上 94 / 下 28 里，主区自己那两格都是 **0**（下 28 全是状态条，不是留白）
+            // ⇒ 这一层**一条 padding 都不写**。别把它补回 `p(..)`"看着才像有边距"——
+            // 同灰之后左边距留着会让第一张卡与轨之间凭空多一道 8px 的缝，
+            // 而那条缝在参考图里根本不存在
+            // **卡片与卡片之间统一 6**（用户 2026-10-08 定）。代码写 4，帧上量 6：
+            // 相邻两张卡各有一条 1px 边框（`4+1+1=6`），口径与推导记在 `tokens::GAP_TIGHT`
+            .gap(px(GAP_TIGHT))
+            .child(self.ov_head(t))
             .child(self.stat_cards(t))
             .child(self.ov_activity_chart(t))
             .child(table)
+    }
+
+    /// 总览页页头。**照原型 `.page-head` 的结构：两行**。
+    ///
+    /// 2026-10-08 曾为凑用户算的"上缩进 94"把它压成单行（94 那笔账只有按单行才加得平）。
+    /// 他这一轮的原话是「你最起码总览页先完善到位」，而"到位"的基准是原型
+    /// ⇒ **形态回到两行，缩进让位**。要回到 94 那一版，把下面 `v_flex` 换回 `h_flex` 即可，
+    /// 代价是页头比原型少一行、上缩进少 27px
+    fn ov_head(&self, t: &Theme) -> Div {
+        let mine = self.repos.iter().filter(|r| !r.is_third_party).count();
+        let third = self.repos.len() - mine;
+
+        v_flex()
+            .w_full()
+            .flex_shrink_0()
+            // **页头右移一个圆角半径**（2026-10-08 用户令：「总览与副标题要向右移动到
+            // 下面卡片的圆角尺寸让出来，假定圆角半径是 10，那就向右移动 10」——
+            // 10 是他举的例子，真源是 `r_xl(t)`，当前浅色档是 20）。
+            // 判据是**派生量**不是像素：圆角改成 14 那天，这一格自己跟上，
+            // 不会留下"标题又伸进圆角切掉的那块空里"的账（同 `TITLE_BAR_PAD_L` 那条）
+            .pl(px(r_xl(t)))
+            .mb(px(GAP - GAP_TIGHT))
+            // 原型 `.page-head .sub { margin-top: 6px }`——我们最近的档是 `GAP_TIGHT`(4)，
+            // **不为 2px 开一档**（v4 §3.2），所以这一格取 4 不取 6
+            .gap(px(GAP_TIGHT))
+            .child(
+                div()
+                    .text_size(px(fs_head()))
+                    .font_weight(FontWeight::EXTRA_BOLD)
+                    .text_color(t.colors.foreground)
+                    .child("总览"),
+            )
+            // 副标题那一句里**数字是加粗的、且取正文字色**（原型 `.sub b`）：
+            // 整句都灰 = 三个数与前后缀一样重，扫一眼拿不到"几个仓库"。
+            // 拆成一串小段横排，就是原型那个 `display:flex; gap:8px` 的结构
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(GAP))
+                    .child(ov_num(self.repos.len().to_string(), t))
+                    .child(ov_txt("个仓库", t))
+                    .child(ov_sep(t))
+                    .child(ov_txt("我的", t))
+                    .child(ov_num(mine.to_string(), t))
+                    .child(ov_sep(t))
+                    .child(ov_txt("第三方", t))
+                    .child(ov_num(third.to_string(), t)),
+            )
     }
 }
 
@@ -843,6 +954,39 @@ mod status_tests {
             }
         }
     }
+}
+
+// ================= 页头副标题那三样 =================
+// 原型 `.page-head .sub` 是 `display:flex; gap:8px` 的一串小段，
+// 里面 `<b>` 包的是数字。整句一个颜色扫不出数，所以**不拼成一个 String** 而是排元素
+
+/// 副标题里的一枚**数字**（原型 `.sub b`：加粗 + 正文字色）。
+/// 数字比它前后的说明文字重一档，"几个仓库"才是一眼里拿得到的
+fn ov_num(s: String, t: &Theme) -> Div {
+    div()
+        .text_size(px(fs_sec()))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(t.colors.foreground)
+        .child(s)
+}
+
+/// 副标题里的一段**说明文字**（比数字淡一档，不跟它抢）
+fn ov_txt(s: &str, t: &Theme) -> Div {
+    div()
+        .text_size(px(fs_sec()))
+        .text_color(tier3(t))
+        .child(s.to_string())
+}
+
+/// 中间点分隔符。原型 `.sub .sep` 用的是 `--line`（发丝线那一档），
+/// 但**照搬到我们这套配色上就完全看不见**（2026-10-08 抓帧：那两个点一个像素都没认出来）——
+/// 我们的 `track` 与画布只差 1/255，本来就是为了"卡间发丝线"调的，不是给文字用的。
+/// ⇒ 取 `tier4`（最淡的一档**文字**色）：它仍不参与信息竞争，但眼睛能看见
+fn ov_sep(t: &Theme) -> Div {
+    div()
+        .text_size(px(fs_sec()))
+        .text_color(tier4(t))
+        .child("·")
 }
 
 // ================= 列宽的单测 =================

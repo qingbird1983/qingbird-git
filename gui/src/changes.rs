@@ -76,7 +76,9 @@ impl Shell {
         v_flex()
             .flex_1()
             .min_h_0()
-            .p(px(GAP_LG))
+            // 页级留白**不在这里**——主区外层（`detail_page`）已经给了 `pt`/`pr`，
+            // 这一层再套一圈 `p(GAP_LG)` 就是同一条边距写两次，四张页签会因此
+            // 比头卡窄 24px（2026-10-08 用户定四边缩进时一并收掉）
             .child(
                 // 白卡 + 卡内表头，与日志 / 说明 / 空间 / 历史同一套
                 crate::widgets::card(t)

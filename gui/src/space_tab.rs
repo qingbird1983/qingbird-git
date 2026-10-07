@@ -43,8 +43,9 @@ impl Shell {
                 .min_h_0()
                 .id("space-scroll")
                 .overflow_y_scroll()
-                .p(px(GAP_LG))
-                .gap(px(GAP))
+                // 页级留白归主区外层（`detail_page`），这一层不再套一圈 `p`；
+                // 段与段之间 = 卡间那一档（4，帧上视觉 6）
+                .gap(px(GAP_TIGHT))
                 .child(section(
                     "磁盘占用",
                     t,
@@ -56,8 +57,8 @@ impl Shell {
             return v_flex()
                 .flex_1()
                 .min_h_0()
-                .p(px(GAP_LG))
-                .gap(px(GAP))
+                // 页级留白归主区外层，这一层不再套一圈 `p`
+                .gap(px(GAP_TIGHT))
                 .child(card_with(
                     CardHeader::new("磁盘占用").right(rescan_button(t, cx)),
                     t,
@@ -69,8 +70,8 @@ impl Shell {
             return v_flex()
                 .flex_1()
                 .min_h_0()
-                .p(px(GAP_LG))
-                .gap(px(GAP))
+                // 页级留白归主区外层，这一层不再套一圈 `p`
+                .gap(px(GAP_TIGHT))
                 .child(card_with(
                     CardHeader::new("磁盘占用").right(rescan_button(t, cx)),
                     t,
@@ -93,8 +94,9 @@ impl Shell {
             .min_h_0()
             .id("space-scroll")
             .overflow_y_scroll()
-            .p(px(GAP_LG))
-            .gap(px(GAP))
+            // 页级留白归主区外层（`detail_page`），这一层不再套一圈 `p`；
+            // 段卡之间 = 卡间那一档（4，帧上视觉 6）
+            .gap(px(GAP_TIGHT))
             // 1 · 总占用 + 一级目录构成。「重新扫描」挂在这一段的表头上——
             // 它扫的就是这一段，原先孤零零摆在整页最下面
             .child(card_with(space_header(st, t, cx), t, vec![

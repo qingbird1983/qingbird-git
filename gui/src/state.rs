@@ -366,6 +366,40 @@ pub(crate) struct OvRow {
     pub(crate) behind: u32,
     pub(crate) ahead: u32,
     pub(crate) changed: u32,
+    /// 最后一次用这个仓库的秒级时间戳（`RepoEntry::last_used` 原样搬过来）。
+    /// **表格排序要读它**——排序档「按最后使用」是原型卡头右上那颗键的默认档
+    pub(crate) last_used: u64,
+}
+
+/// 总览页「全部仓库」那张卡的行序（原型 `.card-head .btn` 那两档）。
+///
+/// 只有两档，且**默认是 `LastUsed`**：总览页是"我下次该动哪个仓库"那一屏，
+/// 最近碰过的排前面才回答得上这个问题；按名称排是给"我知道要找哪个仓库"的场景，
+/// 那场景其实该用 ⌘K。做成两档而不是列头点击排序，是因为七列里只有这两档有意义，
+/// 其余五列（状态 / 落后 / 待推送 / 未提交）的值域只有几个数，排了也分不出什么
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OvSort {
+    LastUsed,
+    Name,
+}
+
+impl OvSort {
+    /// 卡头那颗键上写的字 = **当前生效的那一档**（不是"点它会切到哪一档"）。
+    /// 原型就是这么写的（`按最后使用`），而那颗键的图标是一条收窄的漏斗，
+    /// 读起来是"现在按这个排"。写成下一档会让人以为点了没生效
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            OvSort::LastUsed => "按最后使用",
+            OvSort::Name => "按名称",
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        match self {
+            OvSort::LastUsed => OvSort::Name,
+            OvSort::Name => OvSort::LastUsed,
+        }
+    }
 }
 
 /// 导航轨指向的页面
@@ -705,6 +739,9 @@ pub(crate) struct Shell {
     /// 总览页的仓库行快照。`ov_table` 的委托读它，
     /// 免得委托里存第二份（两份必然有一帧对不上）
     pub(crate) ov_rows: Vec<OvRow>,
+    /// 那张卡的行序（卡头右上那颗键切它）。**不跨会话记**：
+    /// 它是一屏的读法而不是偏好，切错了再点一次就是，落盘反而多一份要同步的状态
+    pub(crate) ov_sort: OvSort,
     /// 全仓库合并的近 14 天提交数（后端只给有提交的日子）
     pub(crate) ov_activity: Vec<ActivityDay>,
     /// 活跃度扫描的代数：过期结果不许覆盖新结果

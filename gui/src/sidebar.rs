@@ -93,7 +93,9 @@ impl Shell {
                 .w_full()
                 .h_full()
                 .min_w_0()
-                .bg(t.colors.popover)
+                .bg(t.colors.background)
+                .border_r_1()
+                .border_color(track(t))
                 // ⚠️ **空态也画分组标题**（阶段 21-5 的连带）。
                 // 侧栏头那一行删掉之后，「这一组叫什么」就没有别的落脚点了——
                 // 空态只剩一句「我的仓库里还没有仓库」，**筛选键也跟着消失**
@@ -110,7 +112,9 @@ impl Shell {
             .w_full()
             .h_full()
             .min_w_0()
-            .bg(t.colors.popover)
+            .bg(t.colors.background)
+            .border_r_1()
+            .border_color(track(t))
             .child(self.sidebar_header(t, cx))
             .child(tree)
             .child(Separator::horizontal().color(t.colors.border))

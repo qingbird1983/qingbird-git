@@ -13,7 +13,6 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::resizable::{
     h_resizable, resizable_panel, ResizablePanelGroup, ResizableState,
 };
-use gpui_kit::component::separator::Separator;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::table::{TableEvent, TableState};
@@ -441,9 +440,24 @@ impl Shell {
                     .items_stretch()
                     .flex_1()
                     .min_h_0()
+                    // 轨与右侧的同灰分界由 `nav_rail` 自己的 `border_r_1`（`track(t)`）
+                    // 来画。这里原来还有一条 `Separator::vertical()`——同灰之后
+                    // 它和那条边框就是**挨着的两条发丝线**（用户抱怨的"像有边框"
+                    // 正是这一类），所以删掉，只留一个出处
                     .child(self.nav_rail(&t, cx))
-                    .child(Separator::vertical().color(t.colors.border))
-                    .child(div().flex_1().min_w_0().min_h_0().child(main_group)),
+                    // **主区外层与窗口右缘那 9px 只写在这一处**（2026-10-08 用户定四边缩进）。
+                    // 原来它写在 `overview_page` 与 `detail_page` 各一份，于是**检视抽屉那一列
+                    // 没人管**——抽屉的 `popover` 底一路铺到窗口右缘，"右 9"在仓库页实测是 0。
+                    // 收到壳层这一格之后，总览页 / 仓库页 / 抽屉三处共用同一个出处，
+                    // 而左缘仍然贴导航轨（他要的"左 41 = 轨 40 + 边框 1 + 主区 0"）
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .pr(px(GAP))
+                            .child(main_group),
+                    ),
             )
             .child(self.status_bar(&t, cx))
             // 落点提示卡。**放最后**：它是整窗绝对定位的一层，
@@ -524,9 +538,9 @@ impl Shell {
             .h(px(title_bar_h()))
             .flex_shrink_0()
             .items_center()
-            .bg(t.colors.popover)
+            .bg(t.colors.background)
             .border_b_1()
-            .border_color(t.colors.border)
+            .border_color(track(t))
             // 左边距按轨宽反推，让图标与导航轨那一列的中心线对齐
             .pl(px(TITLE_BAR_PAD_L))
             // 左组：图标 + 标题 + 开关（开关在文字**之后**）
@@ -853,7 +867,7 @@ impl Shell {
     /// 上一轮最大的问题：轨上一排图标分不清哪些是切屏、哪些是动作。
     ///
     /// 轨宽与内边距是**三档**（D58 / D59）：横向 `NAV_PAD` 被"装得下按钮"钉死、
-    /// 顶部 `NAV_PAD_TOP` 是一条对齐基线、底部 `NAV_PAD_BOTTOM` 是"独立一组的气口"。
+    /// 顶部 `NAV_PAD_TOP` 是一条对齐基线、底部 `NAV_PAD_BOTTOM` 是轨末端的余量。
     /// 三者**不能共用一个数**——共用过一次（6），实机看着"logo 和三颗图标糊成一片"；
     /// 只修顶部又漏了底部，齿轮直接坐在状态条上沿。`tokens::tests` 钉住了这条。
     pub(crate) fn nav_rail(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
@@ -867,17 +881,19 @@ impl Shell {
             .w(px(NAV_W))
             .h_full()
             .flex_shrink_0()
-            .bg(t.colors.popover)
+            .bg(t.colors.background)
+            // 同灰之后轨与主区没有颜色差了，分界只剩这一条发丝线
+            // （`track` = 卡间发丝线的同一个出处）
+            .border_r_1()
+            .border_color(track(t))
             .items_center()
             .px(px(NAV_PAD))
             .pt(px(NAV_PAD_TOP))
             .pb(px(NAV_PAD_BOTTOM))
-            // ⚠️ 这一处用 `GAP_LG`（12）而不是 `GAP_DENSE`，**是有意的**：
-            // `GAP_DENSE`（2）治的是「一串同类**行**相邻两项」（列表行、色块分段），
-            // 那些行本来就是一整块、行内还有内边距，所以贴着才连得起来。
-            // 导航轨上是**三个各自独立的按钮**——各有各的命中区、各有各的选中底块，
-            // 贴着排读起来是"糊成一片"，实机按 4px 排出来用户就说"快粘到一起了"。
-            // 它们之间要的是"两个不同的东西"那种能分开的气口
+            // ⚠️ 这一档**不许顺手收到 4**：`GAP_DENSE`(2) 治的是一串同类**行**
+            // 的呼吸量（列表行、色块分段），导航轨上是**三个各自独立的按钮**——
+            // 各有各的命中区、各有各的选中底块，贴着排读起来是"糊成一片"，
+            // 实机按 4px 排出来用户就说"快粘到一起了"
             .gap(px(GAP_LG))
             .child(self.nav_item(AssetIcon::LayoutDashboard, Nav::Overview, "总览", t, cx))
             .child(self.nav_item(
@@ -894,6 +910,10 @@ impl Shell {
                 t,
                 cx,
             ))
+            // 设置键**沉在轨底**（2026-10-08 用户令：「左导航条 设置 按钮恢复到左下角」）。
+            // 阶段 31.4 一度把它提到图标组下面 + 补一条发丝线分组，那条改动当轮就作废了：
+            // 分组线用的是 `track`，与画布只差 1/255 **根本看不见**，等于把设置键白挪了一格。
+            // ⚠️ `flex_1` 这颗垫圈必须在设置键**前面**，整组才顶对齐、设置键才真沉底
             .child(div().flex_1())
             .child(
                 Button::new("nav-settings")
@@ -1146,6 +1166,7 @@ impl Shell {
             history_table,
             ov_table,
             ov_rows: Vec::new(),
+            ov_sort: crate::state::OvSort::LastUsed,
             ov_activity: Vec::new(),
             ov_seq: 0,
             ov_task: None,
@@ -1719,6 +1740,18 @@ impl Shell {
 
         StatusBar::new()
             .h(px(status_bar_h()))
+            // **状态条上沿那根发丝线拿掉**（2026-10-08 用户令）。它是官方
+            // `StatusBar::render` 自己挂的 `.border_t_1()` + `status_bar_border`
+            // （`status_bar.rs:89-90`）。压得住是因为官方把 `refine_style(&self.style)`
+            // 排在**那些层之后**——调用方的样式最后重放。
+            // ⚠️ 同一条机制在 `.py(0)` 上**没有生效**（帧上逐像素没动，见上面 Q22 那句），
+            // 所以"refine 排在后面"不等于"每个属性都压得住"：每压一次都要抓帧量
+            .border_t_0()
+            // ⚠️ **`.h()` 在 gpui 里是下限，不是定高**（2026-10-08 变异实测：这一档给 50
+            // 帧上就是 50，给 28 却是 33——被内容加官方自带的 `.py_1()` 撑过了下限）。
+            // 试过在这里补 `.py(px(0.0))` 想把那 8 压掉：**帧上逐像素没动**
+            // （`refine_style` 压不住它），那一句已经删了，别再加回来。
+            // ⇒ 状态条实测 33 而 `status_bar_h()` 报 28，这 5px 未定位，记成 **Q22**
             .left(left)
             .child(center)
             .right(right)

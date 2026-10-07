@@ -162,6 +162,19 @@ pub(crate) fn glyph(t: &Theme, name: gpui_kit::assets::IconName, tint: Hsla) -> 
 /// 那条判断的前提没了。⇒ 与 `card()` 同形态（边 `line-soft` + `SH_2`），
 /// 只是它比正文区的卡矮一档：`px(GAP_XL) / py(GAP_LG)`。
 ///
+/// ## 阶段 31.4：一行只有两部分（图标块 + 一列），不再把标签推到最右
+///
+/// 原来这一行是 `图标 · 数字 · flex_1 空档 · 标签`——标签那一路被
+/// `div().flex_1()` 顶到了卡的最右边，于是**每张卡中间横着一道空洞**
+/// （2026-10-07 抓帧实测：数字墨迹右缘 x=149、标签墨迹左缘 x=297，
+/// 中间空 **147px**，占掉这张卡白区宽度（294）的一半），而这道空洞还顺手把卡高撑了出来。
+/// 原型 `.stat` 的结构是**两件事**：左边 `glyph` 底块，右边一列
+/// （数字在上、标签在下，都左对齐）。⇒ 现在照这个排，
+/// **卡高由内容撑**（这一行的决定者是 40 高的图标块与那一列里较高的那个），
+/// 不写死、也不靠 `flex_1` 撑。
+///  **别再往这一行塞 `flex_1` / `justify_end` 推标签**：外层那颗 `.flex_1()`
+/// 是**卡片自己**在四等分行里占宽用的，跟标签无关，别混为一谈。
+///
 /// ⚠️ **图标颜色跟着数字走**，不取中性灰：数字已经在用语义色表达状态
 /// （已同步绿 / 落后橙 / 分叉红），图标再给一个中性色就成了两套信号，
 /// 而"这颗图标的颜色和那个数字无关"是假的——它们说的是同一件事。
@@ -190,18 +203,26 @@ pub(crate) fn stat_card(
         // 段首，左边一个图标把这一行锚住，四张卡的视觉重量才对齐
         .child(glyph(t, icon, tint))
         .child(
-            div()
-                .text_size(px(fs_num()))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(tint)
-                .child(n.to_string()),
-        )
-        .child(div().flex_1())
-        .child(
-            div()
-                .text_size(px(fs_sec()))
-                .text_color(tier3(t))
-                .child(label.to_string()),
+            v_flex()
+                .gap(px(GAP_DENSE))
+                .child(
+                    div()
+                        // 两行的行高都按 `num_row_h` 给，不落到 `row_h` 的 1.9 倍：
+                        // 竖着叠两行时那 0.7 个字高的余量要翻倍，卡会被撑到 98 高
+                        // （实测与推导见 `tokens::num_row_h`）
+                        .h(px(num_row_h(fs_num())))
+                        .text_size(px(fs_num()))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(tint)
+                        .child(n.to_string()),
+                )
+                .child(
+                    div()
+                        .h(px(num_row_h(fs_meta())))
+                        .text_size(px(fs_meta()))
+                        .text_color(tier3(t))
+                        .child(label.to_string()),
+                ),
         )
 }
 
@@ -219,17 +240,44 @@ pub(crate) fn stat_card(
 /// 闭包里想办法弄到主题（侧栏的 `suffix` 闭包就拿不到）。
 /// 颜色由调用方算好传进来，那边有主题。
 pub(crate) fn pill(text: &str, fg: Hsla, bg: Hsla) -> Div {
-    div()
+    pill_with(None, text, fg, bg)
+}
+
+/// 带一枚前置图标的胶囊。**与 `pill` 共用同一份实现**——
+/// 高度、圆角、字号、水平内边距只有一个出处，不会出现"带图标的那种胶囊矮一档"
+pub(crate) fn pill_icon(
+    icon: gpui_kit::assets::IconName,
+    text: &str,
+    fg: Hsla,
+    bg: Hsla,
+) -> Div {
+    pill_with(Some(icon), text, fg, bg)
+}
+
+fn pill_with(
+    icon: Option<gpui_kit::assets::IconName>,
+    text: &str,
+    fg: Hsla,
+    bg: Hsla,
+) -> Div {
+    // ⚠️ **必须是 `h_flex`，不能是裸 `div()`**。原来这里写的是 `div()`——
+    // 裸 Div 是**列方向**，那么 `.items_center()` 管的就是**水平**居中，
+    // 垂直方向压根没人管 ⇒ 26 高的胶囊里那 12 的字偏上（2026-10-08 用户挑的
+    // 「状态胶囊文字与中心对齐」，实测上隙 6 / 下隙 8）。
+    // 换成 h_flex 后 `items_center` 才真的落在垂直轴上，`justify_center` 管水平
+    h_flex()
         .h(px(pill_h()))
         .px(px(GAP))
         .rounded_full()
         .bg(bg)
         .items_center()
         .justify_center()
+        .gap(px(GAP_DENSE))
         // 21-3b：**不给任何描边，也不给焦点环**。用户说的「选中后有高亮边框」
         // 来自 `Input` 获焦时的官方描边，不是胶囊自己画的——胶囊是纯展示件，
         // 不可点、不接受输入，给它留一个焦点环只会让"它能被选中"变成一句假话。
         // 颜色变化（换 `bg` 表达状态）仍然是唯一的选中反馈。
+        .when_some(icon, |p, i| p.child(icon_sm(i).text_color(fg)))
         .child(
             div()
                 .text_size(px(fs_meta()))
@@ -490,7 +538,13 @@ pub(crate) fn card(t: &Theme) -> Div {
         .rounded(px(r_xl(t)))
         .bg(card_face(t))
         .border_1()
-        .border_color(t.colors.border)
+        // ⚠️ **卡描边只用 `line_soft`**（v4 §2 那张表把它的用途写成"卡内分隔、卡描边"，
+        // §8.2 深色那节再钉一遍"卡与画布的分界由 `line_soft` 承担"）。
+        // 这里原来写的是 `t.colors.border`（= `line` #D7E0E4，深一档），而
+        // `stat_card` 与总览活跃度卡走的是 `track(t)`（= `line_soft` #E8EEF0）
+        // ⇒ **同一屏三种卡、两种描边色**（帧上实测 215,224,228 对 225,231,233，差 10/255，
+        // 肉眼就是"有的卡边重有的轻"）。`line` 归"主描边／分隔线"那一格，不是卡
+        .border_color(track(t))
         .shadow(sh_2(t))
 }
 
@@ -543,7 +597,12 @@ impl CardHeader {
 
     pub(crate) fn build(self, t: &Theme) -> Div {
         let mut row = h_flex()
-            .w_full()
+            // **原来这里挂着 `.w_full()`，删了**——不是因为它把卡撑破了
+            // （2026-10-08 我先这么归因过一次，实测删掉右缩进仍是 0，真凶是
+            // `OV_TABLE_CHROME` 没扣掉卡内那 32px，见 `overview.rs` 那条注释），
+            // 而是因为它**本来就是多余的**：父是 `v_flex`（列方向），
+            // 交叉轴默认就是 stretch，再写 100% 只是给同一件事第二个出处
+            .flex_shrink_0()
             // 阶段 28：跟着标题那一档 `fs_body()` 走。原来写死 24，
             // 而这一行装的是 `fs_body()` 标题 + `fs_sec()` 附注 + 右侧
             // XSmall 键——**一屏里每一张卡都有它**，切字是一屏都切

@@ -60,6 +60,9 @@ impl Shell {
             .w_full()
             .h_full()
             .bg(t.colors.popover)
+            // 右缘那 9px **不在这里写**：这一列的 `popover` 底会一路铺到窗口右缘，
+            // 自己加 `pr` 只能把内容挤窄 8、底色照样贴边（2026-10-08 实测过，帧上没变化）。
+            // 那一格收在壳层 `main_group` 外面那层的 `pr` 上，三屏共用一个出处
             .child(
                 h_flex()
                     .w_full()

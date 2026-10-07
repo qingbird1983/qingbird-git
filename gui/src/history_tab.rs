@@ -75,8 +75,8 @@ impl Shell {
         v_flex()
             .flex_1()
             .min_h_0()
-            .p(px(GAP_LG))
-            .gap(px(GAP))
+            // 页级留白归主区外层（`detail_page`），这一层不再套一圈 `p`
+            .gap(px(GAP_TIGHT))
             .child(
                 // 白卡 + 卡内表头，与日志 / 说明 / 空间同一套（`widgets::card` +
                 // `CardHeader`）。原先这里是裸列表加一行浮在上方的小字，
@@ -111,8 +111,9 @@ fn skeleton_history() -> AnyElement {
     v_flex()
         .flex_1()
         .min_h_0()
-        .p(px(GAP_LG))
-        .gap(px(GAP))
+        // 骨架条之间的呼吸量与它替的那几张卡的卡间同档（4），
+        // 换过来那一帧不会跳一下
+        .gap(px(GAP_TIGHT))
         .child(Skeleton::new().w_full().h(px(28.0)).rounded(px(R_MD)))
         .child(Skeleton::new().w(px(360.0)).h(px(28.0)).rounded(px(R_MD)))
         .child(Skeleton::new().w_full().h(px(28.0)).rounded(px(R_MD)))
@@ -123,7 +124,7 @@ fn empty_history(t: &Theme, title: &str, detail: &str) -> AnyElement {
     v_flex()
         .flex_1()
         .min_h_0()
-        .p(px(GAP_LG))
+        // 页级留白归主区外层，这一层不再套一圈 `p`
         .child(
             Empty::new()
                 // 外层已经有列边界了，再画一圈虚线框是两层框
