@@ -15,4 +15,5 @@ pub(crate) mod init;
 pub(crate) mod purge;
 pub(crate) mod repo;
 pub(crate) mod settings;
+pub(crate) mod settings_keys;
 pub(crate) mod sync;

@@ -117,7 +117,7 @@ fn group_head(t: &Theme, title: &str, note: &str, danger: bool) -> Div {
         )
         .child(
             div()
-                .text_size(px(FS_SEC))
+                .text_size(px(fs_sec()))
                 .text_color(body(t))
                 .child(title.to_string()),
         )
@@ -163,7 +163,7 @@ fn pick_row(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(px(FS_SEC))
+                .text_size(px(fs_sec()))
                 .font_family(t.mono_font_family.clone())
                 .text_color(if danger { t.colors.danger } else { body(t) })
                 .child(path.to_string()),
@@ -198,8 +198,8 @@ fn group_list(
         .max_h(px(220.0))
         .overflow_y_scroll()
         .gap(px(GAP_DENSE))
-        .p(px(8.0))
-        .rounded(px(R_LG))
+        .p(px(GAP))
+        .rounded(px(r_lg(t)))
         .bg(t.colors.background)
         .border_1()
         .border_color(t.colors.border)
@@ -215,7 +215,7 @@ fn purge_body(t: &Theme, d: &PurgeDialog, this: &Entity<Shell>) -> Div {
     let mut col = v_flex().w_full().gap(px(GAP_LG)).child(
         div()
             .w_full()
-            .text_size(px(FS_BODY))
+            .text_size(px(fs_body()))
             .line_height(px(20.0))
             .text_color(tier3(t))
             .child("第三方仓库本地会无意间多出文件，而本项目不替它们提交——\
@@ -269,7 +269,7 @@ fn purge_body(t: &Theme, d: &PurgeDialog, this: &Entity<Shell>) -> Div {
         col = col.child(
             div()
                 .w_full()
-                .text_size(px(FS_SEC))
+                .text_size(px(fs_sec()))
                 .text_color(body(t))
                 .child(format!("已勾 {del} 个删除、{res} 个恢复")),
         );

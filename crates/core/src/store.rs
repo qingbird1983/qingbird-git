@@ -84,13 +84,24 @@ pub struct Settings {
     /// 用户手动指定的代理，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080；为空表示全自动探测
     #[serde(default)]
     pub manual_proxy: String,
-    /// 界面主题：`dark` / `light`。
+    /// 界面主题：存的是**主题名**（`qingbird-light` / `qingbird-dark`），
+    /// 与 `gui/src/theme.rs` 里 `LIGHT` / `DARK` 那**同一对常量**配对读写。
     ///
-    /// 老 Tauri 版留过一个 `system` 分支，**GPUI 这一侧从来不认它**——
-    /// 真实配置里存的是 `"light"`，而设置那颗开关是两态的。
-    /// 空串与任何别的值都落浅色（= 保持今天的样子），见 `gui/src/theme.rs`。
+    /// ⚠️ **别把它当成 `dark` / `light` 两个字面量**——core 的注释一度就是这么写的，
+    /// 而判据是 `s.theme == DARK`，两边不是同一个值时会以为"深色存不上"。
+    /// 老 Tauri 版留过一个 `system` 分支，**GPUI 这一侧从来不认它**，
+    /// 那份历史配置里的 `"light"` 与任何认不出的值（含空串）都落浅色
+    /// （= 保持今天的样子），见 `gui/src/theme.rs::apply_saved`。
     #[serde(default)]
     pub theme: String,
+    /// 界面字号档：`small` / `medium` / `large`（阶段 28）。
+    ///
+    /// ⚠️ **`#[serde(default)]` 给的是 `String::default()`（空串）而不是
+    /// 「中档」**——与上面 `side_bar_w` 同一个坑。老配置读出来会是空串，
+    /// 所以**认档那一处必须把空串落成中档**（`UiScale::from_stored`），
+    /// 不能指望反序列化时就填好。
+    #[serde(default)]
+    pub ui_scale: String,
     /// Git 提交身份（提交时未在全局配置时使用）
     #[serde(default)]
     pub git_name: String,
@@ -155,6 +166,19 @@ pub struct Settings {
     /// **最安全的兜底方向**——见 [`close_action_of`] 的注释。
     #[serde(default = "default_close_action")]
     pub close_action: String,
+
+    /// 用户自定义的快捷键（阶段 30）
+    ///
+    /// **只存「与默认值不同」的那些**（键 → 覆盖值），所以空 map = 全用默认，
+    /// 老配置零迁移；值是空串则表示"用户明确解除了这个绑定"。
+    ///
+    /// ⚠️ **键是这里定的稳定字符串，不是 Rust 的 Action 名**：
+    /// Action 名由 `#[action(namespace = qingbird_gui)]` 从结构体名推出来，
+    /// 把结构体一改名，磁盘上老用户那份键位就全认不出来了（读出来是"未知键"，
+    /// 界面表现成所有自定义静默失效，而**没有任何一处会报错**）。
+    /// 模块可见性那一节的 `MOD_*` 是同一个道理
+    #[serde(default)]
+    pub keybindings: HashMap<String, String>,
 }
 
 // ---- 模块可见性（阶段 19）----
@@ -233,6 +257,52 @@ pub fn visible_modules<'a>(all: &[&'a str], hidden: &[&str]) -> Vec<&'a str> {
     }
 }
 
+// ---- 快捷键自定义（阶段 30）----
+//
+// 键名是**配置与界面之间唯一的约定**，所以放 core：`Settings.keybindings`
+// 的键、界面那份表里的 `id`、以及"恢复默认"要清的条目，必须是同一批字面量。
+// 拼错的后果同样是「静默地不生效」——用户改了键，重启发现没变。
+//
+// ⚠️ **为什么不用 Action 的名字当键**：`#[action(namespace = qingbird_gui)]`
+// 推出来的名字跟着 Rust 结构体名走，改个名磁盘上老配置就全认不出来，
+// 而界面表现是"自定义全部静默失效"，**没有一处会报错**
+
+pub const KEY_SIDEBAR: &str = "sidebar";
+pub const KEY_INSPECTOR: &str = "inspector";
+pub const KEY_STOP: &str = "stop";
+pub const KEY_PALETTE: &str = "palette";
+pub const KEY_TERMINAL: &str = "terminal";
+pub const KEY_SYNC_PULL: &str = "sync.pull";
+pub const KEY_SYNC_PUSH: &str = "sync.push";
+pub const KEY_SYNC_CHECK: &str = "sync.check";
+pub const KEY_NEXT_REPO: &str = "nav.next_repo";
+pub const KEY_PREV_REPO: &str = "nav.prev_repo";
+pub const KEY_DISMISS: &str = "dismiss";
+
+/// 全部可自定义的快捷键，**顺序即设置里显示的顺序**
+pub const KEYBINDING_IDS: &[&str] = &[
+    KEY_SIDEBAR,
+    KEY_INSPECTOR,
+    KEY_SYNC_PULL,
+    KEY_SYNC_PUSH,
+    KEY_SYNC_CHECK,
+    KEY_PALETTE,
+    KEY_TERMINAL,
+    KEY_STOP,
+    KEY_NEXT_REPO,
+    KEY_PREV_REPO,
+    KEY_DISMISS,
+];
+
+/// 用户对某个动作的**覆盖值**：`None` = 没记过（走默认），
+/// `Some("")` = 明确解除了绑定，`Some("ctrl-r")` = 换成了这个键
+///
+/// **三态必须原样透出去，不能压成两态**：压成 `Option<String>` 之后
+/// "没记过"与"解除了"分不开，于是「恢复默认」把解绑的那一项也恢复成了默认键。
+pub fn key_override<'a>(settings: &'a Settings, id: &str) -> Option<&'a str> {
+    settings.keybindings.get(id).map(|s| s.as_str())
+}
+
 fn default_true() -> bool {
     true
 }
@@ -294,6 +364,10 @@ impl Default for Settings {
         Self {
             manual_proxy: String::new(),
             theme: String::new(),
+            // 空串 = 认档那一处落中档（`UiScale::from_stored`），
+            // 别在这里写死 "medium"——那个默认值属于**识别**逻辑，
+            // 放两处就会有一处改了另一处没改
+            ui_scale: String::new(),
             git_name: String::new(),
             git_email: String::new(),
             github_token: String::new(),
@@ -307,6 +381,8 @@ impl Default for Settings {
             hidden_modules_mine: Vec::new(),
             hidden_modules_third: Vec::new(),
             close_action: default_close_action(),
+            // 空 map = 全部走默认（不是"全部没有键"，理由见字段注释）
+            keybindings: HashMap::new(),
         }
     }
 }
@@ -619,6 +695,36 @@ mod tests {
         let back: AppConfig = serde_json::from_str(&json).expect("反序列化");
         assert_eq!(back.settings.sidebar_w, 288.0);
         assert!(back.settings.sidebar_collapsed);
+    }
+
+    /// 快捷键覆盖是**三态**：没记过 / 记成空串（解除）/ 记成真键。
+    ///
+    /// ⚠️ 压成两态的后果是「恢复默认」把解绑的那一项也恢复成默认键——
+    /// 用户明明解除了，点一下"恢复默认"它自己又回来了
+    #[test]
+    fn key_override_keeps_unbound_distinct_from_untouched() {
+        let mut s = Settings::default();
+        // 老配置零迁移：没这个字段就是全走默认，不是"全都没有键"
+        assert!(s.keybindings.is_empty());
+        assert_eq!(key_override(&s, KEY_SIDEBAR), None);
+
+        s.keybindings.insert(KEY_SIDEBAR.into(), String::new());
+        s.keybindings.insert(KEY_PALETTE.into(), "ctrl-r".into());
+
+        assert_eq!(key_override(&s, KEY_SIDEBAR), Some(""));
+        assert_eq!(key_override(&s, KEY_PALETTE), Some("ctrl-r"));
+        assert_eq!(key_override(&s, KEY_TERMINAL), None);
+    }
+
+    /// 全部键名**互不重复**，且都在清单里。重复会让一份 map 覆盖掉另一份，
+    /// 而界面上两行都显示成"已自定义"——**没有一处会报错**
+    #[test]
+    fn every_keybinding_id_is_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for id in KEYBINDING_IDS {
+            assert!(seen.insert(*id), "键名重复：{id}");
+        }
+        assert_eq!(seen.len(), KEYBINDING_IDS.len());
     }
 
     /// 检视列的夹取与侧栏**必须同一套判据**：非有限值与 0 回落默认，

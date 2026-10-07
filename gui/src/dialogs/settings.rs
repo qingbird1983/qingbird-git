@@ -34,22 +34,25 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::DialogContent;
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Disableable as _, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, App, AppContext, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Pixels, SharedString, StatefulInteractiveElement, Styled, Window,
+    div, px, AnyElement, App, AppContext, Context, Div, Entity, FontWeight, InteractiveElement,
+    IntoElement, ParentElement, Pixels, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 use qingbird_core::proxy;
 use qingbird_core::store::{self, CloseAction};
+use std::collections::HashMap;
 
 use crate::detail::DetailTab;
 use crate::state::*;
-use crate::widgets::ghost_variant;
 use crate::tokens::*;
+use crate::widgets::{card, CardHeader, FormRows, ghost_variant, info_dot, meta_text, pill};
+use gpui_kit::FocusHandle;
 
 /// 代理探测一次最多试几个候选。挨个试完 7897/7890/10808 加系统代理
 /// 要好几十秒，而用户点「检测」只想知道"现在有没有代理可用"
@@ -123,11 +126,20 @@ impl Shell {
             proxy: proxy_input,
             notify: s.notify_auto_sync,
             theme_dark: s.theme == crate::theme::DARK,
+            ui_scale: UiScale::from_stored(&s.ui_scale),
             close_action: store::close_action_of(&s.close_action),
             probing: false,
             probe_note: None,
             mod_mine,
             mod_third,
+            // 覆盖值直接从配置读，**不是从生效值反推**——反推的话
+            // "没改过"与"改成了默认值"就分不开了，而这两者在前台要做的事一样、
+            // 在"恢复默认"那一步要做的事不一样
+            key_overrides: s.keybindings.clone(),
+            recording: None,
+            key_focus: cx.focus_handle(),
+            key_cap_hover: None,
+            key_yielded: Vec::new(),
             error: None,
         });
         self.build_settings_dlg(window, cx);
@@ -265,7 +277,7 @@ impl Shell {
                         }
                     }
                 })
-                .footer(settings_footer(&this, ghost_variant(cx)))
+                .footer(settings_footer(&t, &this, ghost_variant(cx)))
         });
     }
 
@@ -363,7 +375,40 @@ impl Shell {
             window.push_notification(format!("保存失败：{e}"), cx);
             return false;
         }
-        crate::theme::apply(&cfg.settings.theme, cx);
+        crate::theme::apply(
+            &cfg.settings.theme,
+            UiScale::from_stored(&cfg.settings.ui_scale),
+            cx,
+        );
+        cx.notify();
+        true
+    }
+
+    /// 换界面字号档的**唯一实现**（落盘 + 两条字号路一起换）。
+    ///
+    /// 与 `toggle_theme_static` 同一个理由抽出来：**落盘 + 应用只有一份**。
+    /// 这里还多一层——字号有**两条路**要一起换：`tokens::set_ui_scale`
+    /// 管我们自己的 182 处文字，`theme::apply` 里那行 `font_size` 管官方件。
+    /// 只换一条 ⇒ 一屏里两种字号混着（见 `theme.rs` 模块头那段）。
+    ///
+    /// 返回 `true` = 落盘成功
+    pub(crate) fn set_ui_scale_static(
+        scale: UiScale,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut cfg = store::load();
+        cfg.settings.ui_scale = scale.stored().to_string();
+        if let Err(e) = store::save(&cfg) {
+            window.push_notification(format!("保存失败：{e}"), cx);
+            return false;
+        }
+        crate::theme::apply(&cfg.settings.theme, scale, cx);
+        // **只在"用户自己拨了"这一刻记一行**——这才是可行动的信息
+        // （用户报「字还是小」时，日志里能证明他拨到了哪一档）。
+        // 启动时不记：那只是"当前是第几档"，用户自己能在设置里看见，
+        // 而每次启动给 `app.log` 添一行垃圾是阶段 25 记过的代价
+        crate::diag::note(&format!("界面字号切到 {}档：{}", scale.label(), scale.note()));
         cx.notify();
         true
     }
@@ -441,6 +486,8 @@ pub(crate) struct SettingsState {
     pub(crate) notify: bool,
     /// 当前是不是深色（阶段 20）
     pub(crate) theme_dark: bool,
+    /// 当前界面字号档（阶段 28）
+    pub(crate) ui_scale: UiScale,
     /// 点关闭键时怎么办（阶段 22）
     pub(crate) close_action: CloseAction,
     pub(crate) probing: bool,
@@ -448,6 +495,16 @@ pub(crate) struct SettingsState {
     /// 勾上 = 显示的模块，两套各一份（阶段 19）
     pub(crate) mod_mine: Vec<String>,
     pub(crate) mod_third: Vec<String>,
+    /// 快捷键覆盖（阶段 30）。展示层只读它，自己不判"生效的是哪一把"
+    pub(crate) key_overrides: HashMap<String, String>,
+    /// 正在录键的那一项
+    pub(crate) recording: Option<String>,
+    /// 录制器焦点（阶段 30）。渲染层要 `track_focus` 它
+    pub(crate) key_focus: FocusHandle,
+    /// 哪一颗键帽正被扫着（阶段 30）
+    pub(crate) key_cap_hover: Option<String>,
+    /// 本次打开期间"这把键被抢走了"的记录
+    pub(crate) key_yielded: Vec<(String, String)>,
     pub(crate) error: Option<String>,
 }
 
@@ -465,70 +522,102 @@ impl Shell {
             proxy: d.proxy.clone(),
             notify: d.notify,
             theme_dark: d.theme_dark,
+            ui_scale: d.ui_scale,
             close_action: d.close_action,
             probing: d.probing,
             probe_note: d.probe_note.clone(),
             mod_mine: d.mod_mine.clone(),
             mod_third: d.mod_third.clone(),
+            key_overrides: d.key_overrides.clone(),
+            recording: d.recording.clone(),
+            key_cap_hover: d.key_cap_hover.clone(),
+            key_focus: d.key_focus.clone(),
+            key_yielded: d.key_yielded.clone(),
             error: d.error.clone(),
         })
     }
 }
 
-/// 一段的标题 + 说明。**标题是二级（12px / `body`）不是三级**（阶段 21-8a）。
+/// 设置页**一段的外壳**：一张卡 + 卡头（标题 / 附注 / 即时生效 / ⓘ）+ 表单行。
 ///
-/// 早先它用 `FS_META`（11px）+ `tier3`——那一档的语义是"元信息、
-/// 弱提示"，而**段标题是这一段的门面**：它下面挂着这一段全部内容，
-/// 却是全对话框里最淡的一行。用户在找「深色主题」那个开关时先扫的就是它。
+/// ## 它治的是"排版混乱"的哪一半
 ///
-/// 这条属于 21-8a 说的那一类：**大量该当主文字的内容被当成元信息用了**。
-/// 升到二级之后「标题 / 说明」的大小差也回到 12 / 11，
-/// 而不是原来的 11 / 11（同一档里分主次，只能靠颜色硬分）
-fn section(t: &Theme, title: &str, note: &str) -> Div {
-    v_flex()
-        .w_full()
-        .gap(px(GAP_TIGHT))
-        .child(
-            div()
-                .text_size(px(FS_SEC))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(body(t))
-                .child(title.to_string()),
-        )
-        .child(
-            div()
-                .text_size(px(FS_META))
-                .text_color(tier4(t))
-                .child(note.to_string()),
-        )
+/// 阶段 31.5 之前每段是「标题 + 两三行灰字 + 控件」**浮在白色 dialog 上**，
+/// 六段挤在一栏里。真正的根因是**没有卡**——段与段之间只靠 12px 间距区分，
+/// 读不出边界，所以看着像"一列还没排完的字"。补上卡之后，卡头下面那两三行
+/// 说明又成了新负担：一屏四张卡、每张顶着一段小字，边界反被字压住。
+/// ⇒ 说明收进 ⓘ（原型 `settings-v4.html` 就是这么画的，方向已验收）。
+///
+/// ⚠️ **收进气泡的代价要认：ⓘ 不点不看见**。所以只有"不懂也能安全操作"的
+/// 说明才收（"留空即自动探测"这类）。**会改变行为的信息不收**——
+/// "这条即时生效、不用点保存"留在卡头当一枚**可见**的胶囊，正是这个道理。
+/// 判据：**这句话不看会不会导致用户做出他不想做的事**，会就不许进气泡
+struct SetCard {
+    title: String,
+    /// 标题右边的一句附注（不是下面的说明段）——「显示哪些模块」那句
+    /// "两类仓库各存一份"是这一档
+    note: Option<String>,
+    live: bool,
+    info: Option<(&'static str, String)>,
 }
 
-fn field(label: &str, input: &Entity<InputState>, t: &Theme) -> Div {
-    v_flex()
-        .w_full()
-        .gap(px(GAP_TIGHT))
-        .child(
-            div()
-                .text_size(px(FS_META))
-                .text_color(tier3(t))
-                .child(label.to_string()),
-        )
-        .child(Input::new(input).w_full().small())
+impl SetCard {
+    fn new(title: &str) -> Self {
+        Self {
+            title: title.to_string(),
+            note: None,
+            live: false,
+            info: None,
+        }
+    }
+
+    /// 标题右边的一句附注。收 `impl Into<String>` 而不是 `&str`：
+    /// 「代理」那一段挂的是**探测结果**（一个 `String`），为它再开一个
+    /// `note_string()` 就是同一件事两个入口
+    fn note(mut self, text: impl Into<String>) -> Self {
+        self.note = Some(text.into());
+        self
+    }
+
+    /// 卡头右上那枚「即时生效」。**只有真即时生效的段才许挂**——
+    /// 挂错段等于骗用户"不用点保存"，而那一格的值不点保存就真的丢
+    fn live(mut self) -> Self {
+        self.live = true;
+        self
+    }
+
+    /// 卡头右上的 ⓘ 气泡。`id` 单独给是因为它是 `ElementId`：
+    /// **一帧里两颗同 id 的按钮在 debug 下直接 panic**（D61），
+    /// 所以 id 必须逐段不同，不能图省事都写 `"set-info"`
+    fn info(mut self, id: &'static str, text: &str) -> Self {
+        self.info = Some((id, text.to_string()));
+        self
+    }
+
+    /// 卡身内容。**收 `impl IntoElement` 而不是收 `FormRows`**：
+    /// 「显示哪些模块」那一段是两栏并排的勾选盒、不是一行一行的表单，
+    /// 为它另开一个 `build_body()` 就是同一件事两个入口（D89 那一族）。
+    /// 传 `FormRows::new().row(..).build(t)` 与传一个 `h_flex` 走同一条路
+    fn build(self, t: &Theme, gv: ButtonCustomVariant, content: impl IntoElement) -> Div {
+        let mut hdr = CardHeader::new(self.title);
+        if let Some(n) = self.note {
+            hdr = hdr.note(n, false);
+        }
+        if self.live {
+            hdr = hdr.right(live_badge(t));
+        }
+        if let Some((id, text)) = self.info {
+            hdr = hdr.right(info_dot(id, text, t, gv));
+        }
+        card(t).child(hdr.build(t)).child(content)
+    }
 }
 
-fn secret(label: &str, input: &Entity<InputState>, t: &Theme) -> Div {
-    v_flex()
-        .w_full()
-        .gap(px(GAP_TIGHT))
-        .child(
-            div()
-                .text_size(px(FS_META))
-                .text_color(tier3(t))
-                .child(label.to_string()),
-        )
-        // 令牌用官方 `mask_toggle`：默认打码 + 一颗眼睛切换。
-        // 令牌明文摊在屏幕上等于把它显示给在旁边的人，也会被截图带走
-        .child(Input::new(input).w_full().small().mask_toggle())
+/// 「即时生效」那一枚。用 `pill` 而不是自己画：它与仓库状态徽标是**同一副形状**
+/// （小字 + wash 底 + 全圆），只是语义不同（一个是数据的态，一个是配置的生效方式）。
+/// 底色走 `tokens::green_bg` = v4 §2 的 `ok-wash`
+fn live_badge(t: &Theme) -> AnyElement {
+    pill("即时生效", t.colors.success, green_bg(t)).into_any_element()
 }
 
 /// 设置对话框正文。**左侧分类导航 + 右侧内容**（阶段 20）
@@ -588,15 +677,13 @@ fn pane_height(window: &Window) -> Pixels {
 ///    弹窗里给一条可拖拽的分隔条只是噪音；③ 侧栏自带 `tokens.sidebar` 底色
 ///    与右边框（`sidebar/mod.rs:422`、`:426`），与本应用的白卡版面不是一套。
 ///
-/// 选中面复用 `tokens::selected_mask`——与导航轨三颗、侧栏筛选**同一个来源**，
+/// 选中面复用 `tokens::wash`——与导航轨三颗、侧栏筛选**同一个来源**，
 /// 全站"我现在在哪"就这一个面
 fn set_nav(t: &Theme, st: &SettingsState, this: &Entity<Shell>) -> impl IntoElement {
     v_flex()
         .w(px(SET_NAV_W))
         .flex_shrink_0()
         .gap(px(GAP_DENSE))
-        .border_r_1()
-        .border_color(track(t))
         .children(SetCat::ALL.iter().map(|c| {
             let active = st.cat == *c;
             let hovered = st.nav_hover == Some(*c);
@@ -605,24 +692,44 @@ fn set_nav(t: &Theme, st: &SettingsState, this: &Entity<Shell>) -> impl IntoElem
                 .id(SharedString::from(format!("set-nav-{}", c.key())))
                 .w_full()
                 .gap(px(GAP_DENSE))
-                .px(px(GAP_TIGHT))
-                .py(px(GAP_TIGHT))
+                .pl(px(GAP))
+                .pr(px(GAP_TIGHT))
+                .py(px(GAP))
                 .rounded(px(R_MD))
                 .cursor_pointer()
-                .when(active, |d| d.bg(selected_mask(t)))
                 // 选中面优先：官方那颗的悬停是实心 accent 蓝，比选中面重得多，
                 // 两层叠在一起会看成"这块被按住了"
+                .when(active, |d| d.bg(wash(t)))
                 .when(!active && hovered, |d| d.bg(t.secondary_hover))
+                // ⚠️ **左缘那条竖条常挂，只换颜色**（非选中给 `transparent_black`）。
+                // 写成 `.when(active, |d| d.border_l_2())` 的话，选中态一出现
+                // 整列文字就往右挪 2px——切一次分类全列跳一下。
+                // **凡是"条件出现的描边"都要问这一句：它占不占位**
+                .border_l_2()
+                .border_color(if active {
+                    t.colors.accent
+                } else {
+                    gpui_kit::Hsla::transparent_black()
+                })
                 .child(
-                    div()
-                        .text_size(px(FS_BODY))
-                        .text_color(if active { t.colors.foreground } else { tier3(t) })
-                        .when(active, |d| d.font_weight(FontWeight::MEDIUM))
-                        .child(c.label()),
+                    h_flex()
+                        .items_center()
+                        .gap(px(GAP_TIGHT))
+                        .child(
+                            icon_box(c.icon())
+                                .text_color(if active { t.colors.foreground } else { tier3(t) }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(fs_body()))
+                                .text_color(if active { t.colors.foreground } else { body(t) })
+                                .when(active, |d| d.font_weight(FontWeight::MEDIUM))
+                                .child(c.label()),
+                        ),
                 )
                 .child(
                     div()
-                        .text_size(px(FS_META))
+                        .text_size(px(fs_meta()))
                         .text_color(tier4(t))
                         .child(c.hint()),
                 )
@@ -667,45 +774,82 @@ fn set_pane(
         .overflow_y_scrollbar()
         .gap(px(GAP_LG))
         .child(match st.cat {
-            SetCat::Identity => identity_page(t, st),
+            SetCat::Identity => identity_page(t, st, gv),
             SetCat::Network => network_page(t, st, this, gv),
-            SetCat::Display => display_page(t, st, this),
+            SetCat::Display => display_page(t, st, this, gv),
+            SetCat::Keys => crate::dialogs::settings_keys::keys_page(t, st, this, gv),
         })
         .when_some(st.error.clone(), |b, e| {
             b.child(
                 div()
                     .w_full()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(t.colors.danger)
                     .child(e),
             )
         })
 }
 
-fn identity_page(t: &Theme, st: &SettingsState) -> Div {
+fn identity_page(t: &Theme, st: &SettingsState, gv: ButtonCustomVariant) -> Div {
     v_flex()
         .w_full()
         .gap(px(GAP_LG))
-        .child(section(
-            t,
-            "提交身份",
-            "仓库里没有全局 user.name / user.email 时用它。只存在本机配置文件。",
-        ))
-        .child(field("名字", &st.git_name, t))
-        .child(field("邮箱", &st.git_email, t))
-        .child(section(
-            t,
-            "访问令牌",
-            "私有仓库认证与云端建仓用。认证通过当次 git 子进程注入，不写进任何仓库。",
-        ))
-        .child(secret("GitHub 令牌", &st.github_token, t))
-        .child(secret("Gitee 令牌", &st.gitee_token, t))
-        .child(section(
-            t,
-            "SSH 私钥",
-            "远端是 ssh:// 或 git@ 形式时，对该次 git 操作设置 GIT_SSH_COMMAND。",
-        ))
-        .child(field("私钥路径", &st.ssh_key, t))
+        .child(
+            SetCard::new("提交身份")
+                .info(
+                    "set-info-identity",
+                    "仓库里没有全局 user.name / user.email 时用它。\
+                     只存在本机配置文件里，不会提交进任何仓库。",
+                )
+                .build(
+                    t,
+                    gv,
+                    FormRows::new()
+                        .row("名字", Input::new(&st.git_name).w_full().small())
+                        .row("邮箱", Input::new(&st.git_email).w_full().small())
+                        .build(t),
+                ),
+        )
+        .child(
+            SetCard::new("访问令牌")
+                .info(
+                    "set-info-token",
+                    "私有仓库认证与云端建仓用。认证通过当次 git 子进程注入\
+                     （-c http.extraheader 或 GIT_SSH_COMMAND），\
+                     不落盘到仓库里，只存本机配置文件。",
+                )
+                .build(
+                    t,
+                    gv,
+                    // 令牌用官方 `mask_toggle`：默认打码 + 一颗眼睛切换。
+                    // 令牌明文摊在屏幕上等于把它显示给旁边的人，也会被截图带走
+                    FormRows::new()
+                        .row(
+                            "GitHub 令牌",
+                            Input::new(&st.github_token).w_full().small().mask_toggle(),
+                        )
+                        .row(
+                            "Gitee 令牌",
+                            Input::new(&st.gitee_token).w_full().small().mask_toggle(),
+                        )
+                        .build(t),
+                ),
+        )
+        .child(
+            SetCard::new("SSH 私钥")
+                .info(
+                    "set-info-ssh",
+                    "远端是 ssh:// 或 git@ 形式时，对该次 git 操作设置 GIT_SSH_COMMAND。\
+                     这里填的是私钥路径，程序不读内容、不复制、不上传。",
+                )
+                .build(
+                    t,
+                    gv,
+                    FormRows::new()
+                        .row("私钥路径", Input::new(&st.ssh_key).w_full().small())
+                        .build(t),
+                ),
+        )
 }
 
 fn network_page(
@@ -716,172 +860,330 @@ fn network_page(
 ) -> Div {
     let probe_me = this.clone();
     let notify_me = this.clone();
+    // 卡头右边那一句 = 上一次的探测结果。**它是"这一段现在的状态"**，正是
+    // `CardHeader::note` 那一格的用途；单独占一行会变成一句没头没尾的孤句
+    let mut proxy_card = SetCard::new("代理").info(
+        "set-info-proxy",
+        "留空即自动探测：系统代理 → 上次成功 → 常见端口（7897 / 7890 / 10808 等）。\
+         探到的代理只对当次 git 子进程生效——不改系统代理、不影响别的程序。\
+         手填那一格如果探不通，程序会照你填的报错，不会悄悄换一个。",
+    );
+    if let Some(n) = st.probe_note.clone() {
+        proxy_card = proxy_card.note(n);
+    }
     v_flex()
         .w_full()
         .gap(px(GAP_LG))
-        .child(section(
+        .child(proxy_card.build(
             t,
-            "代理",
-            "留空即自动探测：系统代理 → 上次成功 → 常见端口，只对当次 git 子进程生效。",
-        ))
-        .child(field("手动地址", &st.proxy, t))
-        .child(
-            h_flex()
-                .items_center()
-                .gap(px(GAP))
-                .child(
-                    // ⚠️ **显式 `.with_size(Size::Small)`**（阶段 20）。不写就走
-                    // `Size::default()` = `Medium`（32 高 / **14 字**，
-                    // `sizing.rs:10-11`），而这一页上下都是 12px 元信息与
-                    // 24px 输入框，14px 的字顶在中间特别扎眼
-                    Button::new("set-probe")
-                        .label("检测代理")
-                        .custom(gv)
-                        .with_size(Size::Small)
-                        .disabled(st.probing)
-                        .on_click(move |_, window, cx| {
-                            probe_me.update(cx, |this, cx| this.probe_proxy(window, cx));
-                        }),
-                )
-                .when(st.probing, |row| {
-                    row.child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(GAP_TIGHT))
-                            .child(
-                                Spinner::new()
-                                    .with_size(Size::XSmall)
-                                    .color(tier4(t)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(FS_META))
-                                    .text_color(tier4(t))
-                                    .child("正在试"),
-                            ),
-                    )
-                }),
-        )
-        .when_some(st.probe_note.clone(), |b, n| {
-            b.child(
-                div()
+            gv,
+            FormRows::new().row(
+                "手动地址",
+                // **输入框与那颗键同一行**（原型就是这么画的）。分成两行的话，
+                // 「探测」那一行只剩一颗 ghost 键，读起来像另一条独立的设置项，
+                // 而它其实是"把上面那一格填的值试一次"
+                //
+                // ⚠️ **这一组必须自己 `w_full()`**：`FormRows` 的控件列是
+                // `justify_end` + 按内容宽，这里不给 `w_full` 的话整组缩成
+                // 内容宽，里面那颗 `flex_1` 的输入框就塌成 0 宽——
+                // 2026-10-07 抓帧实锤：那一格只剩一个椭圆，placeholder 全看不见
+                h_flex()
                     .w_full()
-                    .text_size(px(FS_META))
-                    .text_color(tier3(t))
-                    .child(n),
+                    .items_center()
+                    .gap(px(GAP))
+                    .child(Input::new(&st.proxy).flex_1().min_w_0().small())
+                    .child(
+                        // ⚠️ **显式 `.with_size(Size::Small)`**（阶段 20）。不写就走
+                        // `Size::default()` = `Medium`（32 高 / **14 字**，
+                        // `sizing.rs:10-11`），而这一行上下都是 24px 的输入框，
+                        // 14px 的字顶在中间特别扎眼
+                        Button::new("set-probe")
+                            .label("检测代理")
+                            .custom(gv)
+                            .with_size(Size::Small)
+                            .disabled(st.probing)
+                            .on_click(move |_, window, cx| {
+                                probe_me.update(cx, |this, cx| {
+                                    this.probe_proxy(window, cx)
+                                });
+                            }),
+                    )
+                    .when(st.probing, |row| {
+                        row.child(
+                            h_flex()
+                                .items_center()
+                                .gap(px(GAP_TIGHT))
+                                .child(
+                                    Spinner::new()
+                                        .with_size(Size::XSmall)
+                                        .color(tier4(t)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(fs_meta()))
+                                        .text_color(tier4(t))
+                                        .child("正在试"),
+                                ),
+                        )
+                    }),
             )
-        })
-        .child(section(
-            t,
-            "系统通知",
-            "后台自动同步的结果弹一条系统通知。这个开关即时生效，不受下面的「保存」约束。",
+            .build(t),
         ))
         .child(
-            Switch::new("set-notify")
-                .checked(st.notify)
-                .label("自动同步结果发系统通知")
-                .on_click(move |on, window, cx| {
-                    notify_me.update(cx, |this, cx| this.toggle_notify(*on, window, cx));
-                }),
+            SetCard::new("系统通知")
+                .live()
+                .info(
+                    "set-info-notify",
+                    "后台自动同步的结果弹一条系统通知。这个开关即时生效，\
+                     不受下面的「保存」约束。",
+                )
+                .build(
+                    t,
+                    gv,
+                    FormRows::new().row(
+                        "自动同步",
+                        // 可见的名字在标签那一列（「自动同步」），这颗只留
+                        // `accessibility_label`——**去掉它是无障碍回归**：
+                        // 读屏原本能念出"自动同步结果发系统通知"，
+                        // 靠 `justify_end` 把它推到行末之后，屏幕上不再需要第二个名字
+                        Switch::new("set-notify")
+                            .checked(st.notify)
+                            .accessibility_label("自动同步结果发系统通知")
+                            .on_click(move |on, window, cx| {
+                                notify_me.update(cx, |this, cx| {
+                                    this.toggle_notify(*on, window, cx)
+                                });
+                            }),
+                    )
+                    .build(t),
+                ),
         )
 }
 
-fn display_page(t: &Theme, st: &SettingsState, this: &Entity<Shell>) -> Div {
+fn display_page(t: &Theme, st: &SettingsState, this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
     let theme_me = this.clone();
     v_flex()
         .w_full()
         .gap(px(GAP_LG))
-        .child(section(
-            t,
-            "主题",
-            "深浅两套配色都写死在 gui/theme.json 里（改配色只动那一个文件，\
-             两套都在里面）。这个开关即时生效，不受下面的「保存」约束。",
-        ))
         .child(
-            Switch::new("set-theme")
-                .checked(st.theme_dark)
-                .label("深色主题")
-                .on_click(move |on, window, cx| {
-                    theme_me.update(cx, |this, cx| this.toggle_theme(*on, window, cx));
+            SetCard::new("外观")
+                .live()
+                .info(
+                    "set-info-appearance",
+                    "两套配色都写在 gui/theme.json 里，改配色只动那一个文件。\
+                     字号三档是整屏一起换（含标题栏、卡片、表格与官方按钮、输入框）。\
+                     关窗那一档：选「每次都问」时，面板里那刻「记住我的选择」打勾就会把\
+                     这次的选择记下来，之后直接照做、不再问；不打勾就每次都问。\
+                     这三条都即时生效，不用点下面的「保存」。",
+                )
+                .build(
+                    t,
+                    gv,
+                    FormRows::new()
+                        .row(
+                            "深色主题",
+                            // 可见的名字在标签那一列，所以这颗不再自带文字；
+                            // 但 `accessibility_label` 必须给——读屏只念得着 label
+                            Switch::new("set-theme")
+                                .checked(st.theme_dark)
+                                .accessibility_label("深色主题")
+                                .on_click(move |on, window, cx| {
+                                    theme_me.update(cx, |this, cx| {
+                                        this.toggle_theme(*on, window, cx)
+                                    });
+                                }),
+                        )
+                        .row("界面字号", ui_scale_picker(st, this))
+                        .row("关闭窗口时", close_action_picker(st, this))
+                        .build(t),
+                ),
+        )
+        .child(
+            SetCard::new("显示哪些模块")
+                .note("两类仓库各存一份")
+                .live()
+                .info(
+                    "set-info-modules",
+                    "前五项是详情页的页签，后四项是概览页里的四段。勾上就显示，不勾就不画；\
+                     两类仓库各存一份，互不影响。至少要留一个，否则那一屏会空掉。\
+                     虚线那两项固定不显示：一键清理会真删磁盘上的构建产物，\
+                     分叉条改的是本地历史——它们是安全边界，不是偏好。",
+                )
+                .build(
+                    t,
+                    gv,
+                    // **两栏并排，不是两行**：九项勾成一列要 300px 高，而这两组是
+                    // **同一件事的两份**（同一批模块、两种仓库），并排才读得出
+                    // "它们在对照"；上下排会读成两个独立段落
+                    v_flex()
+                        .w_full()
+                        .gap(px(GAP_LG))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                // ⚠️ D41：`h_flex` 默认 `items_center`。两组行数不同
+                                // （第三方天生少两项），居中会让它们**顶边错开**，
+                                // 两栏的"概览"就不在同一行上。并排的东西一律 start
+                                .items_start()
+                                .gap(px(GAP_LG))
+                                .child(mod_grid(t, st, false, this))
+                                .child(mod_grid(t, st, true, this)),
+                        )
+                        // 那句"为什么有两项是灰的"从第三方盒子里挪到卡底：
+                        // 它解释的是**两栏共同**的那条规则，挂在其中一栏下面
+                        // 会让人以为只适用于那一栏
+                        .child(meta_text(
+                            "虚线那两项固定不显示：一键清理会真删磁盘上的构建产物，\
+                             分叉条改的是本地历史。",
+                            t,
+                        )),
+                ),
+        )
+}
+
+/// 界面字号那三档（阶段 28，阶段 31.5 换成官方 `RadioGroup`）。
+///
+/// ## 为什么是 `RadioGroup` 而不是三颗 `Checkbox`
+///
+/// 三颗复选框做单选**本来就允许全不勾、也允许全勾**，于是每次都要在外面补一段
+/// "点已勾上的那颗 = 保持"的兜底（旧版注释里那段话就是在解释这个兜底）。
+/// `RadioGroup` 的勾选态**完全由 `selected_index` 算出来**（`radio.rs:403`
+/// 的 `checked = selected_ix == Some(ix)`），点谁回调给谁的下标、不翻转 ⇒
+/// **"一颗都没选"这个状态在这条路上压根构造不出来**，兜底那段代码一起消失。
+///
+/// ## 为什么不用 `ToggleGroup::segmented()`（外观更像原型）
+///
+/// 查过：`segmented()` **只改外观**（去掉 gap、把相邻边框接成一条），
+/// 语义上它还是"多项各自可勾"——`toggle.rs:389` 那句 `next[ix] = !next[ix]`
+/// 就是逐项翻转，**照样能勾出零选和多选**。那正是 D88 要消灭的东西。
+/// ⇒ 外观与原型有意不等（第四处，登记在 D88 与 v4 §11）
+fn ui_scale_picker(st: &SettingsState, this: &Entity<Shell>) -> impl IntoElement {
+    let cur = st.ui_scale;
+    let ix = UiScale::ALL.iter().position(|s| *s == cur);
+    let me = this.clone();
+    h_flex()
+        // **不要 `w_full`**：这一组要靠右贴到行末（`FormRows` 的控件列已经
+        // `justify_end`）。写 `w_full` 会把整列占满，单选组就又回到紧贴标签列、
+        // 右边一大片空——正是 2026-10-07 抓帧抓出来的那个毛病
+        .items_center()
+        .gap(px(GAP_LG))
+        .child(
+            RadioGroup::horizontal("set-scale")
+                .selected_index(ix)
+                .children(UiScale::ALL.map(|s| {
+                    Radio::new(SharedString::from(s.stored()))
+                        .label(s.label())
+                        .tooltip(s.note())
+                }))
+                .on_click(move |ix, window, cx| {
+                    let Some(s) = UiScale::ALL.get(*ix).copied() else {
+                        return;
+                    };
+                    me.update(cx, |_this, cx| Shell::set_ui_scale_static(s, window, cx));
                 }),
         )
-        .child(section(
-            t,
-            "关闭窗口时",
-            "点右上角 × 之后做什么。三选一，勾上那颗就是当前档。\n\
-             选「每次都问」时，面板里那刻「记住我的选择」打勾就会把这次的选择记下来，\n\
-             之后直接照做、不再问；不打勾就每次都问。",
-        ))
-        .child(close_action_picker(st, this))
-        .child(section(
-            t,
-            "显示哪些模块",
-            "前五项是详情页的页签，后四项是概览页里的四段。勾上就显示，不勾就不画；\
-             两类仓库各一份，互不影响。至少要留一个，否则那一屏会空掉。\
-             这个开关即时生效，不用点下面的「保存」。",
-        ))
-        .child(mod_grid(t, st, false, this))
-        .child(mod_grid(t, st, true, this))
+    // ⚠️ **这一行不再挂"正文 18px · 弱提示 14px"那一句**（阶段 31.5 实测）。
+    // 原来挂在单选组右边，而**大档下这一组本身就更宽**（字 18px），
+    // 两者加起来超过控件列 ⇒ RadioGroup 直接折行，「大」掉到第二行、
+    // 右边空一片——那正是这一轮要治的"没排完"。
+    // 每档的实际像素值现在只在**悬停 tooltip** 里（`s.note()`），
+    // 判据：它是"选了会变成多大"，**不看也能安全操作** ⇒ 属于可收进气泡那一类
 }
 
-/// 关窗那三档的勾选区（阶段 22）。**三颗复选框做单选**——勾上那颗就是当前档。
-///
-/// ## 为什么用勾选框而不是分段键
-///
-/// 用户拍板的口径是「打勾选择」。而这一页其余的可选项（主题、模块）用的都是
-/// 勾选框，**同一页里混两种选择形态会让"这一条还能不能改"变得看不出来**。
-///
-/// ## 点已勾上的那颗 = 取消还是保持
-///
-/// **保持**。三颗都是真选项、没有"不选"这一档；点当前档就什么都不发生。
-/// 官方 `Checkbox` 给的是**翻转后**的值，照着它写成"取消勾"会造出
-/// "一颗都不勾"的非法状态，而那个状态在 `close_action_of` 里落回
-/// `Ask`——**界面上看着没选、实际等于选了 Ask**，是那种最难查的骗。
+/// 关窗那三档（阶段 22，阶段 31.5 换成官方 `RadioGroup`，理由见
+/// `ui_scale_picker` 的函数头——**两处是同一个判据，改一处要回头改另一处**）
 fn close_action_picker(st: &SettingsState, this: &Entity<Shell>) -> impl IntoElement {
-    v_flex()
-        .w_full()
-        .gap(px(GAP_TIGHT))
-        .children([
-            (
-                CloseAction::Ask,
-                store::CLOSE_ASK,
-                "每次都问：弹出面板让我选（默认）",
-            ),
-            (
-                CloseAction::Tray,
-                store::CLOSE_TRAY,
-                "直接关闭到托盘：程序留在后台，定时同步照常",
-            ),
-            (
-                CloseAction::Exit,
-                store::CLOSE_EXIT,
-                "直接完全退出：后台同步也一起停",
-            ),
-        ]
-        .map(|(kind, raw, label)| {
-            let me = this.clone();
-            // ⚠️ id 必须带 raw：同一帧三颗都在，gpui 按 `ElementId` 全局存状态，
-            // 同名会共用一份勾选状态（D61）
-            Checkbox::new(SharedString::from(format!("set-close-{raw}")))
-                .checked(st.close_action == kind)
+    const OPTS: [(CloseAction, &str, &str, &str); 3] = [
+        (
+            CloseAction::Ask,
+            store::CLOSE_ASK,
+            "每次都问",
+            "弹出面板让我选，这是默认档",
+        ),
+        (
+            CloseAction::Tray,
+            store::CLOSE_TRAY,
+            "收到托盘",
+            "程序留在后台，定时同步照常跑",
+        ),
+        (
+            CloseAction::Exit,
+            store::CLOSE_EXIT,
+            "直接退出",
+            "后台定时同步也一起停",
+        ),
+    ];
+    let ix = OPTS.iter().position(|(k, ..)| st.close_action == *k);
+    let me = this.clone();
+    RadioGroup::horizontal("set-close")
+        .selected_index(ix)
+        .children(OPTS.map(|(_, raw, label, tip)| {
+            // ⚠️ `RadioGroup` 会把每一项的 id 覆写成下标（`radio.rs:405`），
+            // 所以这里传的 `raw` 只是给人看的。**但两组的 group id 必须不同**
+            // （`set-scale` / `set-close`）：子项 id 是"有 id 的祖先链"算出来的，
+            // group id 撞了就是同帧撞车（D61）
+            Radio::new(SharedString::from(raw))
                 .label(label)
-                .on_click(move |_checked, _window, cx| {
-                    me.update(cx, |this, cx| this.set_close_action(raw, cx));
-                })
+                .tooltip(tip)
         }))
+        .on_click(move |ix, _window, cx| {
+            let Some((_, raw, _, _)) = OPTS.get(*ix) else {
+                return;
+            };
+            let raw = raw.to_string();
+            me.update(cx, |this, cx| this.set_close_action(&raw, cx));
+        })
 }
 
-/// 勾选区一行放几颗
-const MOD_COLS: usize = 3;
+/// 勾选区一行放几颗。**两列**（阶段 31.5 从三列改过来）：
+/// 两组现在是**并排的两个盒子**，每栏只剩 ~200px，三列每列 60px 连"语言技术栈"
+/// 都放不下。⇒ 改的是**版面约束**，不是审美：并排之后放得下的列数变了
+const MOD_COLS: usize = 2;
 
-/// 一组模块勾选框（「我的」或「第三方」），**三列网格**（阶段 20）
+/// 这一页能勾的那些模块：`(配置里的键, 界面上的名字)`。
 ///
-/// 十八颗（两套 × 九项）竖着排要 500px 出头，右栏装不下——平铺那一版就是
-/// 这样被裁到点不到的。三列排完是六行。
+/// 抽成函数是因为**计数与勾选框读的是同一份表**：两份的话"7/9"那个分母
+/// 和实际画出来的格子数会漂，而漂了没有任何东西会报错
+fn mod_items() -> Vec<(&'static str, &'static str)> {
+    let mut items: Vec<(&'static str, &'static str)> = DetailTab::ALL
+        .iter()
+        .map(|t2| (t2.module_key(), t2.label()))
+        .collect();
+    items.extend([
+        (store::MOD_SEC_FORK, "分叉条"),
+        (store::MOD_SEC_SYNC, "同步"),
+        (store::MOD_SEC_LOG, "日志"),
+        (store::MOD_SEC_LANG, "语言技术栈"),
+    ]);
+    items
+}
+
+/// 一组模块的 `(已勾几项, 适用几项)`。**纯函数**，单测只碰它不碰窗口。
 ///
-/// **「在哪」不再逐项重复**：三列每列只有 ~150px，那一列塞不下"详情页页签"
-/// 这种五个字，挤进去就得缩字或者断行。改成段标题说一次"前五项 / 后四项"、
-/// 组标题说一次归属。
+/// 分母走 `store::module_applicable` 而不是 `items.len()`：第三方天生没有
+/// 「空间」与分叉条，那两项**永远勾不上**。写成 `4/9` 会让人一直去找
+/// 那两个不存在的东西——**分母算错比不显示更糟**
+fn mod_counts(third: bool, items: &[(&'static str, &'static str)], shown: &[String]) -> (usize, usize) {
+    let applicable = items.iter().filter(|(k, _)| store::module_applicable(third, k));
+    let total = applicable.clone().count();
+    let on = applicable.filter(|(k, _)| shown.iter().any(|x| x == *k)).count();
+    (on, total)
+}
+
+/// 一组模块勾选框（「我的」或「第三方」），**一个盒子 + 两列**（阶段 31.5）
+///
+/// ## 为什么套盒子
+///
+/// 阶段 20 它是"组标题 + 三列勾选框"直接浮在卡上。两栏并排之后，两组之间
+/// 要有"这是同一件事的两份"的边界感，靠标题那一行小字撑不住 ⇒ 各套一个
+/// `muted` 底 + `line-soft` 描边的盒（v4 §2 的 `card-sunken`：
+/// **它是"卡在卡里"，比卡低一层，不是另一张卡**——用 `card()` 会读成两张平级卡）
+///
+/// ## 计数那一格的分母不含基线锁死项
+///
+/// 写成 `7/9` 会让人以为"还有 2 个没开"，而那 2 个**永远勾不上**
+/// （第三方天生没有「空间」与分叉条）。分母只数**适用的**项 ⇒ 第三方那栏是 `4/7`。
+/// **分母算错比不显示更糟**：它会让人一直去找那两个不存在的东西
 ///
 /// **禁用 + 不勾 + 写明原因**（第三方那两项）是基线项唯一正确的画法：那两项
 /// 不是"用户现在不想看"，是"这一类仓库上它不成立"。
@@ -890,37 +1192,52 @@ const MOD_COLS: usize = 3;
 /// 画成可勾的更糟：用户勾完界面变了、页面还是那个页面，那是骗人
 fn mod_grid(t: &Theme, st: &SettingsState, third: bool, this: &Entity<Shell>) -> Div {
     let shown = if third { &st.mod_third } else { &st.mod_mine };
-    // 「我的」五个页签 + 概览四段；第三方少两项（基线）
-    let mut items: Vec<(&'static str, &'static str)> =
-        DetailTab::ALL.iter().map(|t2| (t2.module_key(), t2.label())).collect();
-    items.extend([
-        (store::MOD_SEC_FORK, "分叉条"),
-        (store::MOD_SEC_SYNC, "同步"),
-        (store::MOD_SEC_LOG, "日志"),
-        (store::MOD_SEC_LANG, "语言技术栈"),
-    ]);
+    let items = mod_items();
+    let applicable = |k: &str| store::module_applicable(third, k);
+    let (on, total) = mod_counts(third, &items, shown);
 
     v_flex()
-        .w_full()
+        .flex_1()
+        // 少了 `min_w_0`，栏里任意一行字变长就把整栏顶宽，另一栏被挤到可视区外
+        // （与 Q17 那个挤压是同一族：**并排的列一定要 `flex_1 + min_w_0` 成对写**）
+        .min_w_0()
         .gap(px(GAP_TIGHT))
+        .p(px(GAP))
+        .rounded(px(r_lg(t)))
+        .bg(t.colors.muted)
+        .border_1()
+        .border_color(track(t))
         .child(
-            div()
-                .text_size(px(FS_META))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(tier3(t))
-                .child(if third { "第三方仓库" } else { "我的仓库" }),
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(fs_sec()))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(body(t))
+                        .child(if third { "第三方仓库" } else { "我的仓库" }),
+                )
+                .child(
+                    div()
+                        .text_size(px(fs_meta()))
+                        .text_color(tier4(t))
+                        .child(format!("{on}/{total}")),
+                ),
         )
         .children(items.chunks(MOD_COLS).map(|chunk| {
             h_flex().w_full().gap(px(GAP)).children(chunk.iter().map(|(key, label)| {
                 let (key, label) = (*key, *label);
-                let applicable = store::module_applicable(third, key);
-                let on = shown.iter().any(|x| x == key);
+                // 内层不再叫 `on`：外层那一格 `on` 是"已勾几项"的计数，
+                // 同名遮蔽之后这一行读起来像在用计数判勾选
+                let checked = shown.iter().any(|x| x == key);
                 let me = this.clone();
                 // 复选框 = "勾上就显示"，与 `toggle_module` 正好对上
                 // （那边收的是"新值"，官方 `Checkbox` 给的是翻转后的值）
                 Checkbox::new(id_for(key, third))
-                    .checked(on)
-                    .disabled(!applicable)
+                    .checked(checked)
+                    .disabled(!applicable(key))
                     .label(label)
                     .on_click(move |checked, window, cx| {
                         me.update(cx, |this, cx| {
@@ -929,17 +1246,6 @@ fn mod_grid(t: &Theme, st: &SettingsState, third: bool, this: &Entity<Shell>) ->
                     })
             }))
         }))
-        .when(third, |d| {
-            d.child(
-                div()
-                    .text_size(px(FS_META))
-                    .text_color(tier4(t))
-                    .child(
-                        "「空间」与「分叉」对第三方仓库不成立：空间页里有一键清理\
-                         （会真删磁盘上的构建产物），分叉条改的是本地历史。这两项固定不显示。",
-                    ),
-            )
-        })
 }
 
 /// 复选框的 `ElementId`。**必须带上归属**——同一帧里两组会同时出现，
@@ -951,45 +1257,135 @@ fn id_for(key: &str, third: bool) -> String {
         + &key.replace('.', "-")
 }
 
-fn settings_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
+fn settings_footer(t: &Theme, this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
     let cancel = this.clone();
     let save = this.clone();
     h_flex()
         .w_full()
-        .justify_end()
+        .items_center()
+        .justify_between()
         .gap(px(GAP))
+        // 左下角那一句是**这一页最重要的一条规则**：哪几格即时生效、哪几格要点保存。
+        // 它原来不在——于是用户拨了主题开关又点「取消」，就会怀疑那次拨动没算数。
+        // ⚠️ 这句必须**跟着实际的即时项改**：将来若把某项挂回「保存」，
+        // 这句就成了当面的假话（与 D78 那条"通知里那句恒为真"同族）
         .child(
-            Button::new("set-cancel")
-                .label("取消")
-                .custom(gv)
-                .on_click(move |_, window, cx| {
-                    cancel.update(cx, |shell, _| shell.settings_dlg = None);
-                    window.close_dialog(cx);
-                }),
+            h_flex()
+                .items_center()
+                .gap(px(GAP_TIGHT))
+                .min_w_0()
+                .child(icon_sm(gpui_kit::assets::IconName::Info).text_color(tier4(t)))
+                .child(meta_text(
+                    "外观、通知与模块勾选是即时的，「保存」只管上面那几格文字",
+                    t,
+                )),
         )
         .child(
-            Button::new("set-save")
-                .label("保存")
-                .primary()
-                .on_click(move |_, window, cx| {
-                    let vals: [String; 6] = save
-                        .read(cx)
-                        .settings_dlg
-                        .as_ref()
-                        .map(|d| {
-                            [
-                                d.git_name.read(cx).value().to_string(),
-                                d.git_email.read(cx).value().to_string(),
-                                d.github_token.read(cx).value().to_string(),
-                                d.gitee_token.read(cx).value().to_string(),
-                                d.ssh_key.read(cx).value().to_string(),
-                                d.proxy.read(cx).value().to_string(),
-                            ]
-                        })
-                        .unwrap_or_default();
-                    if save.update(cx, |shell, cx| shell.save_settings(vals, window, cx)) {
-                        window.close_dialog(cx);
-                    }
-                }),
+            h_flex()
+                .items_center()
+                .gap(px(GAP))
+                .child(
+                    Button::new("set-cancel")
+                        .label("取消")
+                        .custom(gv)
+                        .on_click(move |_, window, cx| {
+                            cancel.update(cx, |shell, _| shell.settings_dlg = None);
+                            window.close_dialog(cx);
+                        }),
+                )
+                .child(
+                    Button::new("set-save")
+                        .label("保存")
+                        .primary()
+                        .on_click(move |_, window, cx| {
+                            let vals: [String; 6] = save
+                                .read(cx)
+                                .settings_dlg
+                                .as_ref()
+                                .map(|d| {
+                                    [
+                                        d.git_name.read(cx).value().to_string(),
+                                        d.git_email.read(cx).value().to_string(),
+                                        d.github_token.read(cx).value().to_string(),
+                                        d.gitee_token.read(cx).value().to_string(),
+                                        d.ssh_key.read(cx).value().to_string(),
+                                        d.proxy.read(cx).value().to_string(),
+                                    ]
+                                })
+                                .unwrap_or_default();
+                            if save.update(cx, |shell, cx| shell.save_settings(vals, window, cx)) {
+                                window.close_dialog(cx);
+                            }
+                        }),
+                ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 计数那一格的**分母**必须只数"勾得上"的项。
+    ///
+    /// 第三方天生没有「空间」与分叉条（core 的基线锁死），全勾时如果显示
+    /// `7/9`，用户就会一直去找那两个不存在的东西——**分母算错比不显示更糟**。
+    /// 这条断言挑的是最容易写错的那一面：**勾满**
+    #[test]
+    fn a_fully_ticked_third_party_group_reads_n_out_of_n_not_n_out_of_nine() {
+        let items = mod_items();
+        let all: Vec<String> = items
+            .iter()
+            .filter(|(k, _)| store::module_applicable(true, k))
+            .map(|(k, _)| k.to_string())
+            .collect();
+        let (on, total) = mod_counts(true, &items, &all);
+        assert_eq!(on, total, "勾满了却不等于分母，说明分母数进了勾不上的项");
+        assert!(
+            total < items.len(),
+            "第三方那一栏的分母没扣掉基线锁死的两项：{total} / {}",
+            items.len()
+        );
+    }
+
+    /// 「我的」那一栏九项全适用 ⇒ 分母就是全表长度。
+    /// 这条与上一条**成对**：只留一条的话，把 `module_applicable` 写反了
+    /// 也照样有一条能过
+    #[test]
+    fn the_mine_group_counts_every_module_because_none_is_locked() {
+        let items = mod_items();
+        let none: Vec<String> = Vec::new();
+        let (on, total) = mod_counts(false, &items, &none);
+        assert_eq!((on, total), (0, items.len()));
+    }
+
+    /// 三档字号写进配置的字符串必须互不相同。
+    ///
+    /// 它们同时是 `Radio` 的 id 与落盘值：重复了不会编译错、不会 panic，
+    /// 只会"选了大档、重启回来变中档"——`from_stored` 认到第一个匹配就返回
+    #[test]
+    fn the_three_font_scales_store_three_different_strings() {
+        let mut keys: Vec<&str> = UiScale::ALL.iter().map(|s| s.stored()).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), UiScale::ALL.len(), "字号档的 stored() 有重复");
+    }
+
+    /// 左侧分类导航的说明句必须一行放得下——`SET_NAV_W` 的注释②早就写了这条
+    /// 要求，而阶段 31.5 之前的 `hint()` 是一句 18 字长句，实测折成三行。
+    /// **目标写在了注释里、内容没跟上**，就是这种没人管的漂移。
+    ///
+    /// 14 个字是量出来的：190px 那一列减去左右内边距（8 + 4）与图标位，
+    /// `fs_meta()`（中档 12px）下一行放得下约 14 个汉字
+    #[test]
+    fn each_category_hint_fits_on_one_line_of_the_nav_column() {
+        for c in SetCat::ALL {
+            let n = c.hint().chars().count();
+            assert!(
+                n <= 14,
+                "{} 的说明句 {n} 字，导航那一列放不下：{}",
+                c.label(),
+                c.hint()
+            );
+        }
+    }
 }

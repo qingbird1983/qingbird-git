@@ -18,7 +18,7 @@ use qingbird_core::types::RepoStatus;
 
 use crate::detail::DetailTab;
 use crate::dialogs::fork::fork_commit_block;
-use crate::shell::{SyncCheck, SyncPull, SyncPush};
+use crate::keys::{SyncCheck, SyncPull, SyncPush};
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::*;
@@ -158,7 +158,7 @@ impl Shell {
                 ))
                 .child(
                     div()
-                        .text_size(px(FS_META))
+                        .text_size(px(fs_meta()))
                         .text_color(tier4(t))
                         .child(format!(
                             "变基会把本地提交重放到 {} 之上，提交内容不变但历史会改写；动手前后端会先把\"变基前\"的位置固定在备份分支上",
@@ -171,8 +171,8 @@ impl Shell {
             v_flex()
                 .w_full()
                 .gap(px(GAP))
-                .p(px(16.0))
-                .rounded(px(R_XL))
+                .p(px(GAP_XL))
+                .rounded(px(r_xl(t)))
                 .bg(red_bg(t))
                 .border_1()
                 .border_color(t.colors.border)
@@ -187,21 +187,21 @@ impl Shell {
                         )
                         .child(
                             div()
-                                .text_size(px(FS_BODY))
+                                .text_size(px(fs_body()))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(t.colors.foreground)
                                 .child(title),
                         )
                         .child(
                             div()
-                                .text_size(px(FS_SEC))
+                                .text_size(px(fs_sec()))
                                 .text_color(t.colors.danger)
                                 .child(summary),
                         ),
                 )
                 .children(blocked.as_deref().map(|reason| {
                     div()
-                        .text_size(px(FS_SEC))
+                        .text_size(px(fs_sec()))
                         .text_color(body(t))
                         .child(reason.to_string())
                 }))
@@ -240,6 +240,9 @@ impl Shell {
         let busy = lg.running;
         let third = self.entry(path).map(|e| e.is_third_party).unwrap_or(false);
         let b = bucket_of(&status);
+        // 状态句与告警**由同一个函数一起出**——判据只有一份（见 `sync_readout`）。
+        // 这里只取主句；`alert` 为 `Some` 时主句降到中性灰，详情交给头卡那颗感叹号
+        let (sentence, alert) = sync_readout(&status, b, lg);
 
         // 「有该做的」的那把键给 primary。落后与待推送是互斥的，
         // 分叉时两把都要（得先变基或拉取，推送也会被拒）
@@ -322,7 +325,8 @@ impl Shell {
             .child(
                 h_flex()
                     .w_full()
-                    .h(px(24.0))
+                    // 阶段 28：跟着这行 `fs_body()` 的状态句走
+                    .h(px(row_h(fs_body())))
                     .flex_shrink_0()
                     .gap(px(GAP_TIGHT))
                     .items_center()
@@ -330,11 +334,18 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(FS_BODY))
+                            .text_size(px(fs_body()))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(t.colors.foreground)
+                            // ⚠️ 有告警时主句**降到中性灰**（`tier3`）：详情已经进
+                            // 头卡那颗感叹号的气泡了，这里再穿前景色 + 占最主位的字，
+                            // 就是"一条提示压过这一屏的操作"——用户不要的那个形态
+                            .text_color(if alert.is_some() {
+                                tier3(t)
+                            } else {
+                                t.colors.foreground
+                            })
                             .truncate()
-                            .child(sync_sentence(&status, b, lg)),
+                            .child(sentence),
                     )
                     .child(
                         Button::new("sync-timer")
@@ -418,38 +429,60 @@ impl Shell {
 
 /// 同步卡上那句话。同一个分档在环与这句里说的是同一件事，
 /// 别让两处各写一套文案
-fn sync_sentence(s: &RepoStatus, b: Bucket, lg: &LogState) -> String {
+/// 同步卡上那句**状态话**，外加一条**该不该到头卡那颗感叹号里去说**的告警。
+///
+/// ⚠️ **一个函数同时出两样，是刻意的**：状态句与告警句必须来自**同一份判据**。
+/// 拆成两个函数各 `if` 一遍，迟早会漂成"卡里说与云端已同步、头卡上挂着
+/// 未配置上游的感叹号"——**界面自己打自己的脸**，而编译器与单测都不报（D78 那一族）。
+///
+/// 阶段 31.4 之前，`!is_repo` / `!has_upstream` 这两条是**直接当主句摆在同步卡第一行**的
+/// （"没有配置上游分支，同步操作会失败"）。用户 2026-10-06 明确不要那种形态：
+/// 一条提示不该占住这一屏最主位的字。⇒ 现在主句只**中性陈述**（降到 `tier3` 灰），
+/// 详情进头卡仓库名后面那颗 `warn_dot` 的气泡里。
+pub(crate) fn sync_readout(s: &RepoStatus, b: Bucket, lg: &LogState) -> (String, Option<String>) {
     if !s.is_repo {
-        return "这个文件夹不是 Git 仓库".into();
+        return (
+            "未识别为 Git 仓库".into(),
+            Some("这个文件夹里没有 .git，同步三键都不会有结果。".into()),
+        );
     }
     if !s.has_upstream {
-        return "没有配置上游分支，同步操作会失败".into();
+        return (
+            "未配置上游分支".into(),
+            Some(
+                "当前分支没有上游，拉取会失败。可以先设置远端，\
+                 或直接用「推送」把本地分支推上去建立 origin/分支名。"
+                    .into(),
+            ),
+        );
     }
-    if lg.running {
-        return match lg.op {
+    let sentence = if lg.running {
+        match lg.op {
             Some(Op::Pull) => "正在拉取云端更新…".into(),
             Some(Op::Push) => "正在推送本地提交…".into(),
             Some(Op::Check) => "正在检查云端更新…".into(),
             Some(Op::Commit) => "正在提交并推送…".into(),
             _ => "正在同步…".into(),
-        };
-    }
-    match b {
-        Bucket::Behind => format!("云端有 {} 个新提交，可以拉取", s.behind),
-        Bucket::Ahead => format!("本地有 {} 个提交待推送", s.ahead),
-        Bucket::Forked => format!(
-            "本地 {} 个未推送 · 云端 {} 个新提交，需要变基",
-            s.ahead, s.behind
-        ),
-        Bucket::Dirty => "改动都在本地，提交后即可推送".to_string(),
-        _ => {
-            if lg.ts == 0 {
-                "与云端已同步".to_string()
-            } else {
-                format!("与云端已同步 · 上次同步 {}", rel_time(lg.ts))
+        }
+    } else {
+        match b {
+            Bucket::Behind => format!("云端有 {} 个新提交，可以拉取", s.behind),
+            Bucket::Ahead => format!("本地有 {} 个提交待推送", s.ahead),
+            Bucket::Forked => format!(
+                "本地 {} 个未推送 · 云端 {} 个新提交，需要变基",
+                s.ahead, s.behind
+            ),
+            Bucket::Dirty => "改动都在本地，提交后即可推送".to_string(),
+            _ => {
+                if lg.ts == 0 {
+                    "与云端已同步".to_string()
+                } else {
+                    format!("与云端已同步 · 上次同步 {}", rel_time(lg.ts))
+                }
             }
         }
-    }
+    };
+    (sentence, None)
 }
 
 /// 「推送」键的占位宽度。第三方那一格要留住它，
@@ -465,15 +498,18 @@ impl Shell {
             branch.to_string()
         };
         h_flex()
-            .h(px(22.0))
-            .px(px(8.0))
+            // 阶段 28：这颗**就是一个胶囊**（圆角 + 灰底 + 图标 + 字），
+            // 高度该跟 `pill_h()` 同一源，而不是自己写死 22。
+            // 写死时中档 14px 的字上下只剩 4px，贴边
+            .h(px(pill_h()))
+            .px(px(GAP))
             .rounded(px(R_MD))
             .bg(t.colors.muted)
             .items_center()
             .gap(px(GAP_TIGHT))
             .text_color(tier3(t))
             .child(icon_md(AssetIcon::GitBranch))
-            .child(div().text_size(px(FS_SEC)).child(text))
+            .child(div().text_size(px(fs_sec())).child(text))
     }
 }
 
@@ -608,13 +644,13 @@ impl Shell {
                     .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(lang_ink(&l.language, i, t)))
                     .child(
                         div()
-                            .text_size(px(FS_SEC))
+                            .text_size(px(fs_sec()))
                             .text_color(tier3(t))
                             .child(l.language.clone()),
                     )
                     .child(
                         div()
-                            .text_size(px(FS_META))
+                            .text_size(px(fs_meta()))
                             .text_color(tier4(t))
                             .child(format!("{pct}%")),
                     ),
@@ -626,7 +662,7 @@ impl Shell {
             .gap(px(GAP_TIGHT))
             .child(
                 div()
-                    .text_size(px(FS_BODY))
+                    .text_size(px(fs_body()))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(t.colors.foreground)
                     .child("语言技术栈"),
@@ -718,7 +754,7 @@ impl Shell {
             .child(
                 div()
                     .pt(px(GAP_TIGHT))
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child("第三方仓库只读：拉取与检测之外不提供任何写操作。"),
             )

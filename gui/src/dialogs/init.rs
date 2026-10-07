@@ -38,15 +38,15 @@ pub(crate) fn init_body(
         .max_h(px(180.0))
         .overflow_y_scroll()
         .gap(px(GAP_DENSE))
-        .p(px(8.0))
-        .rounded(px(R_LG))
+        .p(px(GAP))
+        .rounded(px(r_lg(t)))
         .bg(t.colors.background)
         .border_1()
         .border_color(t.colors.border);
     if init.items.is_empty() {
         list = list.child(
             div()
-                .text_size(px(FS_SEC))
+                .text_size(px(fs_sec()))
                 .text_color(tier4(t))
                 .child("（空文件夹）"),
         );
@@ -58,7 +58,7 @@ pub(crate) fn init_body(
             h_flex()
                 .w_full()
                 .h(px(26.0))
-                .px(px(6.0))
+                .px(px(GAP))
                 .items_center()
                 .gap(px(GAP))
                 .child(
@@ -84,14 +84,14 @@ pub(crate) fn init_body(
                 )
                 .child(
                     div()
-                        .text_size(px(FS_SEC))
+                        .text_size(px(fs_sec()))
                         .text_color(body(t))
                         .child(name.clone()),
                 )
                 .child(div().flex_1())
                 .child(
                     div()
-                        .text_size(px(FS_META))
+                        .text_size(px(fs_meta()))
                         .text_color(tier4(t))
                         .child(if it.is_dir { "文件夹" } else { "文件" }.to_string()),
                 ),
@@ -104,7 +104,7 @@ pub(crate) fn init_body(
         .child(
             div()
                 .w_full()
-                .text_size(px(FS_BODY))
+                .text_size(px(fs_body()))
                 .line_height(px(20.0))
                 .text_color(tier3(t))
                 .child(format!(
@@ -114,7 +114,7 @@ pub(crate) fn init_body(
         .child(
             div()
                 .w_full()
-                .text_size(px(FS_SEC))
+                .text_size(px(fs_sec()))
                 .font_family(t.mono_font_family.clone())
                 .text_color(tier4(t))
                 .child(init.path.clone()),
@@ -124,7 +124,7 @@ pub(crate) fn init_body(
             b.child(
                 div()
                     .w_full()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(t.colors.danger)
                     .child(e),
             )

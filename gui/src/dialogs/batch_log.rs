@@ -21,7 +21,7 @@ use gpui_kit::component::dialog::DialogContent;
 use gpui_kit::component::{ActiveTheme, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, App, ClipboardItem, Context, Div, Entity, FontWeight, ParentElement, ScrollHandle,
+    div, px, App, ClipboardItem, Context, Div, Entity, ParentElement, ScrollHandle,
     Styled, Window,
 };
 use std::rc::Rc;
@@ -87,16 +87,20 @@ fn batch_log_body(scroll: &Rc<ScrollHandle>, t: &Theme, lg: &LogState) -> Div {
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_size(px(FS_SEC))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(if ok { t.colors.success } else { t.colors.danger })
-                        .child(if ok { "✓" } else { "✗" }),
+                        .child(crate::widgets::status_mark(
+                            ok,
+                            if ok {
+                                t.colors.success
+                            } else {
+                                t.colors.danger
+                            },
+                        )),
                 )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(FS_SEC))
+                        .text_size(px(fs_sec()))
                         .text_color(tier3(t))
                         .child(
                             lg.verdict
@@ -111,7 +115,7 @@ fn batch_log_body(scroll: &Rc<ScrollHandle>, t: &Theme, lg: &LogState) -> Div {
         )
         .child(
             div()
-                .text_size(px(FS_META))
+                .text_size(px(fs_meta()))
                 .text_color(tier4(t))
                 .child("只列没成的仓库与那一句汇总。完整的 git 输出在每个仓库自己的日志里（选中它 → 检视抽屉第一页签）。"),
         )

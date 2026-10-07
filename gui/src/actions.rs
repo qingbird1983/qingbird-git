@@ -188,8 +188,12 @@ impl Shell {
                         .primary()
                         .on_click(move |_, window, cx| {
                             me.update(cx, |this, cx| {
-                                // 撤销走 add_repo：它会重新校验路径并补一条最小记录
-                                if let Err(e) = repos::add_repo(&prev.path) {
+                                // 撤销走 add_repo：它会重新校验路径并补一条最小记录。
+                                // **归属传 `prev` 的**：不加这个参数的话这里会先
+                                // 写一条 `is_third_party = false` 的新记录，
+                                // 再由下面的 `restore_entry` 盖回去——最终对，
+                                // 但中间那次写是错的（且两次落盘，D78）
+                                if let Err(e) = repos::add_repo(&prev.path, prev.is_third_party) {
                                     window.push_notification(format!("撤销失败：{e}"), cx);
                                     return;
                                 }

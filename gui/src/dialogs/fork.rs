@@ -23,14 +23,14 @@ pub(crate) fn fork_commit_block(is_local: bool, commits: &[String], t: &Theme) -
         .gap(px(GAP_TIGHT))
         .child(
             div()
-                .text_size(px(FS_SEC))
+                .text_size(px(fs_sec()))
                 .text_color(tier3(t))
                 .child(title),
         )
         .children(commits.iter().map(|c| {
             div()
                 .font_family(t.mono_font_family.clone())
-                .text_size(px(FS_META))
+                .text_size(px(fs_meta()))
                 .text_color(body(t))
                 .child(c.clone())
         }))

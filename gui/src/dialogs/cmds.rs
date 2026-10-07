@@ -169,7 +169,7 @@ fn cmds_body(t: &Theme, st: &CmdState) -> Div {
             .gap(px(GAP_TIGHT))
             .child(
                 div()
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child(label.to_string()),
             )
@@ -178,7 +178,7 @@ fn cmds_body(t: &Theme, st: &CmdState) -> Div {
 
     let mut body = v_flex().w_full().gap(px(GAP)).child(
         div()
-            .text_size(px(FS_META))
+            .text_size(px(fs_meta()))
             .text_color(tier4(t))
             .child("留空即清空这一条。前四格预填的是自动识别的结果，不点保存不会写进配置。"),
     );
@@ -187,7 +187,7 @@ fn cmds_body(t: &Theme, st: &CmdState) -> Div {
             body = body.child(
                 div()
                     .pt(px(GAP_TIGHT))
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(tier3(t))
                     .child("钉住的自定义命令（上限 3 个）"),
@@ -199,7 +199,7 @@ fn cmds_body(t: &Theme, st: &CmdState) -> Div {
         b.child(
             div()
                 .w_full()
-                .text_size(px(FS_SEC))
+                .text_size(px(fs_sec()))
                 .text_color(t.colors.danger)
                 .child(e),
         )

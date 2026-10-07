@@ -33,10 +33,11 @@ use qingbird_core::types::RepoStatus;
 use crate::detail::DetailTab;
 use crate::os;
 use crate::log::QUICK_SLOTS;
+use crate::panels::sync_readout;
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::ghost_variant;
-use crate::widgets::{meta_text, pill};
+use crate::widgets::{meta_text, pill, warn_dot};
 
 /// 复制成功后那颗对号停留多久（秒）。
 ///
@@ -58,6 +59,11 @@ impl Shell {
         let third = self.entry(path).map(|e| e.is_third_party).unwrap_or(false);
         // 复制按钮刚点过的那一条：短暂换对号（用户要求：复制反馈不再用气泡）
         let copied = self.copied;
+        // 名字后面那颗感叹号的告警句。**与同步卡那句状态话出自同一个纯函数**
+        // （`panels::sync_readout`）——在这里再 `if !status.has_upstream` 一遍
+        // 就是两份真源，漂了的后果是"卡里说与云端已同步、名字后面挂着感叹号"，
+        // 而界面自己打自己的脸（D78 那一族）
+        let alert = sync_readout(&status, bucket_of(&status), self.log()).1;
 
         v_flex()
             .w_full()
@@ -73,11 +79,19 @@ impl Shell {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(FS_HEAD))
+                            .text_size(px(fs_head()))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(t.colors.foreground)
                             .child(self.title(path)),
                     )
+                    // ⚠️ **告警不摆整宽横幅，改成名字后面这颗感叹号 + 悬停气泡**
+                    // （2026-10-06 用户：「把这个警告不要，如有警告在上面仓库名后面
+                    // 出现个感叹号鼠标触发气泡提示就行了」）。位置紧贴名字、
+                    // 在归属徽标**之前**——它说的是"这个名字背后有点问题"，
+                    // 插在归属后面会读成"归属有问题"
+                    .when_some(alert.clone(), |row, text| {
+                        row.child(warn_dot("repo-warn", text, t, cx))
+                    })
                     // 归属徽标常驻：这是"这个仓库我该不该改"的第一个判断依据，
                     // 藏在别处就得多点一次才知道
                     .child(pill(
@@ -417,7 +431,7 @@ impl Shell {
                 div()
                     .flex_shrink_0()
                     .w(px(56.0))
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child(label),
             )
@@ -447,7 +461,7 @@ impl Shell {
                             .min_w_0()
                             .truncate()
                             .font_family(t.mono_font_family.clone())
-                            .text_size(px(FS_META))
+                            .text_size(px(fs_meta()))
                             // 可点 = 三级灰，不可点 = 四级灰。**颜色本身就是"能不能点"的提示**，
                             // 不必再画一个禁用态出来
                             .text_color(if clickable && !disabled {

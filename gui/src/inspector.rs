@@ -34,7 +34,7 @@ use gpui_kit::{
     div, px, AnyElement, Context, Div, FontWeight, IntoElement, ParentElement, Styled,
 };
 
-use crate::shell::ToggleInspector;
+use crate::keys::ToggleInspector;
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::ghost_variant;
@@ -74,14 +74,14 @@ impl Shell {
                             .gap(px(GAP_TIGHT))
                             .child(
                                 div()
-                                    .text_size(px(FS_BODY))
+                                    .text_size(px(fs_body()))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(t.colors.foreground)
                                     .child("检视"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(FS_META))
+                                    .text_size(px(fs_meta()))
                                     .text_color(tier4(t))
                                     .truncate()
                                     .child(if name.is_empty() {
@@ -126,13 +126,13 @@ impl Shell {
                             .gap(px(GAP_TIGHT))
                             .child(
                                 div()
-                                    .text_size(px(FS_META))
+                                    .text_size(px(fs_meta()))
                                     .text_color(tier4(t))
                                     .child("这一列留给 AI 助手：会话、提交建议与差异审阅"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(FS_META))
+                                    .text_size(px(fs_meta()))
                                     .text_color(tier4(t))
                                     .child("变更 / 历史 / 空间 / 日志 已移到中栏页签与概览底部"),
                             ),

@@ -6,7 +6,7 @@
 // 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
 // 混在同一屏里一眼就能看出不一致。
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::button::ButtonCustomVariant;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyHeader, EmptyTitle};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::progress::Progress;
@@ -18,7 +18,7 @@ use gpui_kit::{
 };
 use qingbird_core::store::RepoEntry;
 
-use crate::shell::OpenPalette;
+use crate::keys::OpenPalette;
 use crate::tokens::*;
 
 /// 全局幽灵按钮的**悬停 / 按下底色**：一层淡灰遮罩。
@@ -83,7 +83,7 @@ pub(crate) fn empty_main(t: &Theme, window: &Window) -> Div {
                             .gap(px(GAP_TIGHT))
                             .child(
                                 div()
-                                    .text_size(px(FS_META))
+                                    .text_size(px(fs_meta()))
                                     .text_color(tier4(t))
                                     .child("左边点一行就能开始"),
                             )
@@ -105,7 +105,7 @@ pub(crate) fn empty_main(t: &Theme, window: &Window) -> Div {
 /// 查不到时**退成不带键位的纯文字**：宁可少给一个提示，也不给一个可能已经
 /// 失效的键位
 fn palette_hint(t: &Theme, window: &Window) -> AnyElement {
-    let tail = div().text_size(px(FS_META)).text_color(tier4(t));
+    let tail = div().text_size(px(fs_meta())).text_color(tier4(t));
     match Kbd::global_binding_for_action(&OpenPalette, window) {
         Some(kbd) => h_flex()
             .items_center()
@@ -119,20 +119,54 @@ fn palette_hint(t: &Theme, window: &Window) -> AnyElement {
 
 /// 统计卡：大数字 + 标签，数字按语义着色。
 ///
-/// **不加边框、不加阴影。** 这一屏已经有表格的横线当结构了，
-/// 再给每张卡套一圈框会变成"框里套框"；四张卡靠背景色与 8px 间距分组就够。
+/// **图标底块：全站唯一出处**（v4 §6 登记表第 6 行）。
+///
+/// 这是 v4 那个核心手法的落点：**图标的视觉重量靠底块面积，不靠笔画**。
+/// 想调笔画是调不了的——1830 个 lucide 里 1825 个把 `stroke-width="2"` 硬编码在
+/// SVG 里，`paint_svg` 只吃一个 `Hsla`，`Icon` 不暴露任何 stroke API（v4 §5.2、§9）。
+/// 所以"图标看着太轻"的正解是给它一块 `wash` 底，不是去找一个调粗的开关。
+///
+/// ⚠️ **一档，不许多**：40 / 圆角 12 / 内图标 20。原型里 42 / 46 混着画过，
+/// 落地统一 40（v4 §11）。多开一档的代价不是现在不好看，是下一处会开出第四档。
+///
+/// `tint` 默认给 `brand`。统计卡那种"图标色就是数字色"的变体传状态色是有意的
+/// （见 `stat_card` 的注释），**但底块一律 `wash`，不跟状态色**——
+/// 四种底色配四个语义会把"这块底是装饰"说成"这块底是状态"，而状态已经由图标自己表达了。
+pub(crate) fn glyph(t: &Theme, name: gpui_kit::assets::IconName, tint: Hsla) -> Div {
+    div()
+        .w(px(GLYPH))
+        .h(px(GLYPH))
+        .flex_shrink_0()
+        .rounded(px(GLYPH_R))
+        .bg(wash(t))
+        .flex()
+        .items_center()
+        .justify_center()
+        .shadow(sh_1(t))
+        .child(icon_box(name).text_color(tint))
+}
+
+/// 总览页顶部那四张统计卡。
 ///
 /// ## 图标位（阶段 21-8）
 ///
 /// 原来这张卡只有数字与文字，**没有图标**——所以总览页那一屏看起来
-/// "图标大大小小各种风格"，其实那一处是**压根没有**。现在补上一枚
-/// lucide 图标（16px），与左工具栏、导航轨是同一套线框、同一档尺寸。
+/// "图标大大小小各种风格"，其实那一处是**压根没有**。
+///
+/// ## 阶段 31.3：改回"有边、有薄阴影"
+///
+/// 这里原先明写「**不加边框、不加阴影**，这一屏已经有表格的横线当结构了，
+/// 再套一圈框会变成框里套框」——那是**旧画布**（#FAFAF9，与白卡只差 5/255）
+/// 下才成立的判断：那时候加边框等于给一屏再加一层灰线，越加越糊。
+/// 现在画布是冷灰蓝、卡与底差 23/255，**卡自己就浮得起来**，
+/// 那条判断的前提没了。⇒ 与 `card()` 同形态（边 `line-soft` + `SH_2`），
+/// 只是它比正文区的卡矮一档：`px(GAP_XL) / py(GAP_LG)`。
 ///
 /// ⚠️ **图标颜色跟着数字走**，不取中性灰：数字已经在用语义色表达状态
 /// （已同步绿 / 落后橙 / 分叉红），图标再给一个中性色就成了两套信号，
 /// 而"这颗图标的颜色和那个数字无关"是假的——它们说的是同一件事。
 /// 数字为 0 时**两者一起降到 tier4**：一排彩色图标配一排 0 会显得吵，
-/// 而"没东西"本来就不该有动作色。
+/// 而"没东西"本来就不该有动作色。⚠️ 但**底块始终 `wash`**，不跟着染色（见 `glyph`）。
 pub(crate) fn stat_card(
     n: usize,
     label: &str,
@@ -141,34 +175,33 @@ pub(crate) fn stat_card(
     t: &Theme,
 ) -> Div {
     let tint = if n > 0 { color } else { tier4(t) };
-    v_flex()
+    h_flex()
         .flex_1()
-        .gap(px(GAP_TIGHT))
-        .p(px(GAP_LG))
-        .rounded(px(R_LG))
-        .bg(t.colors.popover)
+        .items_center()
+        .gap(px(GAP_LG))
+        .px(px(GAP_XL))
+        .py(px(GAP_LG))
+        .rounded(px(r_xl(t)))
+        .bg(card_face(t))
+        .border_1()
+        .border_color(track(t))
+        .shadow(sh_2(t))
+        // 图标在数字**左边**：先认形状、再读数——中文语境下数字不是
+        // 段首，左边一个图标把这一行锚住，四张卡的视觉重量才对齐
+        .child(glyph(t, icon, tint))
         .child(
-            h_flex()
-                .w_full()
-                .gap(px(GAP_TIGHT))
-                .items_center()
-                // 图标在数字**左边**：先认形状、再读数——中文语境下数字不是
-                // 段首，左边一个图标把这一行锚住，四张卡的视觉重量才对齐
-                .child(icon_md(icon).text_color(tint))
-                .child(
-                    div()
-                        .text_size(px(FS_NUM))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(tint)
-                        .child(n.to_string()),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_size(px(FS_SEC))
-                        .text_color(tier3(t))
-                        .child(label.to_string()),
-                ),
+            div()
+                .text_size(px(fs_num()))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(tint)
+                .child(n.to_string()),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .text_size(px(fs_sec()))
+                .text_color(tier3(t))
+                .child(label.to_string()),
         )
 }
 
@@ -179,7 +212,7 @@ pub(crate) fn stat_card(
 /// **24 是官方 `Size::Small` 按钮的高度**，取它而不是另填一个数：
 /// 胶囊与并排的小按钮在同一行里时，行高本来就该由最高的那件决定，
 /// 胶囊跟着那颗按钮走，两类东西在一条基线上才对得齐。
-/// 字仍是 `FS_META`（11px），只改外框不动字——把字也放大就不是"胶囊加高"，
+/// 字仍是 `fs_meta()`（11px），只改外框不动字——把字也放大就不是"胶囊加高"，
 /// 是把徽章升格成第二级文字，行内会开始互相打架。
 ///
 /// **不接 `Theme`**：它一个主题字段都不用，接了只会逼调用方在 `'static`
@@ -187,8 +220,8 @@ pub(crate) fn stat_card(
 /// 颜色由调用方算好传进来，那边有主题。
 pub(crate) fn pill(text: &str, fg: Hsla, bg: Hsla) -> Div {
     div()
-        .h(px(PILL_H))
-        .px(px(8.0))
+        .h(px(pill_h()))
+        .px(px(GAP))
         .rounded_full()
         .bg(bg)
         .items_center()
@@ -199,11 +232,205 @@ pub(crate) fn pill(text: &str, fg: Hsla, bg: Hsla) -> Div {
         // 颜色变化（换 `bg` 表达状态）仍然是唯一的选中反馈。
         .child(
             div()
-                .text_size(px(FS_META))
+                .text_size(px(fs_meta()))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg)
                 .child(text.to_string()),
         )
+}
+
+/// 结论对 / 错那枚标记。**全站唯一出处**（v4 §5.7「禁止文字冒充图标」）。
+///
+/// 以前这里两处各写一个 `"✓"` / `"✗"` 字符串（`log.rs` 与 `dialogs/batch_log.rs`）。
+/// 拿字符当图标有两层坏：① 它跟着**文字**的字体与字重走，两处的字号档一不同、
+/// 字形就不同，同一屏里"对号"会长得不一样；② 读屏软件会把它**念成**
+/// "check mark"，而图标是有 `accessibility_label` 的。
+/// 机器闸 R5 现在盯着这一类（`scripts/check_design_tokens.py`）。
+///
+/// 颜色由调用方给：日志那一行的对 / 错与它后面那句结论**同色**，
+/// 在这里写死 success/danger 反而会跟调用处分家。
+pub(crate) fn status_mark(ok: bool, color: Hsla) -> AnyElement {
+    let name = if ok {
+        gpui_kit::assets::IconName::Check
+    } else {
+        gpui_kit::assets::IconName::X
+    };
+    icon_sm(name).text_color(color).into_any_element()
+}
+
+/// 卡内分隔 / 分段行：**撑到卡边那一条 `line-soft`**（v4 §6 登记表第 3 行）。
+///
+/// 以前"卡里来一条横线"各页自己拼 `border_t_1` + 一对负 margin，
+/// 于是线的颜色有 `border` 有 `track`、左右缩进有三种——同一件事画成五种样子。
+///
+/// ⚠️ **负 margin 只能是 `-GAP_XL`**，因为它抵消的就是 `card()` 那一圈内边距。
+/// 这两个数**必须一起改**：把卡内边距调成 20 而这里还写 -16，线就两头缩进，
+/// 而"线没对齐卡边"这种事抓帧看着只是"有点怪"，谁都不会去查一个常量。
+///
+/// 用法有两种，都走这一个出处：① 单纯断一段（不给 child）；
+/// ② 承载一行分段控件（仓库头下面那排页签就是这种——原型
+/// `.tabs-row { margin: 13px -18px 0; padding: 0 18px; border-top: 1px solid var(--line-soft) }`
+/// 说的正是"页签是这张卡的一部分，不是浮在卡外面的一行"）。
+pub(crate) fn card_split(t: &Theme) -> Div {
+    div()
+        .w_full()
+        .flex_shrink_0()
+        .mx(px(-GAP_XL))
+        .px(px(GAP_XL))
+        .mt(px(GAP_LG))
+        .border_t_1()
+        .border_color(track(t))
+}
+
+/// 行内告警点：**一颗 `warn` 色的告警图标 + 官方 tooltip 气泡**（v4 §7「告警」行）。
+///
+/// ⛔ 它替代的是"整块 wash 横贯全宽"那种告警条。一条提示的优先级**不该抬到
+/// 这一屏的操作之上**——用户每次进这个仓库先要吃一条横幅，而它说的往往是他
+/// 早就知道的事（2026-10-06 用户原话：「把这个警告不要，如有警告在上面仓库名
+/// 后面出现个感叹号鼠标触发气泡提示就行了」）。
+///
+/// ⚠️ **与 v4 §7 那条契约有意不符，写在 §9 能力表里**：契约原本要"18px 圆 +
+/// `warn-wash` 底块"。做不到的原因是**官方 `tooltip` 只挂在 `Button` / `Toggle`
+/// 上**（`button.rs:399`、`toggle.rs:72`），裸 `Div` 没有这个入口
+/// （`attachment.rs:305` 那个是附件条自己的）。要底块就得自绘一颗假按钮 +
+/// 自己管浮层——**那正是 v4 §6 禁止的"手拼会漂的假提示"**。
+/// ⇒ 取"官方 tooltip + 无底块"，舍"底块 + 自绘浮层"。
+/// 副作用：ghost 档带一点悬停面，看着略微像可点；它不给 `on_click`，点了什么都不发生。
+pub(crate) fn warn_dot(
+    id: &'static str,
+    text: impl Into<gpui_kit::SharedString>,
+    t: &Theme,
+    cx: &gpui_kit::App,
+) -> AnyElement {
+    Button::new(id)
+        .icon(icon_sm(gpui_kit::assets::IconName::TriangleAlert).text_color(orange(t)))
+        .custom(ghost_variant(cx))
+        .with_size(Size::Small)
+        .tooltip(text)
+        .accessibility_label("这个仓库有一条需要注意的提示")
+        .into_any_element()
+}
+
+/// 卡头右上的 ⓘ 那颗：一句**不该常驻在界面上**的说明收进气泡里。
+///
+/// 与 `warn_dot` 是同一副形状（ghost 图标键 + `.tooltip()`），差在颜色与语义：
+/// 那颗是"有件事你得知道"（橙），这颗是"想知道可以问"（三级灰）。
+///
+/// ⚠️ **为什么是按钮而不是一枚图标**：`.tooltip()` 只存在于 `Button`
+/// （`button.rs:399`）与 `Toggle`（`toggle.rs:72`）上，**裸 `Div` 没有这条路**。
+/// 要气泡就必须是按钮——`warn_dot` 那里已经为同一件事偏离过一次 v4 契约
+/// （契约画的是 wash 圆底），这里是同一个妥协的第二处，**不是新画的形态**。
+///
+/// ⚠️ **气泡靠边会不会自己翻边：未实测**（Q14）。官方 `tooltip()` 理论上选边，
+/// 而"理论上"在本项目吃过好几次亏。设置页这几颗都在卡头（偏上），风险最低；
+/// 真机验一次要挑**最靠底部**的那颗
+///
+/// ⚠️ **气泡正文是纯文本**：`tooltip()` 收的是 `SharedString`，**不走 markdown**，
+/// 所以 `**加粗**` 与 `` `代码` `` 会**连星号和反引号一起画出来**。
+/// 强调靠措辞（"只有"、"不会"），不靠符号；路径与命令名直接写裸文本
+///
+/// ⚠️ **签名与 `warn_dot` 不一样：那颗收 `cx`，这颗收 `gv`**。不是漏改——
+/// 这颗注定的调用点是设置页那几个**纯渲染函数**（`identity_page(t, st)` 这一类），
+/// 它们整条链上都没有 `&mut App`；而为了拿一颗 `gv` 把 `cx` 一路穿六层参数，
+/// 就是把"页函数"变成"要窗口的函数"。**别去统一它们**
+pub(crate) fn info_dot(
+    id: &'static str,
+    text: impl Into<gpui_kit::SharedString>,
+    t: &Theme,
+    gv: ButtonCustomVariant,
+) -> AnyElement {
+    Button::new(id)
+        .icon(icon_sm(gpui_kit::assets::IconName::Info).text_color(tier4(t)))
+        .custom(gv)
+        .with_size(Size::XSmall)
+        .tooltip(text)
+        .accessibility_label("这条的详细说明")
+        .into_any_element()
+}
+
+/// 设置页表单行的**唯一出处**：标签定宽在左、控件吃掉剩下的宽度，
+/// 行与行之间一条 `line-soft`。
+///
+/// ## 它治的是什么
+///
+/// 阶段 31.5 之前设置页有两种对齐混在一页里：`field()` 是"标签在上、
+/// 输入框在下、框拉满整宽"，而勾选区是"一列长句竖排"。同一个对话框里
+/// 两种排法，用户读不出"哪几条是一组"——那就是用户说的"排版混乱"。
+/// **两种对齐混在一页里，比哪一种都不好看**。
+///
+/// ## 为什么是个收集器而不是一个函数
+///
+/// 分隔线要"除第一行之外"，那就得知道自己是第几行。让每个调用方自己数
+/// （`if ix > 0`）等于把这条规则抄 N 遍，抄错的那一处就是"第一段没有分隔线、
+/// 第二段有"。收成 `FormRows` 之后**行数由容器知道，不由调用方记得**
+/// ——与 D78「让『忘』没有选项」是同一条手法。
+///
+/// ## 标签列宽
+///
+/// 读 `tokens::FORM_LABEL_W`（112，被"最长那条标签不断字"夹出来的数）。
+/// **别在调用方再写一个 `w(px(..))`**：那是 v4 §6 登记表要挡的那一类
+pub(crate) struct FormRows {
+    rows: Vec<(String, AnyElement)>,
+}
+
+impl FormRows {
+    pub(crate) fn new() -> Self {
+        Self { rows: Vec::new() }
+    }
+
+    /// 一行 = 一个标签 + 一个控件。控件给什么都能装（`Input`、`Switch`、
+    /// `RadioGroup`、一颗按钮，或调用方自己组的 `h_flex`）
+    pub(crate) fn row(mut self, label: impl Into<String>, control: impl IntoElement) -> Self {
+        self.rows.push((label.into(), control.into_any_element()));
+        self
+    }
+
+    pub(crate) fn build(self, t: &Theme) -> Div {
+        let last = self.rows.len().saturating_sub(1);
+        v_flex()
+            .w_full()
+            .children(self.rows.into_iter().enumerate().map(|(ix, (label, control))| {
+                h_flex()
+                    .w_full()
+                    // ⚠️ D41：`h_flex` 默认 `items_center`。这里要的正是居中
+                    // （标签与 24px 输入框、与开关同高），但**换控件时先想清楚**：
+                    // 放一颗多行说明进去，标签会跟着跑到中间去
+                    .items_center()
+                    .gap(px(GAP_LG))
+                    .py(px(GAP))
+                    // 第一行不画上沿：卡头与它之间已经有 `card` 的 12px 呼吸量，
+                    // 再来一条线就成了"卡头下面一道横杠"
+                    .when(ix > 0, |r| r.border_t_1().border_color(track(t)))
+                    .when(ix == last, |r| r.pb_0())
+                    .child(
+                        div()
+                            .w(px(FORM_LABEL_W))
+                            .flex_shrink_0()
+                            .text_size(px(fs_body()))
+                            .text_color(body(t))
+                            .child(label),
+                    )
+                    // 控件那一列必须 `flex_1 + min_w_0`：少了 `min_w_0`，
+                    // 里面一句长地址就把整列顶宽，标签列跟着被挤窄折行。
+                    //
+                    // ⚠️ `justify_end` 是这一列**唯一**的对齐口径：开关、单选组、
+                    // 按钮这类**按内容宽**的控件必须贴到行末——不然它们会紧贴在
+                    // 标签列后面、右边空一大片，一整页读下来就是"没排完"
+                    // （2026-10-07 抓帧实锤：深色主题那颗开关）。
+                    // **别在调用方再写一次 `justify_end` 或 `ml_auto`。**
+                    //
+                    // ⚠️ 反过来也成立：**想占满整列的控件必须自己写 `w_full()`**
+                    // （`Input::new(..).w_full()`，或一组 `h_flex().w_full()`）。
+                    // 这一列是按内容宽靠右的，不给 `w_full` 的话里面任何
+                    // `flex_1` 都塌成 0 宽——同一天抓帧的另一张图里，
+                    // 「手动地址」那一格只剩一个椭圆，placeholder 全看不见
+                    //
+                    // ⚠️ **别把这一列写成 `div()`**：gpui 的裸 `Div` 是列方向，
+                    // `justify_end` 会把子项往**下**推，看着像"完全没生效"。
+                    // 要横向推到行末必须是 `h_flex`
+                    .child(h_flex().flex_1().min_w_0().justify_end().child(control))
+            }))
+    }
 }
 
 pub(crate) fn auto_sync_text(e: &RepoEntry) -> String {
@@ -231,34 +458,45 @@ pub(crate) fn skeleton_bar(w: Option<gpui_kit::Pixels>, _t: &Theme) -> AnyElemen
 /// 全部是 12px 三级灰，四个地方各写一遍迟早有一处写成 13px
 pub(crate) fn meta_text(text: impl Into<String>, t: &Theme) -> Div {
     div()
-        .text_size(px(FS_SEC))
+        .text_size(px(fs_sec()))
         .text_color(tier3(t))
         .child(text.into())
 }
 
-/// 每一段的**共同外壳**：白卡 + 1px 边 + 12px 圆角 + 8px 内边距。
+/// 每一段的**共同外壳**：白卡 + 1px 边 + `R_XL` 圆角 + **16px 内边距** + 薄阴影。
 ///
 /// 2026-10-05 收口。原先有两份：`log::section`（内边距 8）与 `space_tab::section`
 /// （内边距 **16**），历史 / 变更两个页签则根本没有卡——于是五个页签摆在
 /// 一屏里，内边距有两个值、有的有壳有的没壳。早先每张卡单独手搓还长出
 /// 9 种圆角、6 种按钮高度（`AGENTS.md` 视觉规范一节记着那次扫描）。
 ///
+/// 2026-10-07 阶段 31 换成 v4 形态：内边距 `GAP` → **`GAP_XL`(16)**、
+/// 块间距 `GAP` → **`GAP_LG`(12)**、底 `popover` → **`card_face`**（语义对了：
+/// 它是"卡"不是"弹层"，两档主题里恰好同值，所以以前没露出来）、
+/// 并加上 **`sh_2`** 那层薄阴影（模糊 6px / 4% 墨，v4 §3.4——旧的 24px 厚阴影
+/// 是"卡片太厚"那句反馈的根因）。
+///
+/// ⚠️ **卡间距只允许由父容器的 `gap` 给一次**。阶段 28 踩过：给滚动容器又加了
+/// 一层 `padding-top`，叠在父 gap 上 ⇒ 头卡下 20、卡间 10，看着"就是不齐"而
+/// 根因不是数值（v4 §3.2、D90）。
+///
 /// **不给高度**：日志要 `flex_1` 吃剩余，其余各段要 `flex_shrink_0` 按内容高，
 /// 压不动。这个差别由调用方加
 pub(crate) fn card(t: &Theme) -> Div {
     v_flex()
         .w_full()
-        .gap(px(GAP))
-        .p(px(GAP))
-        .rounded(px(R_XL))
-        .bg(t.colors.popover)
+        .gap(px(GAP_LG))
+        .p(px(GAP_XL))
+        .rounded(px(r_xl(t)))
+        .bg(card_face(t))
         .border_1()
         .border_color(t.colors.border)
+        .shadow(sh_2(t))
 }
 
 /// 卡内表头：左标题（+ 可选图标位与附注），右操作组，中间一个 `flex_1` 顶开。
 ///
-/// 日志表头与说明表头本来就是同一副形状（各写一遍：24px 行高、`FS_BODY` /
+/// 日志表头与说明表头本来就是同一副形状（各写一遍：24px 行高、`fs_body()` /
 /// `MEDIUM` / 前景色、右侧 XSmall 幽灵键），历史 / 变更 / 空间三个页签原先
 /// 压根没有表头行——那一行 meta 小字 + 一颗键浮在内容上方，看着像内容的一部分。
 /// 收成一个构造器之后，"这一段的表头"在五个页签里是同一个东西。
@@ -306,14 +544,17 @@ impl CardHeader {
     pub(crate) fn build(self, t: &Theme) -> Div {
         let mut row = h_flex()
             .w_full()
-            .h(px(24.0))
+            // 阶段 28：跟着标题那一档 `fs_body()` 走。原来写死 24，
+            // 而这一行装的是 `fs_body()` 标题 + `fs_sec()` 附注 + 右侧
+            // XSmall 键——**一屏里每一张卡都有它**，切字是一屏都切
+            .h(px(row_h(fs_body())))
             .flex_shrink_0()
             .gap(px(GAP_TIGHT))
             .items_center()
             .when_some(self.leading, |r, e| r.child(e))
             .child(
                 div()
-                    .text_size(px(FS_BODY))
+                    .text_size(px(fs_body()))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(t.colors.foreground)
                     .child(self.title),
@@ -321,7 +562,7 @@ impl CardHeader {
             .when_some(self.note, |r, (text, danger)| {
                 r.child(
                     div()
-                        .text_size(px(FS_SEC))
+                        .text_size(px(fs_sec()))
                         .text_color(if danger { t.colors.danger } else { tier3(t) })
                         .child(text),
                 )
@@ -409,7 +650,7 @@ pub(crate) fn progress_readout(
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(FS_SEC))
+                        .text_size(px(fs_sec()))
                         .text_color(tier3(t))
                         .child(text.to_string()),
                 )
@@ -419,7 +660,7 @@ pub(crate) fn progress_readout(
                     row.child(
                         div()
                             .flex_shrink_0()
-                            .text_size(px(FS_SEC))
+                            .text_size(px(fs_sec()))
                             .font_family(t.mono_font_family.clone())
                             .text_color(tier3(t))
                             .child(format!("{p:.0}%")),

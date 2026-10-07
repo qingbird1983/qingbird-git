@@ -26,7 +26,26 @@
 //! 独吞这个事件。根 div 是 `size_full()`，命中区铺满整窗；本项目没有任何子元素
 //! 注册 drop 监听（官方件注册的是它们自己的 payload 类型，`TypeId` 对不上，
 //! 连 `stop_propagation` 都到不了），于是事件一路冒到根 = 拖到哪都能放。
-//! 这与旧版「拖到窗口任意位置」一致。
+//!
+//! ⚠️ **"整窗"指的是仓库页那一屏**：总览页不收（D78，判据 `state::drop_target`）。
+//!
+//! ## 归属：曾经不是参数，所以曾经会被忘掉（D78）
+//!
+//! 2026-10-06 实机 bug：在「第三方仓库」页拖文件夹进来，仓库进了「我的仓库」。
+//! 根因不在拖放这一行，而在 `repos::add_repo` 的**签名里没有"归属"这个参数**——
+//! 它造一条默认记录（`is_third_party = false`），谁要归属谁自己去补
+//! `store::set_third_party`。于是**每条添加路径都得自己记得补**：
+//!
+//! | 路径 | 补了吗 | 结果 |
+//! |---|---|---|
+//! | 本模块拖放 | **没补** | 一律进「我的」← 就是这个 bug |
+//! | `dialogs/repo.rs` 添加弹窗 | 补了，但默认值写死 `third: false` | 弹窗默认也永远勾「我的」 |
+//! | `actions.rs` 撤销移除 | 先写错再由 `restore_entry` 原样写回 | 最终对，但**落盘两次** |
+//! | `clone.rs` 克隆完成 | 没补（core 拿不到界面状态） | 一律进「我的」，通知文案也跟着说错 |
+//!
+//! 老版本（`11d56d0` 的 `api.addRepo(path)`）同样没有这个参数，**不是重写引入的回归**。
+//! 修法不是给拖放补上那一句，而是让 `add_repo(path, third)` 把归属变成**必填参数**——
+//! 漏传编译不过，编译器替我们记住（D78）。
 
 use std::path::PathBuf;
 
@@ -37,9 +56,9 @@ use gpui_kit::{div, px, AnyElement, Context, IntoElement, ParentElement, Styled,
 use qingbird_core::repos;
 use qingbird_core::run_cmd;
 
-use crate::state::{RepoView, Shell};
+use crate::state::{Group, RepoView, Shell};
 use crate::tokens::{
-    icon_md, tier3, FS_BODY, FS_SEC, GAP, GAP_LG, R_XL,
+    fs_body, fs_sec, icon_md, tier3, GAP, GAP_LG, r_xl,
 };
 
 /// 一个拖入项的判定结果。**纯逻辑，不碰磁盘**——IO 由调用方做完再传进来。
@@ -129,6 +148,12 @@ impl Shell {
     /// 转初始化向导；已经在列表里的静默跳过。
     /// **不自己写一套判据**是这个模块存在的意义——两套判据迟早漂。
     ///
+    /// ## `third` 是**传进来**的，不是这里问出来的
+    ///
+    /// 归属判据（`state::drop_target`）由 `shell.rs` 的落手闸门算好后交给本函数，
+    /// 这里**不再读一次 `side_focus`**。两处各读一次看着像小事，但改了一处
+    /// 忘了另一处就是"提示说进第三方、实际落进我的"——界面自己打自己的脸。
+    ///
     /// ⚠️ **同步执行**（`valid_repo` / `add_repo` 都碰磁盘）。这与
     /// `dialogs/repo.rs` 那条路一致，不算新引入的卡顿来源；
     /// 拖一次通常是一两个目录，代价可接受。真变成高频路径再上
@@ -136,9 +161,17 @@ impl Shell {
     pub(crate) fn on_paths_dropped(
         &mut self,
         paths: &[PathBuf],
+        third: Group,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 兜底闸门：这一屏不收就别落盘。正常路径上 `shell.rs` 已经拦过一道，
+        // 这里再来一道是因为本函数是 `pub(crate)`——以后谁从别处调它，
+        // 漏掉判据的后果是**悄悄把仓库写进配置**，那种错没人会发现。
+        if self.drop_target().is_none() {
+            return;
+        }
+        let third = third.is_third();
         let mut report = DropReport::default();
         let mut first_not_repo: Option<String> = None;
         let mut last_added: Option<String> = None;
@@ -162,8 +195,9 @@ impl Shell {
                 }
                 Verdict::CanAdd => {
                     // 与 `dialogs/repo.rs` 同一条：加成功才谈得上后面的视图/命令识别，
-                    // 失败就当没加过，绝不留下半成品
-                    match repos::add_repo(&path) {
+                    // 失败就当没加过，绝不留下半成品。
+                    // **归属随这一次写入落盘**，不再事后补第二句（D78）
+                    match repos::add_repo(&path, third) {
                         Ok(_) => {
                             report.added += 1;
                             // 新仓库的命令要重新识别（启动时只识别了列表里已有的）
@@ -204,11 +238,18 @@ impl Shell {
     }
 }
 
-/// 拖入时的落点提示。**只在真的悬着一个外部文件拖拽时画**（`self.dragging`）。
+/// 拖入时的落点提示。**只在真的悬着一个外部文件拖拽、且这一屏收拖放时画**
+/// （`self.dragging && drop_target().is_some()`，见 `shell.rs`）。
 ///
 /// 整窗一层薄纱 + 居中一张卡：语义是"这个窗口哪儿都能放"，
 /// 与 `on_drop` 挂在根 div 上是同一件事的两种说法。
-pub(crate) fn drop_overlay(t: &Theme) -> AnyElement {
+///
+/// **卡上要写出落进哪一组**（`group` 是 `drop_target` 算好的那个）：
+/// 用户的预期是"在哪个类别拖就进哪个分类"，而"归属"是**不可见的**——
+/// 不写在提示上，他就只能拖完再去列表里核对，发现错了再右键搬。
+/// 提示上写出来，这条规则就从"心里想的"变成"界面说的"。
+pub(crate) fn drop_overlay(t: &Theme, group: Group) -> AnyElement {
+    let (label, _) = group.label_and_icon();
     v_flex()
         .absolute()
         .inset_0()
@@ -220,7 +261,7 @@ pub(crate) fn drop_overlay(t: &Theme) -> AnyElement {
                 .items_center()
                 .justify_center()
                 .gap(px(GAP))
-                .rounded(px(R_XL))
+                .rounded(px(r_xl(t)))
                 .border_1()
                 .border_color(t.colors.accent)
                 .bg(t.colors.popover)
@@ -229,13 +270,13 @@ pub(crate) fn drop_overlay(t: &Theme) -> AnyElement {
                 .child(icon_md(AssetIcon::Folder).text_color(t.colors.accent))
                 .child(
                     div()
-                        .text_size(px(FS_SEC))
+                        .text_size(px(fs_sec()))
                         .text_color(t.colors.foreground)
-                        .child("松开即可添加仓库"),
+                        .child(format!("松开即加入「{label}」")),
                 )
                 .child(
                     div()
-                        .text_size(px(FS_BODY))
+                        .text_size(px(fs_body()))
                         .text_color(tier3(t))
                         .child("已在这个列表里的会跳过；不是仓库的会问你要不要初始化"),
                 ),

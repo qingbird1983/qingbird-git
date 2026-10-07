@@ -100,7 +100,7 @@ fn clean_body(t: &Theme, items: &[(String, u64)], total: u64) -> Div {
                 .gap(px(GAP_TIGHT))
                 .child(
                     div()
-                        .text_size(px(FS_NUM))
+                        .text_size(px(fs_num()))
                         .font_family(t.mono_font_family.clone())
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(t.colors.foreground)
@@ -137,7 +137,7 @@ fn clean_body(t: &Theme, items: &[(String, u64)], total: u64) -> Div {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(FS_SEC))
+                                .text_size(px(fs_sec()))
                                 .font_family(t.mono_font_family.clone())
                                 .text_color(body(t))
                                 .child(name.clone()),
@@ -158,7 +158,7 @@ fn clean_body(t: &Theme, items: &[(String, u64)], total: u64) -> Div {
                 .bg(orange_bg(t))
                 .px(px(GAP))
                 .py(px(GAP_TIGHT))
-                .text_size(px(FS_META))
+                .text_size(px(fs_meta()))
                 .text_color(orange_text(t))
                 .child(
                     "删掉的都是可以重新生成的构建产物与依赖缓存，源码不受影响。\

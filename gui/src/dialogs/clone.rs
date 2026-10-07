@@ -148,6 +148,9 @@ impl Shell {
         }
         let url = d.url.read(cx).value().to_string();
         let parent = d.parent.read(cx).value().to_string();
+        // 归属在**这里**定死：core 不认识界面，不知道用户当时在看哪一组。
+        // 取当前侧栏那一组（D78）——与拖放、添加弹窗同一个口径。
+        let third = self.side_focus.is_third();
         if url.trim().is_empty() {
             self.set_clone_error("请填写仓库地址".into(), cx);
             return;
@@ -190,7 +193,7 @@ impl Shell {
                             s.push(ev);
                         }
                     };
-                    clone::clone_repo(&url, &parent, NetMode::Auto, Some(&on_progress))
+                    clone::clone_repo(&url, &parent, NetMode::Auto, third, Some(&on_progress))
                 })
                 .await;
             let win = this.update(cx, |this, _| this.win).ok();
@@ -240,6 +243,9 @@ impl Shell {
         self.views
             .entry(out.path.clone())
             .or_insert_with(RepoView::blank);
+        // 这行以前**恒为 false**：`add_repo` 造的是默认记录，通知里的组别
+        // 于是永远说「我的仓库」。现在归属随 `clone_repo(.., third, ..)` 一起落盘（D78），
+        // 回读才有意义
         let third = self
             .entry(&out.path)
             .map(|e| e.is_third_party)
@@ -365,7 +371,7 @@ fn clone_body(this: &Entity<Shell>, gv: ButtonCustomVariant, t: &Theme, st: &Clo
             b.child(
                 div()
                     .w_full()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(t.colors.danger)
                     .child(e),
             )
@@ -410,7 +416,7 @@ fn field(t: &Theme, label: &str, input: impl IntoElement) -> Div {
         .gap(px(GAP_TIGHT))
         .child(
             div()
-                .text_size(px(FS_META))
+                .text_size(px(fs_meta()))
                 .text_color(tier4(t))
                 .child(label.to_string()),
         )
@@ -420,7 +426,7 @@ fn field(t: &Theme, label: &str, input: impl IntoElement) -> Div {
 fn hint(t: &Theme) -> Div {
     div()
         .w_full()
-        .text_size(px(FS_META))
+        .text_size(px(fs_meta()))
         .text_color(tier4(t))
         .child("支持 https / ssh / git@host:owner/repo 三种写法；私有仓库请先在本机 Git 凭证管理器里登录。")
 }
@@ -446,7 +452,7 @@ fn progress_block(t: &Theme, st: &CloneView) -> Div {
     if st.output.is_empty() {
         log = log.child(
             div()
-                .text_size(px(FS_META))
+                .text_size(px(fs_meta()))
                 .text_color(tier4(t))
                 .child(if st.running {
                     "等待远端响应…"
@@ -478,7 +484,7 @@ fn progress_block(t: &Theme, st: &CloneView) -> Div {
                         div()
                             .w(px(10.0))
                             .flex_shrink_0()
-                            .text_size(px(FS_META))
+                            .text_size(px(fs_meta()))
                             .font_weight(gpui_kit::FontWeight::MEDIUM)
                             .text_color(color)
                             .child(mark.map(|c| c.to_string()).unwrap_or_default()),
@@ -487,7 +493,7 @@ fn progress_block(t: &Theme, st: &CloneView) -> Div {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(FS_META))
+                            .text_size(px(fs_meta()))
                             .text_color(color)
                             .child(rest.to_string()),
                     ),

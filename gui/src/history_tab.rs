@@ -132,7 +132,7 @@ fn empty_history(t: &Theme, title: &str, detail: &str) -> AnyElement {
                 .content(
                     EmptyContent::new().child(
                         div()
-                            .text_size(px(FS_META))
+                            .text_size(px(fs_meta()))
                             .text_color(if detail.is_empty() {
                                 tier4(t)
                             } else {
@@ -200,7 +200,7 @@ impl ListDelegate for CommitDelegate {
                     let when = when.clone();
                     move |_, _| {
                         div()
-                            .text_size(px(FS_META))
+                            .text_size(px(fs_meta()))
                             .text_color(tier4(&t))
                             .child(when.clone())
                             .into_any_element()
@@ -215,7 +215,7 @@ impl ListDelegate for CommitDelegate {
                             div()
                                 .w(px(64.0))
                                 .flex_shrink_0()
-                                .text_size(px(FS_META))
+                                .text_size(px(fs_meta()))
                                 .font_family(t.mono_font_family.clone())
                                 .text_color(tier3(&t))
                                 .child(hash),
@@ -224,7 +224,7 @@ impl ListDelegate for CommitDelegate {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(px(FS_BODY))
+                                .text_size(px(fs_body()))
                                 .text_color(body(&t))
                                 .truncate()
                                 .child(subject),
@@ -308,7 +308,7 @@ impl Shell {
             // 不能把外面的 Entity 移走 —— 每个分支各自 clone 一份
             window.open_sheet(cx, move |sheet, _w, _cx| {
                 sheet
-                    .title(div().text_size(px(FS_TITLE)).child(title.clone()))
+                    .title(div().text_size(px(fs_title())).child(title.clone()))
                     .size(px(SHEET_W))
                     .on_close({
                         let on_close = on_close.clone();
@@ -509,7 +509,7 @@ fn sheet_body(
                 .gap(px(GAP_TIGHT))
                 .child(
                     div()
-                        .text_size(px(FS_BODY))
+                        .text_size(px(fs_body()))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(t.colors.foreground)
                         .child(detail.subject.clone()),
@@ -530,7 +530,7 @@ fn sheet_body(
                 .when(detail.truncated, |row| {
                     row.child(
                         div()
-                            .text_size(px(FS_META))
+                            .text_size(px(fs_meta()))
                             .text_color(orange_text(t))
                             .child("这个提交改的文件太多，列表只显示前一部分。"),
                     )
@@ -595,7 +595,7 @@ fn file_col(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(FS_SEC))
+                        .text_size(px(fs_sec()))
                         .font_family(t.mono_font_family.clone())
                         .text_color(if cur { t.colors.foreground } else { body(t) })
                         .truncate()
@@ -619,14 +619,14 @@ fn file_stat(f: &CommitFile, t: &Theme) -> AnyElement {
             .gap(px(GAP_TIGHT))
             .child(
                 div()
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .font_family(t.mono_font_family.clone())
                     .text_color(t.colors.success)
                     .child(format!("+{a}")),
             )
             .child(
                 div()
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .font_family(t.mono_font_family.clone())
                     .text_color(t.colors.danger)
                     .child(format!("-{d}")),
@@ -636,7 +636,7 @@ fn file_stat(f: &CommitFile, t: &Theme) -> AnyElement {
         // 会让人以为这文件根本没被改
         _ => div()
             .flex_shrink_0()
-            .text_size(px(FS_META))
+            .text_size(px(fs_meta()))
             .text_color(tier4(t))
             .child("二进制")
             .into_any_element(),
@@ -653,7 +653,7 @@ fn patch_pane(t: &Theme, st: &HistoryState) -> AnyElement {
             .justify_center()
             .child(
                 div()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(tier4(t))
                     .child("左边点一个文件，看这次提交对它改了什么"),
             )
@@ -667,7 +667,7 @@ fn patch_pane(t: &Theme, st: &HistoryState) -> AnyElement {
             .justify_center()
             .child(
                 div()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(tier4(t))
                     .child(if st.loading {
                         "正在读取…"
@@ -692,7 +692,7 @@ fn patch_pane(t: &Theme, st: &HistoryState) -> AnyElement {
                 .gap(px(GAP))
                 .child(
                     div()
-                        .text_size(px(FS_SEC))
+                        .text_size(px(fs_sec()))
                         .font_family(t.mono_font_family.clone())
                         .text_color(t.colors.foreground)
                         .child(patch.path.clone()),
@@ -701,7 +701,7 @@ fn patch_pane(t: &Theme, st: &HistoryState) -> AnyElement {
                 .when(patch.truncated, |row| {
                     row.child(
                         div()
-                            .text_size(px(FS_META))
+                            .text_size(px(fs_meta()))
                             .text_color(orange_text(t))
                             .child("diff 文本太长，已截断"),
                     )
@@ -709,7 +709,7 @@ fn patch_pane(t: &Theme, st: &HistoryState) -> AnyElement {
                 .when(lines.len() > shown, |row| {
                     row.child(
                         div()
-                            .text_size(px(FS_META))
+                            .text_size(px(fs_meta()))
                             .text_color(orange_text(t))
                             .child(format!("只显示前 {shown} 行")),
                     )
@@ -764,7 +764,7 @@ fn diff_line(no: usize, text: &str, t: &Theme) -> AnyElement {
                 .flex_shrink_0()
                 .pr(px(GAP_TIGHT))
                 .text_right()
-                .text_size(px(FS_META))
+                .text_size(px(fs_meta()))
                 .font_family(t.mono_font_family.clone())
                 .text_color(tier4(t))
                 .child(no.to_string()),
@@ -774,7 +774,7 @@ fn diff_line(no: usize, text: &str, t: &Theme) -> AnyElement {
                 .flex_1()
                 .min_w_0()
                 .whitespace_nowrap()
-                .text_size(px(FS_META))
+                .text_size(px(fs_meta()))
                 .font_family(t.mono_font_family.clone())
                 .text_color(ink)
                 .child(text.to_string()),

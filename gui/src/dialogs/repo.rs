@@ -38,7 +38,7 @@ pub(crate) fn dlg_body(
             .gap(px(GAP_TIGHT))
             .child(
                 div()
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child(label.to_string()),
             )
@@ -51,14 +51,14 @@ pub(crate) fn dlg_body(
             .gap(px(GAP_TIGHT))
             .child(
                 div()
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child("路径"),
             )
             .child(
                 div()
                     .w_full()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .font_family(t.mono_font_family.clone())
                     .text_color(tier3(t))
                     .child(p.clone()),
@@ -77,7 +77,7 @@ pub(crate) fn dlg_body(
                 .gap(px(GAP_TIGHT))
                 .child(
                     div()
-                        .text_size(px(FS_META))
+                        .text_size(px(fs_meta()))
                         .text_color(tier4(t))
                         .child("归属"),
                 )
@@ -122,7 +122,7 @@ pub(crate) fn dlg_body(
             b.child(
                 div()
                     .w_full()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(t.colors.danger)
                     .child(e),
             )
@@ -205,6 +205,11 @@ impl Shell {
 
     /// 打开「添加仓库」。没有原生目录选择对话框可用（gpui-kit 不带，
     /// 也不为它引新依赖），走「粘贴路径 + 校验」：资源管理器里复制文件地址即可。
+    ///
+    /// **归属默认取当前侧栏那一组**（D78）：用户的规则是"在哪个类别加就进当前分类"。
+    /// 早先这里写死 `false`，于是站在「第三方仓库」页点「添加仓库」，
+    /// 弹窗里默认勾的还是「我的仓库」——得再手点一下才对。
+    /// 弹窗里那两颗键仍然留着，用户随时能改回来。
     pub(crate) fn open_add_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dlg = Some(RepoDialog {
             editing: None,
@@ -212,7 +217,7 @@ impl Shell {
                 InputState::new(window, cx).placeholder("粘贴仓库文件夹路径，如 F:/AIwork/xxx")
             }),
             name_input: cx.new(|cx| InputState::new(window, cx).placeholder("留空用目录名")),
-            third: false,
+            third: self.side_focus.is_third(),
             error: None,
             init: None,
         });
@@ -381,18 +386,18 @@ impl Shell {
                     self.enter_init(path, cx);
                     return false;
                 }
-                let list = match repos::add_repo(&path) {
+                let list = match repos::add_repo(&path, third) {
                     Ok(l) => l,
                     Err(e) => {
                         self.set_dlg_error(&e, cx);
                         return false;
                     }
                 };
-                // 名字与归属都只在添加成功之后落盘，别留半成品
+                // 名字与归属都只在添加成功之后落盘，别留半成品。
+                // ⚠️ **归属随 `add_repo` 一次写进去了**（D78），不再补第二句
                 if !name.is_empty() {
                     let _ = repos::rename_repo(&path, &name);
                 }
-                let _ = qingbird_core::store::set_third_party(&path, third);
                 self.repos = repos::list_repos();
                 let _ = list;
                 // 新仓库的命令要重新识别（启动时只识别了列表里已有的）

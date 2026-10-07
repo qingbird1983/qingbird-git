@@ -106,7 +106,7 @@ fn sync_body(t: &Theme, this: &Entity<Shell>, cx: &mut App) -> Div {
         .child(
             div()
                 .w_full()
-                .text_size(px(FS_META))
+                .text_size(px(fs_meta()))
                 .text_color(tier4(t))
                 .child("关掉之后不再自动检测。要接上定时，先在仓库头确认有上游分支。"),
         )
@@ -149,7 +149,7 @@ fn sync_body(t: &Theme, this: &Entity<Shell>, cx: &mut App) -> Div {
             b.child(
                 div()
                     .w_full()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(t.colors.danger)
                     .child(e),
             )
@@ -234,7 +234,7 @@ fn when_daily(
             .gap(px(GAP))
             .child(
                 div()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(tier3(t))
                     .child("每天几点"),
             )
@@ -242,7 +242,7 @@ fn when_daily(
             .child(div().flex_1())
             .child(
                 div()
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .text_color(if ok { tier4(t) } else { t.colors.danger })
                     .child(if ok {
                         "本地时区，24 小时制"
@@ -292,7 +292,7 @@ fn last_result(e: Option<&RepoEntry>, t: &Theme) -> Div {
                 .items_center()
                 .gap(px(GAP_TIGHT))
                 .child(div().text_color(ink).child(icon_sm(AssetIcon::Clock)))
-                .child(div().text_size(px(FS_META)).text_color(ink).child(text))
+                .child(div().text_size(px(fs_meta())).text_color(ink).child(text))
                 .into_any_element(),
         );
     }
@@ -316,7 +316,7 @@ fn last_result(e: Option<&RepoEntry>, t: &Theme) -> Div {
 fn hint(t: &Theme, text: &str) -> Div {
     div()
         .w_full()
-        .text_size(px(FS_META))
+        .text_size(px(fs_meta()))
         .text_color(tier4(t))
         .child(text.to_string())
 }

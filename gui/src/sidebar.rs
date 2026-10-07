@@ -209,7 +209,7 @@ impl Shell {
             //  行高那些是官方 28px 档，不在这里另开一档）
             .label_style(
                 gpui_kit::StyleRefinement::default()
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .font_weight(FontWeight::MEDIUM),
             )
             .suffix({
@@ -248,7 +248,7 @@ impl Shell {
                                 // —— 都是 ghost 图标按钮的选中态。官方 ghost 选中的底
                                 // 走 `button.active.background`，theme.json 没配、落基座
                                 // 兜底的深灰。理由见 tokens.rs。
-                                .when(filter_open, |b| b.bg(selected_mask(&t)))
+                                .when(filter_open, |b| b.bg(wash(&t)))
                                 .with_size(Size::Small)
                                 .tooltip("筛选仓库")
                                 .accessibility_label("筛选仓库")
@@ -655,20 +655,20 @@ fn no_repos(group: Group, other_has_repos: bool, t: &Theme) -> Div {
         .gap(px(GAP_TIGHT))
         .child(
             div()
-                .text_size(px(FS_SEC))
+                .text_size(px(fs_sec()))
                 .text_color(tier3(t))
                 .child(format!("{label}里还没有仓库")),
         )
         .child(
             div()
-                .text_size(px(FS_META))
+                .text_size(px(fs_meta()))
                 .text_color(tier4(t))
                 .child("用下面的「添加仓库」加一个"),
         )
         .when(other_has_repos, |col| {
             col.child(
                 div()
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child("也可以从左边导航轨切到另一组"),
             )

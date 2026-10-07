@@ -337,7 +337,7 @@ impl Shell {
             .label(label)
             .custom(ghost_variant(cx))
             .with_size(Size::XSmall)
-            .when(is_cur, |b| b.bg(selected_mask(t)))
+            .when(is_cur, |b| b.bg(wash(t)))
             .tooltip(if is_cur {
                 "正在显示这一份"
             } else {
@@ -539,7 +539,7 @@ impl Shell {
                     .content(
                         EmptyContent::new()
                             .child(
-                                div().text_size(px(FS_META)).text_color(tier4(t)).child(
+                                div().text_size(px(fs_meta())).text_color(tier4(t)).child(
                                     "仓库根目录里没找到 README.md / README.txt / README.rst。",
                                 ),
                             )

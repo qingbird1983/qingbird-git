@@ -112,10 +112,10 @@ pub(crate) fn changes_list(
             .w_full()
             .items_center()
             .gap(px(GAP_TIGHT))
-            .py(px(16.0))
+            .py(px(GAP_XL))
             .child(
                 div()
-                    .text_size(px(FS_BODY))
+                    .text_size(px(fs_body()))
                     .text_color(t.colors.success)
                     .child("工作区干净，没有未提交的改动"),
             )
@@ -143,7 +143,7 @@ pub(crate) fn changes_list(
                     .px(px(GAP))
                     .flex_shrink_0()
                     .items_center()
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child(format!("还有 {rest} 个文件…")),
             )
@@ -163,7 +163,7 @@ fn change_row(c: &ChangeEntry, t: &Theme) -> Div {
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(FS_SEC))
+                .text_size(px(fs_sec()))
                 .font_family(t.mono_font_family.clone())
                 .text_color(body(t))
                 .truncate()
@@ -202,7 +202,7 @@ fn status_mark(c: &ChangeEntry, t: &Theme) -> Div {
         .child(div().text_color(ink).child(icon_sm(icon)))
         .child(
             div()
-                .text_size(px(FS_META))
+                .text_size(px(fs_meta()))
                 .text_color(tier4(t))
                 .child(word.to_string()),
         )

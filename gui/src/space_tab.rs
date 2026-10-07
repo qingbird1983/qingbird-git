@@ -104,7 +104,7 @@ impl Shell {
                         .gap(px(GAP))
                         .child(
                             div()
-                                .text_size(px(FS_NUM))
+                                .text_size(px(fs_num()))
                                 .font_family(t.mono_font_family.clone())
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(t.colors.foreground)
@@ -144,14 +144,14 @@ impl Shell {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(px(FS_SEC))
+                                .text_size(px(fs_sec()))
                                 .font_family(t.mono_font_family.clone())
                                 .text_color(body(t))
                                 .truncate()
                                 .child(f.name.clone()),
                             div()
                                 .flex_shrink_0()
-                                .text_size(px(FS_SEC))
+                                .text_size(px(fs_sec()))
                                 .text_color(tier3(t))
                                 .child(space::human_bytes(f.size)),
                         )
@@ -199,11 +199,11 @@ impl Shell {
                                 .gap(px(GAP_TIGHT))
                                 .child(
                                     div()
-                                        .text_size(px(FS_SEC))
+                                        .text_size(px(fs_sec()))
                                         .text_color(body(t))
                                         .child(name.clone()),
                                 )
-                                .child(div().text_size(px(FS_META)).text_color(tier4(t)).child(
+                                .child(div().text_size(px(fs_meta())).text_color(tier4(t)).child(
                                     format!(
                                         "清理后需要重新构建 · 约 {}",
                                         space::human_bytes(d.size)
@@ -248,13 +248,13 @@ impl Shell {
                                 .gap(px(GAP_TIGHT))
                                 .child(
                                     div()
-                                        .text_size(px(FS_SEC))
+                                        .text_size(px(fs_sec()))
                                         .text_color(body(t))
                                         .child(name.clone()),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(FS_META))
+                                        .text_size(px(fs_meta()))
                                         .text_color(if i.tracked {
                                             orange_text(t)
                                         } else {
@@ -511,7 +511,7 @@ impl Shell {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .font_family(t.mono_font_family.clone())
                     .text_color(body(t))
                     .child(e.name.clone()),
@@ -590,7 +590,7 @@ fn row<L: IntoElement, R: IntoElement>(left: L, right: R) -> Div {
 fn hint_line(text: &str, t: &Theme) -> AnyElement {
     div()
         .w_full()
-        .text_size(px(FS_META))
+        .text_size(px(fs_meta()))
         .text_color(tier4(t))
         .child(text.to_string())
         .into_any_element()
@@ -599,7 +599,7 @@ fn hint_line(text: &str, t: &Theme) -> AnyElement {
 fn error_line(text: &str, t: &Theme) -> AnyElement {
     div()
         .w_full()
-        .text_size(px(FS_SEC))
+        .text_size(px(fs_sec()))
         .text_color(t.colors.danger)
         .child(text.to_string())
         .into_any_element()

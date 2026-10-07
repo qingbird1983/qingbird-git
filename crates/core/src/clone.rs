@@ -39,6 +39,10 @@ pub struct CloneOutcome {
 /// `on_progress` 传 `None` 时进度静默丢弃。**这个函数是阻塞的**，
 /// 调用方必须放后台线程。
 ///
+/// `third` 是克隆完成后那条记录落进哪一组（`false` = 我的）。**由调用方决定**——
+/// core 不认识界面，不知道用户当时在看哪一组，所以这个判断必须在传进来之前做完。
+/// 它最终交给 `repos::add_repo` 的同名参数，不在这里另判一次（D78）。
+///
 /// 失败时返回**一句中文结论 + git 原始 stderr**：结论给"该改什么"，
 /// stderr 给"到底发生了什么"，两者都要——只给结论用户没法自查，
 /// 只给 stderr 用户看不懂。
@@ -46,6 +50,7 @@ pub fn clone_repo(
     url: &str,
     parent_dir: &str,
     mode: NetMode,
+    third: bool,
     on_progress: Option<&dyn Fn(&ProgressEvent)>,
 ) -> Result<CloneOutcome, String> {
     let Some(_guard) = sync::begin_user_op() else {
@@ -88,8 +93,8 @@ pub fn clone_repo(
 
     let path = dest.to_string_lossy().to_string();
     // 复用「添加仓库」那一条路径：校验 .git 存在、判重、落盘都在里面，
-    // 这里不重复实现一遍
-    repos::add_repo(&path)?;
+    // 这里不重复实现一遍。归属跟着 `third` 一起落，不在这里补第二句
+    repos::add_repo(&path, third)?;
     // 刚克隆完的仓库就是"刚用过"，不置的话它会按 added_at 排到列表末尾，
     // 而它明明是用户此刻最想看的那一个
     repos::touch_repo(&path);

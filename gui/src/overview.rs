@@ -206,7 +206,7 @@ fn cell(col_ix: usize, row: &OvRow, t: &Theme) -> AnyElement {
     let num = |s: String| {
         div()
             .font_family(t.mono_font_family.clone())
-            .text_size(px(FS_SEC))
+            .text_size(px(fs_sec()))
             .text_color(tier3(t))
             .child(s)
     };
@@ -224,20 +224,20 @@ fn cell(col_ix: usize, row: &OvRow, t: &Theme) -> AnyElement {
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(FS_BODY))
+                    .text_size(px(fs_body()))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(t.colors.foreground)
                     .child(row.name.clone()),
             )
             .into_any_element(),
         1 => div()
-            .text_size(px(FS_SEC))
+            .text_size(px(fs_sec()))
             .text_color(tier3(t))
             .child(if row.third { "第三方" } else { "我的" })
             .into_any_element(),
         2 => div()
             .font_family(t.mono_font_family.clone())
-            .text_size(px(FS_SEC))
+            .text_size(px(fs_sec()))
             .text_color(tier3(t))
             .child(if row.branch.is_empty() {
                 "—".to_string()
@@ -247,7 +247,11 @@ fn cell(col_ix: usize, row: &OvRow, t: &Theme) -> AnyElement {
             .into_any_element(),
         3 => {
             let (_, fg, bg) = crate::sidebar::badge_tone(row.bucket, row.changed, row.third, t);
-            pill(&row.status, fg, bg).into_any_element()
+            // ⚠️ **外面必须包一层 `h_flex`**：单元格里那个 `Div` 会被给到整列宽，
+            // 于是这枚胶囊**铺满整列**、看着像一格输入框（阶段 31.4 抓帧查实）。
+            // 修在调用侧，不给 `pill` 加宽度开关——它在侧栏行后缀那一格是好的，
+            // 那里父容器本身就是按内容排的横排
+            h_flex().child(pill(&row.status, fg, bg)).into_any_element()
         }
         4 => num(count_cell(row.behind)).into_any_element(),
         5 => num(count_cell(row.ahead)).into_any_element(),
@@ -341,7 +345,7 @@ impl Shell {
             .h(px(160.0))
             .p(px(GAP_LG))
             .gap(px(GAP_TIGHT))
-            .rounded(px(R_LG))
+            .rounded(px(r_lg(t)))
             .bg(t.colors.popover)
             .border_1()
             .border_color(t.colors.border)
@@ -351,14 +355,14 @@ impl Shell {
                     .gap(px(GAP))
                     .child(
                         div()
-                            .text_size(px(FS_BODY))
+                            .text_size(px(fs_body()))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(t.colors.foreground)
                             .child("提交活跃度"),
                     )
                     .child(
                         div()
-                            .text_size(px(FS_META))
+                            .text_size(px(fs_meta()))
                             .text_color(tier4(t))
                             .child(format!("近 {ACTIVITY_DAYS} 天 · 全部仓库合计")),
                     ),
@@ -371,7 +375,7 @@ impl Shell {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child("近两周没有提交记录"),
             );
@@ -525,14 +529,14 @@ impl Shell {
             .gap(px(GAP_TIGHT))
             .child(
                 div()
-                    .text_size(px(FS_HEAD))
+                    .text_size(px(fs_head()))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(t.colors.foreground)
                     .child("总览"),
             )
             .child(
                 div()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(tier3(t))
                     .child(format!(
                         "{} 个仓库 · 我的 {} · 第三方 {}",
@@ -547,7 +551,7 @@ impl Shell {
                 .w_full()
                 .flex_1()
                 .min_h_0()
-                .rounded(px(R_LG))
+                .rounded(px(r_lg(t)))
                 .bg(t.colors.popover)
                 .border_1()
                 .border_color(t.colors.border)
@@ -558,7 +562,7 @@ impl Shell {
                         .content(
                             EmptyContent::new().child(
                                 div()
-                                    .text_size(px(FS_META))
+                                    .text_size(px(fs_meta()))
                                     .text_color(tier4(t))
                                     .child("回到「我的仓库」加一个，总览才有东西可看"),
                             ),
@@ -570,7 +574,7 @@ impl Shell {
                 .w_full()
                 .flex_1()
                 .min_h_0()
-                .rounded(px(R_LG))
+                .rounded(px(r_lg(t)))
                 .overflow_hidden()
                 .border_1()
                 .border_color(t.colors.border)

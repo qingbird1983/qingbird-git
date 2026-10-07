@@ -30,7 +30,10 @@ use std::rc::Rc;
 
 use gpui_kit::App;
 use gpui_kit::component::{Theme, ThemeConfig, ThemeSet};
+use gpui_kit::px;
 use qingbird_core::store;
+
+use crate::tokens::UiScale;
 
 /// `theme.json` 里浅色那套的名字
 pub(crate) const LIGHT: &str = "qingbird-light";
@@ -73,15 +76,32 @@ pub(crate) fn config(name: &str) -> Rc<ThemeConfig> {
 }
 
 /// 应用某一套。**运行期也走这里**（设置里那颗开关）
-pub(crate) fn apply(name: &str, cx: &mut App) {
+///
+/// **字号跟着界面字号档走**：官方件（Button / Input / Table）的文字读的是
+/// `Theme.font_size`，而我们自己的 182 处文字读的是 `tokens::fs_*()`——
+/// **两条路**。只改其中一条 ⇒ 官方件与自绘文字差一档，一屏里两种字号
+/// 混着，比"整体偏小"更难看。所以 `font_size` 在这里覆写，
+/// 取值就是那一档的**正文**字号（`UiScale::base_font`）。
+///
+/// 写法照基座故事应用那份（`story/src/title_bar.rs:125`）：
+/// `Theme::update` 之后直接改 `theme.font_size`。
+pub(crate) fn apply(name: &str, scale: UiScale, cx: &mut App) {
     let cfg = config(name);
-    Theme::update(cx, |t| t.apply_config(&cfg));
+    let base = px(scale.base_font());
+    Theme::update(cx, |t| {
+        t.apply_config(&cfg);
+        t.font_size = base;
+    });
 }
 
-/// 启动时用：读配置里 `settings.theme`。
+/// 启动时用：读配置里 `settings.theme` 与 `settings.ui_scale`。
 ///
-/// **读不到 / 是 `system` / 别的值都落浅色**，见模块头
+/// **读不到 / 是 `system` / 别的值都落浅色**，见模块头；
+/// 字号档同理落中档（`UiScale::from_stored` 认不出一律给中档）
 pub(crate) fn apply_saved(cx: &mut App) {
-    let saved = store::load().settings.theme;
-    apply(if saved == DARK { DARK } else { LIGHT }, cx);
+    let s = store::load().settings;
+    let scale = UiScale::from_stored(&s.ui_scale);
+    // 运行期载体（`tokens::fs_*()` 读它）也要设——`apply` 只管官方件那一条路
+    crate::tokens::set_ui_scale(scale);
+    apply(if s.theme == DARK { DARK } else { LIGHT }, scale, cx);
 }

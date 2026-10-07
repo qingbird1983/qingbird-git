@@ -23,15 +23,15 @@ use gpui_kit::component::{Disableable as _, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, AnyElement, ClipboardItem, Context, Div, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    ParentElement, ScrollHandle, StatefulInteractiveElement, Styled,
 };
 use qingbird_core::run_cmd::Slot;
 
 use crate::os;
-use crate::shell::{OpenTerminal, StopOp};
+use crate::keys::{OpenTerminal, StopOp};
 use crate::state::*;
 use crate::widgets::{
-    card, ghost_variant, meta_text, progress_readout, progress_text, vdivider, CardHeader,
+    card, ghost_variant, meta_text, progress_readout, progress_text, CardHeader,
 };
 use crate::tokens::*;
 
@@ -104,15 +104,20 @@ impl Shell {
 }
 
 impl Shell {
-    /// 表头：左边「日志」，右边五颗键。
+    /// 表头：左边「日志」，右边三颗键（复制 / 清空 │ 终端）。
     ///
-    /// **五颗键用一条竖细线分成两组**：左边三颗（复制 / 清空 / 终端）是
-    /// "看刚才那次结果"，右边两颗（开发运行 / 编译构建）是"接着再跑一个"。
-    /// 不分组的话五颗同规格的键排一行，视线扫过去分不出哪颗是哪颗
+    /// **阶段 31.4 删掉了右边那两颗「开发运行」「编译构建」**（用户：
+    /// 「仓库名后面加了开发运行和编译构建两个按钮，下面日志右上角的同功能按钮
+    /// 就可以取消了」）。它们与仓库头那一对是**同一功能的两个入口**——
+    /// 同一动作一屏两个入口本来就是设计缺陷（v4 铁律 3），而且头卡那对
+    /// 是常驻的、切页签不重画，日志这一对只在概览页签出现，**留着只会让人
+    /// 以为这两个地方做的事不一样**。
+    /// ⚠️ 分组用的那条 `vdivider` 一起删：它分的是"看结果 │ 接着跑"两组，
+    /// 右边那组没了，一条竖线挂在末尾就是句没头没尾的话。
     fn log_header(&self, path: &str, lg: &LogState, t: &Theme, cx: &mut Context<Self>) -> Div {
         let text = lg.lines.join("\n");
         let has_text = !text.is_empty();
-        let mut hdr = CardHeader::new("日志")
+        let hdr = CardHeader::new("日志")
             .right(
                 Button::new("log-copy")
                     .label("复制")
@@ -136,7 +141,6 @@ impl Shell {
                     .on_click(cx.listener(|this, _, _, cx| this.clear_log(cx)))
                     .into_any_element(),
             )
-            .right(vdivider(t).into_any_element())
             .right(
                 // 官方 `tooltip_with_action` 会自己去 keymap 里查 `Ctrl T`
                 // 并画成 `Kbd` 角标。手写「（Ctrl T）」进文案的话，
@@ -157,24 +161,6 @@ impl Shell {
                     })
                     .into_any_element(),
             );
-        for (slot, label) in QUICK_SLOTS {
-            let cmd = self.effective_cmd(path, slot);
-            hdr = hdr.right(
-                Button::new(SharedString::from(format!("log-cmd-{}", slot.key())))
-                    .label(label)
-                    .custom(ghost_variant(cx))
-                    .with_size(Size::XSmall)
-                    .loading(lg.running && lg.op == Some(Op::Cmd(slot)))
-                    .disabled(lg.running)
-                    .tooltip(SharedString::from(if cmd.is_empty() {
-                        "这个仓库还没认出这条命令，按 Ctrl K 搜「编辑常用命令」里填".to_string()
-                    } else {
-                        cmd
-                    }))
-                    .on_click(cx.listener(move |this, _, _, cx| this.run_slot(slot, cx)))
-                    .into_any_element(),
-            );
-        }
         hdr.build(t)
     }
 }
@@ -215,7 +201,9 @@ impl Shell {
         let spin = Spinner::new().color(tier3(t)).with_size(Size::XSmall);
         h_flex()
             .w_full()
-            .h(px(20.0))
+            // 阶段 28：跟着这行 `fs_sec()` 的字走。原来写死 20，
+            // 中档 14px 的字上下只剩 3px，右侧那颗「停止」也挤着
+            .h(px(row_h(fs_sec())))
             .flex_shrink_0()
             .gap(px(GAP_TIGHT))
             .items_center()
@@ -225,7 +213,7 @@ impl Shell {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(if lg.running { tier3(t) } else { tier4(t) })
                     .child(text),
             )
@@ -338,7 +326,7 @@ pub(crate) fn output_stream(
             .justify_center()
             .child(
                 div()
-                    .text_size(px(FS_META))
+                    .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child(empty_hint.to_string()),
             )
@@ -368,7 +356,7 @@ pub(crate) fn output_stream(
                     div()
                         .w(px(10.0))
                         .flex_shrink_0()
-                        .text_size(px(FS_META))
+                        .text_size(px(fs_meta()))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(color)
                         .child(mark.map(|c| c.to_string()).unwrap_or_default()),
@@ -377,7 +365,7 @@ pub(crate) fn output_stream(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(FS_META))
+                        .text_size(px(fs_meta()))
                         .text_color(if mark.is_some() { tier3(t) } else { color })
                         .child(body.to_string()),
                 ),
@@ -402,7 +390,7 @@ impl Shell {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_size(px(FS_SEC))
+                            .text_size(px(fs_sec()))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(t.colors.danger)
                             .child("✗"),
@@ -411,7 +399,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(FS_SEC))
+                            .text_size(px(fs_sec()))
                             .text_color(t.colors.danger)
                             .child(e.clone()),
                     ),
@@ -431,16 +419,13 @@ impl Shell {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_size(px(FS_SEC))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(color)
-                            .child(if *ok { "✓" } else { "✗" }),
+                            .child(crate::widgets::status_mark(*ok, color)),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(FS_SEC))
+                            .text_size(px(fs_sec()))
                             .text_color(tier3(t))
                             .child(msg.clone()),
                     )

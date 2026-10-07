@@ -196,52 +196,52 @@ impl Shell {
             .h_full()
             .bg(t.colors.background)
             .p(px(GAP_LG))
-            // 阶段 21-7：**头部与页签之间那一处收紧**（`GAP` 而非 `GAP_LG`）。
+            // ⚠️ **卡间距只由这一条 `gap` 给一次**（v4 §3.2、D90）。
+            // 阶段 28 踩过的那次：给滚动容器又加了一层 `padding-top`，叠在这个
+            // gap 上 ⇒ 头卡下 20、卡间 10，用户报"间距太大又不一致"，而根因
+            // 不是那个数字。**新加一层容器前先数这个间距被谁写了几次。**
             //
-            // ⚠️ **别把整条 `.gap()` 都改小**：它同时管着「页签 → 内容区」，
-            // 那两样是**不同的东西**之间的分组，用 `GAP_LG` 没错；
-            // 而「仓库头 → 页签」这一处管的是**一个整体的头部与其下的分段**，
-            // 12px 在这里就是用户反馈的"离得太远"——仓库头自己已经是
-            // 一个 v_flex 收好的块，页签是它的下级，两者该更紧。
-            //
-            // 这与 tokens.rs 里 `GAP_DENSE` / `GAP_TIGHT` 的分工是同一条：
-            // **同类相邻**与**不同物分组**不是同一个数，早先混用就会出现
-            // "标题离说明比离正文还近"。
-            .gap(px(GAP))
-            .child(self.repo_head(path, t, cx))
+            // 阶段 31.4：外层 gap 从 `GAP`(8) 提到 **`GAP_LG`(12)** ——
+            // 头卡与下面的内容现在是两张平级的卡，平级之间就该用分组档。
+            .gap(px(GAP_LG))
+            // **仓库头从"浮在画布上的一堆文字"改成一张卡**（用户：「右边上面
+            // 仓库名那块感觉空了一大块，感觉也要加上卡片底」）。
+            // 页签一并**收进这张卡的底部**（v4 §7「页签：下划线式，收进头卡底部」）——
+            // 它是这张卡的下级导航，浮在卡外面就变成"一屏两个头"。
+            // ⚠️ 这里替换掉的是阶段 21-7 那条"头部与页签之间用 `GAP` 收紧"的
+            // 处理：那句话说的是"页签是仓库头的下级"，**判断没错，位置错了**——
+            // 收紧到 8px 仍然救不了"页签浮在卡外"，收进卡里才是同一个意思的成立形态。
             .child(
-                // 页签间距（用户要求放大）走**官方的 `Size` 档**，不自己加
-                // `gap()`：`TabBar` 的 `gap` 是按 `(variant, size)` 写死的
-                // （`tab_bar.rs:394-399`），公开 API 没有单独调它的口。
-                // `Underline` 档下 Small→Medium 的实际变化：
-                //   gap 12→16、页签高 22→26、**字号不变**（两档都 `text_sm()`，
-                //   `tab.rs:803-807` 的 `_` 臂），`inner_paddings` 恒为 0
-                //   （`tab.rs:80-82`，Underline 不吃水平内边距）。
-                // 也就是"要的就是间距变大"，而唯一会跟着变的多出来 4px 高
-                // 正好把页签从贴字变成有呼吸的一行。
-                TabBar::new("detail-tabs")
-                    .w_full()
-                    .flex_shrink_0()
-                    .with_variant(TabVariant::Underline)
-                    .with_size(Size::Medium)
-                    .selected_index(ix)
-                    .on_click(cx.listener(|this, ix, _, cx| {
-                        this.detail_tab = *ix;
-                        this.sync_detail_tab(cx);
-                        cx.notify();
-                    }))
-                    .children(tabs.iter().map(|tb| Tab::new().label(tb.label()))),
+                crate::widgets::card(t)
+                    .gap(px(GAP_TIGHT))
+                    .child(self.repo_head(path, t, cx))
+                    .child(
+                        // 页签间距走**官方的 `Size` 档**，不自己加 `gap()`：
+                        // `TabBar` 的 gap 按 `(variant, size)` 写死（`tab_bar.rs:394-399`），
+                        // 公开 API 没有单独调它的口。`Underline` 档 Small→Medium 的实际变化：
+                        // gap 12→16、页签高 22→26、**字号不变**（两档都 `text_sm()`，
+                        // `tab.rs:803-807` 的 `_` 臂）。也就是"要的就是间距变大"。
+                        crate::widgets::card_split(t).child(
+                            TabBar::new("detail-tabs")
+                                .w_full()
+                                .flex_shrink_0()
+                                .with_variant(TabVariant::Underline)
+                                .with_size(Size::Medium)
+                                .selected_index(ix)
+                                .on_click(cx.listener(|this, ix, _, cx| {
+                                    this.detail_tab = *ix;
+                                    this.sync_detail_tab(cx);
+                                    cx.notify();
+                                }))
+                                .children(tabs.iter().map(|tb| Tab::new().label(tb.label()))),
+                        ),
+                    ),
             )
-            // 页签与内容之间**仍然是 GAP_LG**：上面那个 `.gap(GAP)` 只管
-            // 「仓库头 → 页签」这一处（阶段 21-7）。页签是导航、内容是主体，
-            // 两者是**不同的东西**之间的分组，紧了会让内容像页签的一部分。
-            // 所以这里显式补回一档，而不是靠外层那个统一的 gap 顺带管
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .mt(px(GAP_TIGHT))
-                    .child(self.detail_body(path, cur, t, cx)),
+                // 内容区自己就是一张卡（各页签内部用 `widgets::card`），
+                // 所以这里**不再套一层 `mt`**——那一档 4px 叠在父 gap 上，
+                // 就是"头卡下 20、卡间 10"那个症状的同一个形状
+                v_flex().flex_1().min_h_0().child(self.detail_body(path, cur, t, cx)),
             )
     }
 
@@ -374,7 +374,14 @@ impl Shell {
         v_flex()
             .flex_1()
             .min_h_0()
-            .gap(px(GAP))
+            // ⚠️ **卡间只认 `GAP_LG`，而且只由这一条 gap 给**（用户第③条：
+            // 「仓库名卡片和语言技术栈卡片之间的间距要和下面日志的间距一样大」）。
+            // 病根不在数字上：外层（`detail_body` 那层）用 `GAP_LG`、这一层用 `GAP`，
+            // 于是**头卡→同步卡 12、同步卡→日志卡 8**，同一屏里两种"卡间"。
+            // 现在两层都是 `GAP_LG`，并且这里**不再叠任何 `mt` / `padding-top`**——
+            // 阶段 28 那次"给滚动容器又加一层 padding"叠在父 gap 上，
+            // 出来的就是用户报的那种"看着就是不齐"而根因不是数值（D90）。
+            .gap(px(GAP_LG))
             .when(on(store::MOD_SEC_FORK), |b| b.children(self.fork_card(t, cx)))
             .when(on(store::MOD_SEC_SYNC), |b| b.child(self.sync_card(path, t, cx)))
             .when(on(store::MOD_SEC_LOG), |b| {
@@ -391,7 +398,7 @@ impl Shell {
                         .justify_center()
                         .child(
                             div()
-                                .text_size(px(FS_BODY))
+                                .text_size(px(fs_body()))
                                 .text_color(tier4(t))
                                 .child("这一屏的模块都被关掉了 · 到「设置 → 显示哪些模块」里打开"),
                         ),

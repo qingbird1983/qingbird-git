@@ -1,4 +1,4 @@
-//! 窗口壳：标题栏 / 导航轨 / 状态条，仓库选中与状态刷新。
+﻿//! 窗口壳：标题栏 / 导航轨 / 状态条，仓库选中与状态刷新。
 //!
 //! `Render for Shell` 在这里，四块面板由 sidebar / overview / detail 提供。
 
@@ -7,7 +7,7 @@
 // 混在同一屏里一眼就能看出不一致。
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::motion::spring;
-use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::base::{h_flex, v_flex, GlobalState, TextSelection};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::resizable::{
@@ -20,8 +20,8 @@ use gpui_kit::component::table::{TableEvent, TableState};
 use gpui_kit::component::{ActiveTheme, Selectable as _, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, img, px, Action, AnyElement, AppContext, Context, Div, FontWeight, InteractiveElement,
-    IntoElement, KeyBinding, ParentElement, Pixels, Render, ScrollHandle,
+    div, img, px, AnyElement, AppContext, Context, Div, FontWeight, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Pixels, Render, ScrollHandle,
     StatefulInteractiveElement, Styled, Window,
 };
 use qingbird_core::fork;
@@ -33,6 +33,10 @@ use qingbird_core::types::RepoStatus;
 use std::collections::HashMap;
 
 use crate::detail::DetailTab;
+use crate::keys::{
+    DismissTop, NextRepo, OpenPalette, OpenTerminal, PrevRepo, StopOp, SyncCheck, SyncPull,
+    SyncPush, ToggleInspector, ToggleSidebar,
+};
 use crate::ops::sync_cfg_from;
 use crate::state::*;
 use crate::tokens::*;
@@ -331,6 +335,11 @@ impl Shell {
                 });
             }
         });
+        // 落点提示要用到"落进哪一组"，而 `.when()` 的闭包里只有那个 div、拿不到
+        // `self`（它是被 `&mut self` 借走的）。所以在链条**外面**算一次：
+        // 判据只有这一处，`on_drag_move` / `on_drop` 各自也调 `Shell::drop_target`，
+        // 三处同源（D78）
+        let drop_group = self.drop_target();
         v_flex()
             .size_full()
             .min_h_0()
@@ -344,10 +353,18 @@ impl Shell {
             // 注释在 `drag_drop.rs` 模块头（冒泡阶段 + 命中即触发 + stop_propagation，
             // 本项目没有任何子元素注册 drop 监听，所以事件一路冒到根）。
             //
+            // ⚠️ "任意位置"指的是**仓库页那一屏**。总览页不收（D78，判据是
+            // `state::drop_target`），三处闸门都调它——**改一处记得看另外两处**。
+            //
             // ⚠️ **类型参数必须是 `ExternalPaths`，不是 `PathBuf`**：写错一行不报错，
             // 只是永远不触发。`PathBuf` 是本应用自己往外拖文件时的 payload。
             .on_drag_move(cx.listener(
                 |this, _: &gpui_kit::DragMoveEvent<gpui_kit::ExternalPaths>, _, cx| {
+                    // 总览页不收（D78）：这一屏没有"当前分类"，别画落点提示。
+                    // 提示卡是 `.absolute().inset_0()`，画出来就是在**承诺**能放。
+                    if this.drop_target().is_none() {
+                        return;
+                    }
                     if !this.dragging {
                         this.dragging = true;
                         cx.notify();
@@ -359,7 +376,15 @@ impl Shell {
                     // **松手这一下必须把标志落回去**：漏了的话提示卡会一直挂着，
                     // 而它是 `.absolute().inset_0()`，正好盖住整个界面
                     this.dragging = false;
-                    this.on_paths_dropped(e.paths(), window, cx);
+                    match this.drop_target() {
+                        Some(g) => this.on_paths_dropped(e.paths(), g, window, cx),
+                        // Windows 的复制光标是平台按窗口给的（改不掉），所以用户
+                        // 会以为能放。**说清去哪放**，比静默吃掉强
+                        None => window.push_notification(
+                            "总览页不能添加仓库，请到「我的仓库」或「第三方仓库」页拖入",
+                            cx,
+                        ),
+                    }
                 },
             ))
             .on_file_drop_exit(cx.listener(|this, _: &gpui_kit::FileDropEvent, _, cx| {
@@ -422,8 +447,18 @@ impl Shell {
             )
             .child(self.status_bar(&t, cx))
             // 落点提示卡。**放最后**：它是整窗绝对定位的一层，
-            // 前面那些都是正常流式内容，先挂它会被后来的兄弟盖住
-            .when(self.dragging, |this| this.child(crate::drag_drop::drop_overlay(&t)))
+            // 前面那些都是正常流式内容，先挂它会被后来的兄弟盖住。
+            //
+            // ⚠️ 条件是 `dragging && drop_target().is_some()`，不是光看 `dragging`：
+            // `dragging` 是"平台正在拖一个外部路径进来"，提示卡是**能不能放**的
+            // 承诺。这两件事在总览页会分开——Windows 的复制光标照给，提示卡不给。
+            .when(
+                self.dragging && drop_group.is_some(),
+                |this| match drop_group {
+                    Some(g) => this.child(crate::drag_drop::drop_overlay(&t, g)),
+                    None => this,
+                },
+            )
             .into_any_element()
     }
 }
@@ -486,7 +521,7 @@ impl Shell {
             // 的前置条件（见上面那行 `use` 的注释）
             .id("title-bar")
             .w_full()
-            .h(px(TITLE_BAR_H))
+            .h(px(title_bar_h()))
             .flex_shrink_0()
             .items_center()
             .bg(t.colors.popover)
@@ -505,7 +540,7 @@ impl Shell {
                     .child(img(crate::app_assets::APP_ICON_ASSET).size(px(APP_ICON)))
                     .child(
                         div()
-                            .text_size(px(FS_BODY))
+                            .text_size(px(fs_body()))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(body(t))
                             .child("青鸟 Git"),
@@ -516,11 +551,40 @@ impl Shell {
                     }),
             )
             // ③ 拖拽区：左右两组之间的**空白**才是拖窗口的地方
+            //
+            // ⚠️ **这里必须挂 `on_mouse_down` 收掉文字选中（D76）**。
+            // 机制是「按下和抬起落在两个不同的派发域」：
+            // `WindowControlArea::Drag` 在 Windows 侧被 `handle_hit_test_msg`
+            // 翻成 `HTCAPTION`（`gpui-pre-windows/src/events.rs:976`），
+            // 而 `handle_nc_mouse_down_msg` **会把非客户区的按下翻成 client
+            // 事件派发、且不消费**（`:1071`）——所以 `on_mouse_down` 挂得上
+            // （这也是官方 `TitleBar` 的按钮只差在抬起那一步，见上面的注释）。
+            // 但随后 `DefWindowProc` 接管、`SC_MOVE` 进入系统移动循环并
+            // **捕获鼠标**，抬起被那个循环吃掉 ⇒ **永远不会有
+            // `WM_NCLBUTTONUP`** ⇒ `MouseUpEvent` 不来。
+            // 而框选的收尾只挂在那个 `MouseUpEvent` 上
+            // （`text_selection.rs:2807`/`:2834` 调 `end()`），
+            // 门是 `is_selecting`（`:1904`）。⇒ **卡在 `true` 不动**，
+            // 之后每个鼠标移动（`pressed_button: None`，`:1045`）都在扩选区。
+            //
+            // 表现就是用户报的：说明页里在标题栏中间点一下，
+            // 再把鼠标移进文档区，就变成"框选"，
+            // 而**真正要框选本该是在文字上按住左键**。
+            //
+            // 两条一起上，缺一不可：
+            // ① `TextSelection::end` 收掉**在途**的选中（拦"已经卡住"）
+            // ② `suppress_text_selection` 让这一次按下**不再起跑**新的
+            //    （基座原话：「控件自己拥有按下或拖拽交互时用它，
+            //    同一个指针事件就不该同时起一个应用级文字选中」）
             .child(
                 div()
                     .flex_1()
                     .h_full()
-                    .window_control_area(gpui_kit::WindowControlArea::Drag),
+                    .window_control_area(gpui_kit::WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                        TextSelection::end(window, cx);
+                        GlobalState::suppress_text_selection(cx);
+                    }),
             )
             .on_double_click(|_, window, _| window.zoom_window())
             .child(self.theme_toggle(t, cx))
@@ -849,7 +913,7 @@ impl Shell {
     ///
     /// ⚠️ 官方 ghost 选中的底是 `button.active.background`，而 `theme.json`
     /// 没配这一项 → 落基座兜底 `input.mix_oklab(transparent, 0.7)`，比规范板的
-    /// 选中面深一大截。所以用 `tokens::selected_mask` 盖掉。
+    /// 选中面深一大截。所以用 `tokens::wash` 盖掉。
     /// **能盖掉是因为官方在每个状态层的最后重放调用方样式**
     /// （`button.rs:733`、`:795` 的 `refine_style(&instance_style)`）——
     /// 这条顺序是"编译得过但不写注释就会失效"的那类知识，改基座大版本时先复核它。
@@ -892,7 +956,7 @@ impl Shell {
             .icon(nav_icon(icon).text_color(ink))
             .custom(ghost_variant(cx))
             .selected(active)
-            .when(active, |this| this.bg(selected_mask(t)))
+            .when(active, |this| this.bg(wash(t)))
             // ⚠️ **不要在这里加 `.hover(..)` 改悬停面**（Q12 已开，见路线表）。
             // 想改也改不动：官方在 `render` 里先注册自己的悬停层（`button.rs:713`），
             // 调用方再来一次会撞上 `div.rs:843` 的 `debug_assert!(hover_style already set)`
@@ -1147,25 +1211,16 @@ impl Shell {
         // 自己判的那份不知道当前焦点在输入框还是按钮上，会在打字时把侧栏折了。
         // `context` 传 None = 全局生效；命令面板自己那个 Dialog 上下文里
         // ↑↓ 与回车由 `command::init` 绑，不在这里重复占键
-        cx.bind_keys([
-            KeyBinding::new("ctrl-b", ToggleSidebar, None),
-            KeyBinding::new("ctrl-i", ToggleInspector, None),
-            // `Ctrl .` 停当前操作。键位跟着"停"这个动作走，和日志工具行那个
-            // 停止按钮共用 `stop_current`——两处不该各调一次 core 的取消入口
-            KeyBinding::new("ctrl-.", StopOp, None),
-            KeyBinding::new("ctrl-k", OpenPalette, None),
-            KeyBinding::new("ctrl-t", OpenTerminal, None),
-            // ⚠️ **顺序即语义**：`1` `2` `3` 必须与详情页同步卡从左到右同序。
-            // 那个顺序声明在 `state.rs::SYNC_SLOTS`（连同文案一起）——
-            // 改键位要三处一起改：这里、那边的顺序、侧栏 / 状态条的文案。
-            // `shell.rs` 的单测 `the_three_number_keys_match_the_sync_card_order` 钉住这个序
-            KeyBinding::new("1", SyncPull, None),
-            KeyBinding::new("2", SyncPush, None),
-            KeyBinding::new("3", SyncCheck, None),
-            KeyBinding::new("down", NextRepo, None),
-            KeyBinding::new("up", PrevRepo, None),
-            KeyBinding::new("escape", DismissTop, None),
-        ]);
+        //
+        // ⚠️ **绑定由 `keys.rs` 那张表生成**（阶段 30）。早先这里是 11 行
+        // `KeyBinding::new` 写死，设置页要列出/改/还原它们时就必须有一份能枚举的
+        // 数据 ⇒ 抽成表。表是唯一真源，**别在这里再补一条绑定**——补的那条不进表，
+        // 设置里就没有它的入口，用户也改不了它（而编译器不会报）。
+        //
+        // 用户改过键的那几项，`keys::bindings` 会先给旧键补一条 `NoAction`
+        // 再注册新键，所以这里读一遍配置就够，**不要在别处重复覆盖**
+        let overrides = qingbird_core::store::load().settings.keybindings;
+        cx.bind_keys(crate::keys::bindings(&overrides));
         // 过滤框每敲一个字都要重画侧栏。官方 Input 的 value() 是纯读取，
         // 不订阅就永远停在旧值上——这是"输入框接了但过滤不生效"的典型原因
         cx.subscribe(&this.side_filter, |_, _, event: &InputEvent, cx| {
@@ -1236,61 +1291,6 @@ impl Shell {
         this
     }
 }
-
-/// `Ctrl B`。走官方 action + key binding，而不是自己 `on_key_down` 判键：
-/// 自己判的那份不知道当前焦点在输入框还是按钮上，会在打字时把侧栏折了
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = qingbird_gui, no_json)]
-pub(crate) struct ToggleSidebar;
-
-/// `Ctrl I`：折叠 / 展开检视抽屉
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = qingbird_gui, no_json)]
-pub(crate) struct ToggleInspector;
-
-/// `Ctrl .`：停掉当前正在跑的操作
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = qingbird_gui, no_json)]
-pub(crate) struct StopOp;
-
-/// `Ctrl K`：命令面板（全局，两屏都生效）
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = qingbird_gui, no_json)]
-pub(crate) struct OpenPalette;
-
-/// `Ctrl T`：在当前仓库开终端
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = qingbird_gui, no_json)]
-pub(crate) struct OpenTerminal;
-
-/// `1` / `2` / `3`：同步卡上**从左到右**的拉取 · 推送 · 检测。
-///
-/// 键位按**屏幕位置**对位而不是按操作顺序：用户是先看见按钮再按位置的键，
-/// 顺序一改快捷键与眼睛看到的东西就对不上了
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = qingbird_gui, no_json)]
-pub(crate) struct SyncPull;
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = qingbird_gui, no_json)]
-pub(crate) struct SyncPush;
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = qingbird_gui, no_json)]
-pub(crate) struct SyncCheck;
-
-/// `↓` / `↑`：在当前这一组里上下切仓库（到头就停，不绕回）
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = qingbird_gui, no_json)]
-pub(crate) struct NextRepo;
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = qingbird_gui, no_json)]
-pub(crate) struct PrevRepo;
-
-/// `Esc`：收起当前这一屏自己开的临时东西。
-/// 浮层（对话框 / Sheet / 右键菜单）的 Esc 由官方那几层自己吃掉，
-/// 走到这里的只可能是本壳自己画的那一样
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = qingbird_gui, no_json)]
-pub(crate) struct DismissTop;
 
 impl Shell {
     /// 抽屉开关。标题栏的按钮、面板头那颗折叠键与 `Ctrl I` 共这一个入口。
@@ -1580,6 +1580,14 @@ impl Shell {
         self.fork_diff = false;
         self.fork_confirm = false;
         repos::touch_repo(&path);
+        // ⚠️ **状态扫描必须跟着选中走**。`refresh_one` 的注释写着"切仓库走这里"，
+        // 而启动那条链（`open_main_window` 里）也确实调了它——**唯独 `select` 漏了**。
+        // 后果实测在 2026-10-07 的抓帧里：点第二个仓库，占用与语言技术栈都有
+        // （`scan_space` / `scan_profile` 在跑），状态那一整块却是空的，于是同步卡
+        // 说「这个文件夹不是 Git 仓库」、头卡说「该仓库还没有配置远端」、状态条说
+        // 「尚未扫描」——**三句都是假话，真话是"我还没问过 git"**。
+        // 顺序照启动那条链一致（先刷状态，再空间、档案），别在这里换。
+        self.refresh_one(path.clone(), cx);
         self.scan_space(cx);
         self.scan_profile(cx);
         // 落盘的操作历史跟着仓库走。**切回来时重新读而不是留着旧的**：
@@ -1710,7 +1718,7 @@ impl Shell {
             .child(self.rescan_hint(t, cx));
 
         StatusBar::new()
-            .h(px(STATUS_BAR_H))
+            .h(px(status_bar_h()))
             .left(left)
             .child(center)
             .right(right)
@@ -1729,7 +1737,9 @@ impl Shell {
         };
         h_flex()
             .id("status-rescan")
-            .h(px(20.0))
+            // 阶段 28：跟着 `meta_text` 那档字号走。原来写死 20，
+            // 而这一行带的是 `fs_sec()`——中档 14px 装在 20 高里上下只剩 3px
+            .h(px(row_h(fs_sec())))
             .px(px(GAP_TIGHT))
             .rounded(px(R_SM))
             .items_center()

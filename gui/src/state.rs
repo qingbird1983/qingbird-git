@@ -1,4 +1,4 @@
-//! 界面状态与纯逻辑：仓库视图、操作类别、对话框状态、分档口径。
+﻿//! 界面状态与纯逻辑：仓库视图、操作类别、对话框状态、分档口径。
 //!
 //! `bucket_of` 是全站唯一的仓库分档口径——侧栏徽标、总览、同步环、
 //! ⌘K 状态点都从这儿取。别在别处另写一套判断。
@@ -12,6 +12,8 @@ use gpui_kit::component::list::ListState;
 use gpui_kit::component::resizable::ResizableState;
 use gpui_kit::component::table::TableState;
 use gpui_kit::component::text::TextViewState;
+
+use crate::tokens::UiScale;
 use gpui_kit::component::Theme;
 use gpui_kit::{AnyWindowHandle, Entity, FocusHandle, Hsla, ScrollHandle, SharedString, Task};
 use qingbird_core::history::{CommitDetail, CommitPatch, CommitSummary};
@@ -411,6 +413,31 @@ impl Group {
             Group::Mine => ("我的仓库", AssetIcon::GitBranch),
             Group::Third => ("第三方仓库", AssetIcon::Users),
         }
+    }
+}
+
+/// 拖进来的仓库落哪一组；`None` = **这一刻不接受拖放**（D78）。
+///
+/// ## 为什么是 `side_focus` 而不是"选中的那个仓库"
+///
+/// 用户的话是"**在哪个类别拖就进当前分类**"——他指的是**眼睛看着的那一组**，
+/// 也就是侧栏标题上写着的那一组（`side_focus`）。选中项在拖放这一刻完全可能
+/// 是另一组的仓库：侧栏只画一组，跨组的选中项不会被切走（`reveal_repo`
+/// 才会切），所以拿 `selected_is_third()` 去判，落库结果能差一整组。
+///
+/// ## 总览页为什么不收
+///
+/// 总览页**没有侧栏**，也就没有"当前这一组"可言——`side_focus` 在那一屏
+/// 只是"上次看的那组"，用户看不见它。拿一个看不见的状态替他决定归属，
+/// 等于凭空猜。所以这一屏直接不收：Windows 的复制光标是**平台按窗口**
+/// 给的（`gpui-pre-windows/…/window.rs:1169` 直接回 `DROPEFFECT_COPY`），
+/// 改不掉，那就至少别在界面上假装能放——落点提示不画，松手时说一句去哪放。
+///
+/// **纯函数**：这一页不碰任何状态，`state.rs` 的单测直接钉它（见文件末尾）。
+pub(crate) fn drop_target(page: Page, side_focus: Group) -> Option<Group> {
+    match page {
+        Page::Repos => Some(side_focus),
+        Page::Overview => None,
     }
 }
 
@@ -838,16 +865,24 @@ pub(crate) enum SetCat {
     Network,
     /// 主题 / 显示哪些模块
     Display,
+    /// 快捷键（阶段 30）
+    Keys,
 }
 
 impl SetCat {
-    pub(crate) const ALL: &'static [SetCat] = &[SetCat::Identity, SetCat::Network, SetCat::Display];
+    pub(crate) const ALL: &'static [SetCat] = &[
+        SetCat::Identity,
+        SetCat::Network,
+        SetCat::Display,
+        SetCat::Keys,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             SetCat::Identity => "身份与访问",
             SetCat::Network => "网络与通知",
             SetCat::Display => "显示",
+            SetCat::Keys => "快捷键",
         }
     }
 
@@ -859,16 +894,38 @@ impl SetCat {
             SetCat::Identity => "identity",
             SetCat::Network => "network",
             SetCat::Display => "display",
+            SetCat::Keys => "keys",
         }
     }
 
     /// 左侧那颗键旁边的一句话。**每个分类都要有**——只有名字的话，
-    /// 「显示」这两个字说不清里面是主题还是别的东西
+    /// 「显示」这两个字说不清里面是主题还是别的东西。
+    ///
+    /// ⚠️ 阶段 31.5 从"一句自然语言"改成"中间点分隔的三个词"：
+    /// 190px 那一列里长句会折成三行（2026-10-07 基线帧查实），而 `SET_NAV_W`
+    /// 的注释②早就写着"说明句要能一行放下不断字"——**目标一直是对的，
+    /// 内容没跟上**。词与词之间用 `·` 不用 `、`：前者是"并列的三样"，
+    /// 后者读起来是一句话的停顿
     pub(crate) fn hint(self) -> &'static str {
         match self {
-            SetCat::Identity => "提交用的名字与邮箱、云端令牌、SSH 私钥",
-            SetCat::Network => "git 走不走代理、自动同步要不要弹通知",
-            SetCat::Display => "浅色还是深色、界面上摆哪几样东西",
+            SetCat::Identity => "名字 · 令牌 · SSH",
+            SetCat::Network => "代理 · 系统通知",
+            SetCat::Display => "主题 · 字号 · 模块",
+            SetCat::Keys => "改键 · 解绑 · 恢复",
+        }
+    }
+
+    /// 分类导航那一颗图标（阶段 31.5）。
+    ///
+    /// **图标在这里，不在 `set_nav()` 里 `match`**——导航那一行只管画，
+    /// "这一类是什么"是分类自己的事。与 `label()` / `key()` / `hint()` 同一族
+    pub(crate) fn icon(self) -> gpui_kit::assets::IconName {
+        use gpui_kit::assets::IconName as I;
+        match self {
+            SetCat::Identity => I::Contact,
+            SetCat::Network => I::Globe,
+            SetCat::Display => I::Monitor,
+            SetCat::Keys => I::Keyboard,
         }
     }
 }
@@ -894,6 +951,8 @@ pub(crate) struct SettingsDialog {
     /// 当前是不是深色（阶段 20）。**只认深 / 浅两态**，
     /// 存进配置的 `system` 在界面上落浅色，见 `theme` 模块头
     pub(crate) theme_dark: bool,
+    /// 当前界面字号档（阶段 28）。**即时落盘即时生效**，与深色那颗同口径
+    pub(crate) ui_scale: UiScale,
     /// 点关闭键时怎么办（阶段 22）。存判据后的枚举而不是原始串：
     /// 界面拿它做 `==` 比对，不必每次都过一遍 `close_action_of`。
     /// **同一个值在 `Shell::close_action` 上也有一份**——那份是
@@ -912,6 +971,27 @@ pub(crate) struct SettingsDialog {
     pub(crate) mod_mine: Vec<String>,
     /// 「第三方」这一类勾上 = 显示的模块
     pub(crate) mod_third: Vec<String>,
+    /// 快捷键覆盖（阶段 30）。**存的是覆盖值不是生效值**：
+    /// 没记过的键不在表里，界面自己去读默认（`keys::KEYS`）。
+    /// 这样"没改过"与"解除了"分得开——压成生效值的话两者会合成同一个
+    pub(crate) key_overrides: HashMap<String, String>,
+    /// 正在录键的那一项（`store::KEY_*`）。`None` = 没在录
+    ///
+    /// 录制期间会挂一层 `NoAction` 遮罩把当前生效的键全盖住，理由与
+    /// 代价见 `keys::shadows`
+    pub(crate) recording: Option<String>,
+    /// 录制器的焦点。**必须是真的焦点而不是"当前页刚好被画出来"**——
+    /// 元素级 `on_key_down` 只在焦点节点的派发路径上收得到按键
+    pub(crate) key_focus: FocusHandle,
+    /// 哪一颗键帽正被鼠标扫着（阶段 30）。gpui 没有 CSS 的 `:hover`，
+    /// 悬停面只能靠 `on_hover` 记状态——不记的话扫过一整列键帽全程零反馈
+    pub(crate) key_cap_hover: Option<String>,
+    /// 本次打开期间发生过"这把键被抢走了"的记录（`(被抢的动作, 抢它的动作)`）。
+    ///
+    /// **只活在这一次打开里，不落盘**：它是"刚刚发生了什么"的说明，
+    /// 而用户随后改这两行里的任何一行，它就该消失。落一份历史反而会
+    /// 在用户已经解决完之后还挂着一句过期的话
+    pub(crate) key_yielded: Vec<(String, String)>,
     pub(crate) error: Option<String>,
 }
 
@@ -990,6 +1070,15 @@ impl Shell {
             Some(e) => e.is_third_party == group.is_third(),
             None => false,
         }
+    }
+
+    /// **现在往窗口里拖一个文件夹，它会落进哪一组**（`None` = 这一屏不收）。
+    ///
+    /// 判据见 [`drop_target`]。三条闸门（落点提示 / 松手 / `on_paths_dropped`
+    /// 自己的早退）都调它——**别在别处重写一遍 `self.side_focus`，
+    /// 改一处忘了另一处就是"总览页也能拖"这种不一致**。
+    pub(crate) fn drop_target(&self) -> Option<Group> {
+        drop_target(self.page, self.side_focus)
     }
 }
 
@@ -1318,6 +1407,59 @@ pub(crate) static EMPTY_VIEW: RepoView = RepoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- D78：拖放落哪一组 ----------
+
+    /// **这才是那个 bug 的钉子**：在「第三方仓库」页拖进来的文件夹必须进第三方。
+    /// 修之前这条路的归属是 `add_repo` 的默认值（`false` = 我的），
+    /// 所以两组都会错——用户报的现象是"进了我的仓库"。
+    #[test]
+    fn a_drop_lands_in_the_group_the_sidebar_is_showing() {
+        assert_eq!(drop_target(Page::Repos, Group::Mine), Some(Group::Mine));
+        assert_eq!(
+            drop_target(Page::Repos, Group::Third),
+            Some(Group::Third)
+        );
+    }
+
+    /// 总览页没有侧栏、也就没有"当前这一组"，所以**不收**（用户拍板）。
+    /// 两种分组都要是 `None`——判据是"有没有侧栏"，不是"上次看的是哪组"。
+    #[test]
+    fn the_overview_page_takes_no_drops_at_all() {
+        assert_eq!(drop_target(Page::Overview, Group::Mine), None);
+        assert_eq!(drop_target(Page::Overview, Group::Third), None);
+    }
+
+    /// 真值表**整张**钉死：2 页 × 2 组，四格全列出来。
+    ///
+    /// 为什么不用上面两条代替：`Page` 以后加第三种页面时，这个 `match` 会编译不过
+    /// （没有 `_` 分支），那时**必须回来重新想一遍**这一页收不收——而不是让它
+    /// 悄悄继承某一支的默认值。两格变四格时，靠"记得改测试"是防不住的。
+    #[test]
+    fn the_whole_truth_table_is_pinned() {
+        for page in [Page::Repos, Page::Overview] {
+            for g in [Group::Mine, Group::Third] {
+                let got = drop_target(page, g);
+                let want = match page {
+                    Page::Repos => Some(g),
+                    Page::Overview => None,
+                };
+                assert_eq!(got, want, "{page:?} + {g:?}");
+            }
+        }
+    }
+
+    /// 判据是**眼睛看着的那一组**，不是"选中的那个仓库"。
+    ///
+    /// 这条钉不住实现（`drop_target` 的签名里压根没有 `selected` 这个入参，
+    /// 编译期就排除了拿选中项去判的可能），但它把**为什么没有那个入参**
+    /// 写在了单测里：下一个人若觉得"选中项更准"想加回来，得先读到这里。
+    #[test]
+    fn the_group_comes_from_the_sidebar_not_from_the_selection() {
+        // 侧栏停在第三方：无论界面上还选着谁（跨组的选中项不会被切走），
+        // 新拖进来的都归第三方
+        assert_eq!(drop_target(Page::Repos, Group::Third), Some(Group::Third));
+    }
 
     fn st(is_repo: bool, ahead: u32, behind: u32, dirty: bool) -> RepoStatus {
         RepoStatus {

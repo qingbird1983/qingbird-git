@@ -1,147 +1,152 @@
-//! 视觉档位与图标包装：字号 / 圆角 / 间距 / 图标尺寸四组常量，以及 theme.json 覆盖不到的补充灰阶。
+//! 视觉档位与图标包装：字号 / 圆角 / 间距 / 阴影 / 图标尺寸五组档位，
+//! 以及 `theme.json` 覆盖不到的补充色。
 //!
-//! 禁写裸数字的理由与各档用途见 docs/UI-DESIGN.md 第 4.2 节。
+//! 档位表与语义见 **docs/UI-DESIGN-v4.md 第 3 节**（视觉层的现行真源）。
+//! 旧那份 `UI-DESIGN.md` 第 4 节已被 v4 取代，别再往那里加档。
 
 // 图标只认这一套：assets 里是完整 lucide，外加品牌 Bird。
 // 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
 // 混在同一屏里一眼就能看出不一致。
 use gpui_kit::component::{Icon, Sizable, Size, Theme};
-use gpui_kit::{px, rgb, Hsla};
+use gpui_kit::{hsla, px, rgb, BoxShadow, Hsla};
 
-// ---------- 规范板色板中 theme.json 没有的补充灰阶 ----------
-// 设计规范：正文 #37352F / 三级 #787871 / 四级 #A4A099 / 占位 #BBB8B1，
-// 以及选中暖灰面 #EDEBE7、条轨 #EDEAE5、可更新暖橙底 #FDEFE4。
-// theme.json 的 token 覆盖不了这几级，集中在这里定义，禁止散落魔法数字。
+// ---------- v4 色板里 theme.json 覆盖不到的那几级 ----------
 //
-// ---------- 每一档都有深色值（阶段 20）----------
+// 能读 token 的**一律读 token**（`tier3` 读 `muted.foreground`、`track` 读
+// `table.row.border`、`wash` 读 `secondary.active.background`……）——
+// 复制一份色值进这里，就是给"改主题时漏掉一处"留个坑。
+// **只有 token 面里确实没有的**才写常量：`body` / `tier4` 与四档语义 wash。
+//
+// ---------- 每一档都有深色值 ----------
 //
 // **这不是"深色下把浅色反过来"就成立的**：深色底上正文要**变亮而不是变暗**；
 // 徽标那种浅色 wash 要变成**深底 + 亮字**（浅色 wash 铺在深色卡上会是一块
-// 刺眼的白斑）。每档的深色值是照着"同一语义、同一暖调、在深底上还要够对比"
+// 刺眼的白斑）。每档的深色值是照着"同一语义、同一冷调、在深底上还要够对比"
 // 单独定的，不是机械取反。**新增一档颜色时深色值必须一起给**——
-// 只给浅色值的档位就是一处"在深色下不成立"的地方。
+// 只给浅色值的档位就是一处"在深色下不成立"的地方（v4 第 8 节）。
 
-/// 正文 / 行内主要文字（浅色下比 foreground #1A1A1A 柔一档；
-/// 深色下比 foreground #E9E7E2 柔一档）
+/// 正文 / 行内主要文字（v4 §2.1 的 `body`）。
+/// 浅色下比 `foreground` 柔一档、深色下比它暗一档——**两档都成立**，
+/// 不是"深色把浅色反过来"（深色下正文要**变亮**，见 v4 第 8 节）
 pub(crate) fn body(t: &Theme) -> Hsla {
     if t.is_dark() {
-        rgb(0xC9C6BF).into()
+        rgb(0xBACACE).into()
     } else {
-        rgb(0x37352F).into()
+        rgb(0x33474C).into()
     }
 }
-/// 三级：元信息、说明文字
+/// 三级：元信息、说明文字。
+/// ⚠️ **读 token 不写常量**：`muted.foreground` 就是这一级，两处各写一份迟早会漂
 pub(crate) fn tier3(t: &Theme) -> Hsla {
-    if t.is_dark() {
-        rgb(0x97948C).into()
-    } else {
-        rgb(0x787871).into()
-    }
+    t.colors.muted_foreground
 }
-/// 四级：弱提示、上次结果
+/// 四级：弱提示、占位。**只许用于占位符与装饰，不许承载信息**（对白底只有 2.4:1）
 pub(crate) fn tier4(t: &Theme) -> Hsla {
     if t.is_dark() {
-        rgb(0x6E6B64).into()
+        rgb(0x5D7074).into()
     } else {
-        rgb(0xA4A099).into()
+        rgb(0x9AABAF).into()
     }
 }
-/// 构成条 / 进度条的轨道
+/// 构成条 / 进度条的轨道 = v4 的 `line-soft`
 pub(crate) fn track(t: &Theme) -> Hsla {
-    if t.is_dark() {
-        rgb(0x2E2D2B).into()
-    } else {
-        rgb(0xEDEAE5).into()
-    }
+    t.colors.table_row_border
 }
-/// 「可更新」徽章 / 清理条的暖橙底
-pub(crate) fn orange_bg(t: &Theme) -> Hsla {
-    // 深色下是**深棕底 + 亮橙字**（配 `orange_text`），不是浅色 wash
-    if t.is_dark() {
-        rgb(0x3A2A1C).into()
-    } else {
-        rgb(0xFDEFE4).into()
-    }
-}
-/// 清理条上的深橙文字
-pub(crate) fn orange_text(t: &Theme) -> Hsla {
-    if t.is_dark() {
-        rgb(0xF0A868).into()
-    } else {
-        rgb(0x9A4500).into()
-    }
-}
-/// 「运行中 / 未提交」徽章的蓝灰底
-pub(crate) fn blue_bg(t: &Theme) -> Hsla {
-    if t.is_dark() {
-        rgb(0x232A31).into()
-    } else {
-        rgb(0xEDF1F5).into()
-    }
-}
-/// 「失败」徽章的浅红底。跟 orange_bg / blue_bg 是同一套 wash 逻辑，
-/// 只是色相对齐 theme.json 的 `danger.background` #C2373B——
-/// 文字色直接用 `t.colors.danger`，底和字必须是同一个红的两档
-pub(crate) fn red_bg(t: &Theme) -> Hsla {
-    if t.is_dark() {
-        rgb(0x3A2224).into()
-    } else {
-        rgb(0xFBEBEC).into()
-    }
-}
-/// 次按钮描边（比 hairline 深一档）
-pub(crate) fn edge(t: &Theme) -> Hsla {
-    if t.is_dark() {
-        rgb(0x45443F).into()
-    } else {
-        rgb(0xC8C4BE).into()
-    }
+/// 卡与弹层的底 = v4 的 `card`
+pub(crate) fn card_face(t: &Theme) -> Hsla {
+    t.colors.secondary
 }
 
-// ---------- 选中面：全站同类高亮的唯一出处 ----------
-
-/// 选中遮罩的不透明度。**0.08 不是随手取的**，它由设计规范板的
-/// 「选中面」#EDEBE7 反推：白卡（#FFFFFF）上叠一层前景色（#1A1A1A），
-/// 要落到 237/255 就得 `a ≈ (255−237) / (255−26) ≈ 0.079`。
-/// G/B 两通道因为规范板偏暖会差 2–6/255，肉眼不可分。
+/// `wash`：**选中面、图标底块、信息徽章底**——v4 第 5.3 节那个
+/// "靠底块面积撑重量"的手法，也是 D60 那条"全站同类高亮只认一个出处"的落点。
+/// 与**悬停面**的分工是"我在哪"与"我指到哪"，不许互换
+/// （悬停面那一档随阶段 31.3 的 `hover_face` 一起落地——现在它还是散的，
+/// 一半用官方 `secondary_hover`、一半自己挑灰，v4 §6 登记表第 5 行记着这条待收）。
 ///
-/// `tests::mask_lands_on_the_design_boards_selection_face` 把这条钉住。
-pub(crate) const SELECTED_MASK_ALPHA: f32 = 0.08;
-
-/// 选中面。**全站同类高亮只认这一个函数**（D60）。
-///
-/// 「同类」= ghost 图标按钮的选中态：导航轨三颗切屏键、侧栏那颗筛选按钮。
-/// 它们以前各自走官方 `Button::selected`，底色来自 `button.active.background`
-/// —— 而 `gui/theme.json` **没有配这一项**，于是落到基座兜底
-/// `input.mix_oklab(transparent, 0.7)`，即"输入框底色的 70%"，比规范板的
-/// 选中面深一大截（2026-10-03 实机反馈："图标的高亮颜色太深"）。
-///
-/// 为什么是**遮罩**而不是再往 theme.json 里填一个实色：
-/// ① 实色要挑一个"在白轨上好看"的值，换个底（深色主题、卡片底）就又不对了；
-/// ② 遮罩是前景色按比例压一层，**在任何底上都成立**，天然"适应全局同类"。
-/// ③ 官方 `Button` 会在每个状态层里**最后重放调用方的样式**
+/// ⚠️ **用法是 `.when(active, |d| d.bg(wash(t)))`，不能无条件 `.bg()`**：
+/// 官方 `Button` 会在每个状态层里**最后重放调用方的样式**
 /// （`button.rs:733` 与 `:795` 的 `refine_style(&instance_style)`），
-/// 所以 `.when(active, |this| this.bg(selected_mask(t)))` 盖得过 selected 底色，
-/// 不必去改基座。
+/// 无条件那一版会让**未选中**的按钮也带上底。
+/// 好处正是这条重放机制让我们**不必改基座**就盖得过 `Button::selected` 的底色
+/// （那个底来自 `button.active.background`，`theme.json` 没配它 → 落基座兜底
+/// `input.mix_oklab(transparent, 0.7)`，比设计板深一大截，2026-10-03 实机反馈
+/// "图标的高亮颜色太深"）。
 ///
-/// ⚠️ 用法只能是 `.when(active, ..)`：**无条件 `.bg()` 会让未选中的按钮也带上底**，
-/// 因为同一份 `instance_style` 在常态层里也会被重放。
+/// ⚠️ **它以前叫 `selected_mask`，是一层"前景色按 alpha 压白卡"的遮罩**（D60）。
+/// 阶段 31 换色板时退役了，两条理由都是量出来的：
+/// ① 遮罩**打不到 wash**——#DCEFF0 偏青，白卡上要让它出现，R 通道得掉 35/255
+///    而 G/B 只掉 15–16，**一个 alpha 满足不了三个通道**（旧那档暖灰 #EDEBE7
+///    三通道只差 2–6，所以遮罩当时"看起来成立"）；
+/// ② 遮罩存在的理由是"实色换个底就不对"，而现在两档主题的卡底与 wash 都拉得开
+///    （浅 23/255、深 20/255）⇒ 不需要"适应任意底"的机制，**留着只会多一处真源**。
 ///
-/// ⚠️ **同类里还剩一个没统一的：ghost 按钮的「悬停」面是实心 `accent` 蓝**
+/// ⚠️ **同类里还剩一个没统一的：ghost 按钮的「悬停」面是实心 `accent`**
 /// （`button.rs` `hovered()` 的 `Self::Ghost` 臂，浅色模式不降透明度）。
-/// 2026-10-03 实机实测导航轨上确实渲成 #5B7A99——比这个选中面重得多，
-/// 也就是"扫过一颗没选中的图标"比"我现在在哪一屏"更抢眼。
+/// 2026-10-03 实测导航轨上渲成 #5B7A99；阶段 31 换色板后它是 **#0E4F55 深石油绿**——
+/// 比这个选中面重一大截，也就是"扫过一颗没选中的图标"比"我现在在哪一屏"更抢眼。
 /// **没顺手改掉**：正解是换 `ButtonVariant::Custom`，而那会连带改掉三样东西
 /// （焦点环 `Edge`→`Inside`、`button.rs:699` 那条只给 `Default`/`outline` 加边的
 /// 描边逻辑、以及 `normal()` 那条臂），是**重新设计这颗按钮**而不是改个色。
 /// 后门也不通：调用方再调一次 `.hover(..)` 会撞上 `div.rs:843` 的
 /// `debug_assert!(hover_style already set)`，**debug 构建直接 panic**；
 /// 而它在 release 下又是空操作、会"静默地看起来能用"（D40 吃过一次这种亏）。
-/// 已开 **Q12** 等拍板。
-pub(crate) fn selected_mask(t: &Theme) -> Hsla {
-    t.colors.foreground.opacity(SELECTED_MASK_ALPHA)
+/// 已开 **Q12**，落在阶段 31.6 一起解。
+pub(crate) fn wash(t: &Theme) -> Hsla {
+    t.colors.secondary_active
 }
-
+/// 「可更新」徽章 / 清理条的橙底 = v4 的 `warn-wash`。
+/// ⚠️ 名字是历史包袱（`orange_*` 说的是色相不是语义）；阶段 31.3 把它们收进
+/// `widgets::pill` 之后按语义命名，这一轮只换值、不换调用点
+pub(crate) fn orange_bg(t: &Theme) -> Hsla {
+    // 深色下是**深棕底 + 亮橙字**，不是浅色 wash（浅色 wash 铺在深卡上是一块刺眼的白斑）
+    if t.is_dark() {
+        rgb(0x1E1610).into()
+    } else {
+        rgb(0xFBE9D6).into()
+    }
+}
+/// 清理条上的深橙文字 = v4 的 `warn`（浅色）/ 深色档提亮值
+pub(crate) fn orange_text(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0xF08A3C).into()
+    } else {
+        rgb(0xB85C12).into()
+    }
+}
+/// 「待推送 / 进行中」徽章底 = v4 的 `info-wash`，与 `wash` 同值
+/// （v4 §2.1 把 info 定成主色本体 + wash）
+pub(crate) fn blue_bg(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0x17383F).into()
+    } else {
+        rgb(0xDCEFF0).into()
+    }
+}
+/// 「失败 / 已分叉」徽章底 = v4 的 `bad-wash`。文字色直接用 `t.colors.danger`，
+/// 底和字必须是同一个色相的两档
+pub(crate) fn red_bg(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0x331A1C).into()
+    } else {
+        rgb(0xF8E2E3).into()
+    }
+}
+/// 「即时生效 / 已配置」徽章底 = v4 §2 的 `ok-wash`（浅 `#D6F0DD` / 深 `#10281A`）。
+///
+/// 这一档早就登记在 v4 里，只是**一直没有调用点**（阶段 31.2 裁档时跟着
+/// `green` 一起删了）。现在设置页要标"哪几条不用点保存"，调用点来了才补回来——
+/// **先有调用点再有档**，反过来就是 `cargo check` 里一条常驻 unused 警告
+pub(crate) fn green_bg(t: &Theme) -> Hsla {
+    if t.is_dark() {
+        rgb(0x10281A).into()
+    } else {
+        rgb(0xD6F0DD).into()
+    }
+}
+/// 次按钮描边 = v4 的 `line`。**读 token**：与卡片描边同源，一处改两处跟
+pub(crate) fn edge(t: &Theme) -> Hsla {
+    t.colors.border
+}
 /// 「落后」的橙色（Q7，2026-10-03 用户拍板）。
 /// 主题 token 里没有单独的 warning 语义色（只有 `button_warning`），
 /// theme.json 已把 `chart.3` 定成规范板的 #DD5B00，这里借用它。
@@ -192,29 +197,221 @@ pub(crate) fn orange(t: &Theme) -> Hsla {
 // ⚠️ **等宽小字是例外**：`fork.rs` 里的 commit hash 用
 // `FS_META` + `body(t)` 是对的——技术标识符就该小而清晰，
 // 与「正文」不是一回事。
+//
+// ================= 阶段 28：字号放大 + 运行期三档 =================
+//
+// **2026-10-06 用户报「整个界面的文字都太小了」。** 重测一遍用量，数字更难看：
+//
+// | 档位 | 阶段 21 的值 | 阶段 28 重测用量 |
+// |---|---:|---:|
+// | `FS_META` | 11 | **77** |
+// | `FS_SEC`  | 12 | **58** |
+// | `FS_BODY` | 13 | 26 |
+// | `FS_TITLE`| 16 | 6 |
+// | `FS_HEAD` | 18 | 8 |
+// | `FS_NUM`  | 20 | 7 |
+//
+// **182 处文字里 135 处（74%）挤在最小的两档。** 更要命的是 11/12/13
+// **只差 1px**——这个步进肉眼分不出来，所以「三级」读起来就是
+// 「小一号的正文」而不是一个层级，文件头那句「11px 配 body(t) 读起来
+// 像被缩小的正文」说的正是这件事。
+//
+// ⇒ 用户拍板新字阶 **12/14/16/19/22/26**：**底部三档的步进从 1px 变成
+// 2px**——层级要能被看见，步进得先能被看见；顶部同时拉开，
+// 页面标题与卡片标题才真的分得开。
+//
+// ## 为什么三档各自是「六档全套整数」而不是「一套值 × 一个系数」
+//
+// 用系数会在小数上飘，而**层级恰恰靠「底部三档差 2px」这条不变式成立**
+// ——系数一乘，`12×0.9=10.8` 与 `14×0.9=12.6` 差 1.8，
+// 读起来又回到"分不出层级"。所以每档都是一组**挑过的整数**，
+// 并由 `UiScale::step_invariant` 在单测里把「底部三档两两差 ≥ 2px」
+// 钉死——**三档都要满足**，不是只验中档。
+
+/// 界面字号档位。设置里的「界面字号」就是它
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum UiScale {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+/// 一档里所有「要跟着字号走」的量。**字号与控件高度必须一起动**——
+/// 只放大字号不放高胶囊，11px 的胶囊塞 13px 的字会被切
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Metrics {
+    pub meta: f32,
+    pub sec: f32,
+    pub body: f32,
+    pub title: f32,
+    pub head: f32,
+    pub num: f32,
+    /// 胶囊高度（徽章 / 状态药丸）
+    pub pill_h: f32,
+    /// 标题栏高度
+    pub title_bar_h: f32,
+}
+
+impl UiScale {
+    /// 三档各自的全部量。**纯函数**——单测只碰它，不碰运行期载体，
+    /// 免得像 `diag` 那次在并行跑的用例之间互踩（`AGENTS.md` 记着）
+    pub(crate) const fn metrics(self) -> Metrics {
+        match self {
+            //          meta sec body title head num  pill 标题栏
+            UiScale::Small => Metrics {
+                meta: 11.0,
+                sec: 13.0,
+                body: 15.0,
+                title: 18.0,
+                head: 21.0,
+                num: 24.0,
+                pill_h: 24.0,
+                title_bar_h: 40.0,
+            },
+            UiScale::Medium => Metrics {
+                meta: 12.0,
+                sec: 14.0,
+                body: 16.0,
+                title: 19.0,
+                head: 22.0,
+                num: 26.0,
+                pill_h: 28.0,
+                title_bar_h: 44.0,
+            },
+            UiScale::Large => Metrics {
+                meta: 14.0,
+                sec: 16.0,
+                body: 18.0,
+                title: 22.0,
+                head: 26.0,
+                num: 30.0,
+                pill_h: 32.0,
+                title_bar_h: 48.0,
+            },
+        }
+    }
+
+    /// 官方组件（Button / Input）的基准字号。
+    ///
+    /// **取 `body` 那一档而不是另定一个数**：官方件是我们版面的"普通文字"，
+    /// 它的字号理应与我们的正文同档。基座自带的 `font_size` 是全局量，
+    /// 改它一处就够——不必去逐个组件覆写。
+    pub(crate) fn base_font(self) -> f32 {
+        self.metrics().body
+    }
+
+    /// 设置里存的是字符串。**认不出一律落中档**，同 `theme.rs` 对配色名的处理：
+    /// 认不出来时"静默取一个看着差不多的"比"落回默认值并说明"更容易让人以为生效了
+    pub(crate) fn from_stored(s: &str) -> Self {
+        match s.trim() {
+            "small" => UiScale::Small,
+            "large" => UiScale::Large,
+            _ => UiScale::Medium,
+        }
+    }
+
+    pub(crate) const fn stored(self) -> &'static str {
+        match self {
+            UiScale::Small => "small",
+            UiScale::Medium => "medium",
+            UiScale::Large => "large",
+        }
+    }
+
+    /// 设置页上那颗控件的三颗键
+    pub(crate) const ALL: [UiScale; 3] = [UiScale::Small, UiScale::Medium, UiScale::Large];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            UiScale::Small => "小",
+            UiScale::Medium => "中",
+            UiScale::Large => "大",
+        }
+    }
+
+    /// 附一句当前字号，让设置页那颗控件不用猜自己选中了什么
+    pub(crate) fn note(self) -> String {
+        let m = self.metrics();
+        format!("正文 {}px · 弱提示 {}px", m.body as i32, m.meta as i32)
+    }
+}
+
+/// 运行期载体。**只有 `set_ui_scale` 写它，渲染路径只读**
+///
+/// 用 `AtomicU8` 而不是 `Mutex<f32>`：182 处每帧各读一次，
+/// 读路径必须是一条 relaxed load，不能有锁也不能有分配。
+static SCALE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+/// 切档。**启动时读一次、设置里改时调一次**，渲染路径不调
+///
+/// ⚠️ **这里刻意不写 `diag::note`**：这一行每次启动都会走，写进去就是
+/// 每次启动给用户的 `app.log` 添一行垃圾（阶段 25 记着这个代价）。
+/// **该记的是"用户自己拨了"那一刻**，那条在 `Shell::set_ui_scale_static`
+/// 里——它才是可行动的信息，而"当前是第几档"用户自己能在设置里看见。
+pub(crate) fn set_ui_scale(s: UiScale) {
+    let v = match s {
+        UiScale::Small => 0u8,
+        UiScale::Medium => 1,
+        UiScale::Large => 2,
+    };
+    SCALE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 当前档的全部量。**每帧被调 182 次**（每个 `fs_*()` 一次）
+pub(crate) fn metrics() -> Metrics {
+    UiScale::from_stored(match SCALE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => "small",
+        2 => "large",
+        _ => "medium",
+    })
+    .metrics()
+}
 
 /// 元信息、弱提示（标签、说明）
-pub(crate) const FS_META: f32 = 11.0;
+pub(crate) fn fs_meta() -> f32 {
+    metrics().meta
+}
 /// 次要文字（表格行、副标题）
-pub(crate) const FS_SEC: f32 = 12.0;
+pub(crate) fn fs_sec() -> f32 {
+    metrics().sec
+}
 /// 正文
-pub(crate) const FS_BODY: f32 = 13.0;
+pub(crate) fn fs_body() -> f32 {
+    metrics().body
+}
 /// 卡片标题 / 弹窗标题
-pub(crate) const FS_TITLE: f32 = 16.0;
+pub(crate) fn fs_title() -> f32 {
+    metrics().title
+}
 /// 页面主标题
-pub(crate) const FS_HEAD: f32 = 18.0;
+pub(crate) fn fs_head() -> f32 {
+    metrics().head
+}
 /// 统计卡大数字
-pub(crate) const FS_NUM: f32 = 20.0;
+pub(crate) fn fs_num() -> f32 {
+    metrics().num
+}
 
-/// 小色块 / 进度条
+/// 小色块 / 进度条段 / 图例点。**小控件不跟主题**（v4 §3.1）
 pub(crate) const R_SM: f32 = 4.0;
-/// chip、徽章、图例方块
+/// 键帽、图标小底
 pub(crate) const R_MD: f32 = 6.0;
-/// 按钮、列表行、小面板
-pub(crate) const R_LG: f32 = 8.0;
-/// 大卡片、表格容器
-pub(crate) const R_XL: f32 = 12.0;
-
+/// 按钮、输入框、列表行、卡内盒、导航项。
+///
+/// ⚠️ **读主题，不写常量**（v4 §3.1）。官方件全都直接吃 `cx.theme().radius`
+/// （`button.rs:625`、`alert.rs:180`、`combobox.rs:993`、`group_box.rs:176`、
+/// `dock/tab_panel.rs:70`、`command/state.rs:715`）——这里再钉一个常量，
+/// 得到的就是"按钮 14 而我们的卡 12"，而**它不报错，只是一屏看着不齐**。
+/// 阶段 31 之前它是 `const 8.0`，与 `theme.json` 的 `radius` 恰好相等，
+/// 所以那条分叉一直藏着，直到提档才现形。
+pub(crate) fn r_lg(t: &Theme) -> f32 {
+    t.radius.as_f32()
+}
+/// 大卡片、弹窗、抽屉 = `theme.json` 的 `radius.lg`
+pub(crate) fn r_xl(t: &Theme) -> f32 {
+    t.radius_lg.as_f32()
+}
 /// 密集排列：同一串**同类元素**相邻两项之间的呼吸量。
 ///
 /// 覆盖三种关系（`UI-DESIGN.md` 4.2 的间距语义表里补的这一行）：
@@ -229,28 +426,122 @@ pub(crate) const GAP_DENSE: f32 = 2.0;
 pub(crate) const GAP_TIGHT: f32 = 4.0;
 /// 常规（图标与文字、行内元素）
 pub(crate) const GAP: f32 = 8.0;
-/// 分组（卡片内区块）
+/// 分组：**卡片之间**、卡内区块之间
 pub(crate) const GAP_LG: f32 = 12.0;
+/// **卡内边距**（v4 新增档）。
+/// ⚠️ 卡内 16 与卡间 12 是两件事。原型那两处是 16 和 10——**卡间落地用 12，
+/// 不为 2px 开一档**（开了这一档，下一处就会开出 11 和 13）。真机比原型略松，
+/// 这是有意的偏差，不是照搬像素（v4 §3.2、§11）
+pub(crate) const GAP_XL: f32 = 16.0;
+
+// ---------- 阴影：卡这一层的唯一出处（v4 §3.4 那张表落在这里）----------
+//
+// ⚠️ **只能自绘**。官方件那条路只给一个预设 `shadow_xs()`，且被
+// `cx.theme().shadow` 那个**布尔总开关**门控（`button.rs:643`）——压不了、也调不了。
+// `theme.json` 里**没有阴影形状键**（那 100 个键一个都不是），别往里填
+// `BoxShadow`，那是一份永远读不到的死配置。
+//
+// 判据：`sh_2 → sh_2b` 是"重一点就够"，跳到大档会像换了一颗控件。
+// **只有浮层能跨到 `sh_3`**——它要回答的是"我不在这一层"，不是"我被选中了"。
+//
+// ⚠️ v4 §3.4 那张表是**四档**，这里落的是**有调用点的那几档**。
+// `SH_3`（弹窗 / 菜单 / 气泡）现在没有落点——留一份没人用的档，`cargo check`
+// 每次报 unused，而"零错零警"是本项目的出口条件 ⇒ 它跟着阶段 31.4 的浮层进来。
+// `SH_2B`（卡悬停）另有一处基座事实挡着，见 `sh_2` 那条注释。
+
+/// 阴影的墨色：浅色档用 `ink` 带透明度，深色档用纯黑。
+/// 深色下阴影基本不参与"浮起"判读（v4 §8.2），所以那一档只加深不放大
+fn shadow_ink(t: &Theme, a: f32) -> Hsla {
+    if t.is_dark() {
+        hsla(0.0, 0.0, 0.0, a)
+    } else {
+        rgb(0x0C1B1F).opacity(a).into()
+    }
+}
+
+/// 一层：`0 {oy}px {blur}px {spread}px ink`
+fn shadow_layer(oy: f32, blur: f32, spread: f32, ink: Hsla) -> BoxShadow {
+    BoxShadow::new(px(0.0), px(oy), ink)
+        .blur_radius(px(blur))
+        .spread_radius(px(spread))
+}
+
+/// `SH_1` **内嵌小件**：图标底块、键帽、选中页签。
+/// 它是"从自己所在的面上抬一点点"，不是"浮到另一层"——所以只有一层、
+/// 模糊 2px、墨 4%。与 `sh_2` 的差别必须是"重一点就够"的量级。
+pub(crate) fn sh_1(t: &Theme) -> Vec<BoxShadow> {
+    vec![shadow_layer(
+        1.0,
+        2.0,
+        0.0,
+        shadow_ink(t, if t.is_dark() { 0.24 } else { 0.04 }),
+    )]
+}
+
+/// `SH_2` **卡片静置（默认）**。
+///
+/// ⚠️ `SH_2B`（卡片悬停）那一档**没落**：gpui 的裸 `Div` **没有 `.hover()` 样式入口**
+/// （全 crate 只有 `inspector.rs:94` 那个内部用的 `hover`），悬停靠 `on_hover` 记状态
+/// ——那要求每张卡都挂一份 hover 标志，属于阶段 31.4 的版面改造，不在档位层。
+pub(crate) fn sh_2(t: &Theme) -> Vec<BoxShadow> {
+    let (near, far) = if t.is_dark() { (0.24, 0.34) } else { (0.04, 0.09) };
+    vec![
+        shadow_layer(1.0, 2.0, 0.0, shadow_ink(t, near)),
+        shadow_layer(2.0, 6.0, -2.0, shadow_ink(t, far)),
+    ]
+}
+
+// ---------- 图标底块：一档，不许多 ----------
+//
+// v4 第 5.3 节的核心手法：**图标的视觉重量靠底块面积，不靠笔画**。
+// 笔画那条路是堵着的——1830 个 lucide 里 1825 个硬编码 `stroke-width="2"`，
+// `paint_svg` 只吃一个 `Hsla`，`Icon` 不暴露 stroke API（v4 §5.2、§9）。
+//
+// ⚠️ **只开一档**。原型里 42 / 40 / 46 混着画过，落地统一 40（v4 §11）。
+// 多开一档的代价不是"现在不好看"，是下一处会开出第四档。
 
 // 按钮高度不再自定数值：官方命名档才是配套的（Medium = 32px 高 / 14px 字 /
 // 16px 图标，Small = 24px 高 / 14px 字 / 14px 图标）。
 // 之前用 Size::Size(px(30)) 这类自定义档，官方 Button 会把文字放大到
 // 16px、图标放大到 size×0.75（22.5px）——整屏图标过大、字顶边的根因。
 
+// ---------- 图标底块：一档，不许多 ----------
+//
+// v4 第 5.3 节的核心手法：**图标的视觉重量靠底块面积，不靠笔画**。
+// 笔画那条路是堵着的——1830 个 lucide 里 1825 个硬编码 `stroke-width="2"`，
+// `paint_svg` 只吃一个 `Hsla`，`Icon` 不暴露 stroke API（v4 §5.2、§9）。
+//
+// ⚠️ **只开一档**。原型里 `.glyph` 42/13、`.stat .glyph` 42/13、还有一处 46/15
+// 三种尺寸混着画过，落地统一 40/12（v4 §11 那三处"有意不等"之一）。
+// 多开一档的代价不是"现在不好看"，是下一处会开出第四档。
+
+/// 底块边长
+pub(crate) const GLYPH: f32 = 40.0;
+/// 底块圆角
+pub(crate) const GLYPH_R: f32 = 12.0;
+/// 底块里的图标尺寸
+pub(crate) const GLYPH_ICON: f32 = 20.0;
+
 /// 图标档位：行内小图标
 pub(crate) const ICON_SM: f32 = 14.0;
 /// 图标档位：按钮内图标
 
-/// 状态胶囊的高度（阶段 21-3）。
+/// 状态胶囊的高度（阶段 21-3；阶段 28 起跟随字号档）。
 ///
-/// **24 是官方 `Size::Small` 按钮的高度**，不是随手取的：胶囊经常与一颗
+/// **小档 24 = 官方 `Size::Small` 按钮的高度**，不是随手取的：胶囊经常与一颗
 /// 幽灵小按钮并排在同一行里（日志结论行、仓库头、侧栏行后缀），
 /// 行高由最高的那件决定——胶囊跟着按钮取同一个高度，两类东西才在一条基线上。
 ///
 /// 早先写死 20，那 20 里装 11px 的字上下各只剩 4.5px，实机看着「太扁」。
-/// ⚠️ **只改外框不动字**：字仍是 `FS_META`。把字一起放大就是把徽章升格成
+/// ⚠️ **只改外框不动字**：字仍是 `fs_meta()`。把字一起放大就是把徽章升格成
 /// 第二级文字，行内会开始互相打架——那不是「胶囊加高」想要的
-pub(crate) const PILL_H: f32 = 24.0;
+///
+/// ⚠️ **它必须跟字号档一起动**（阶段 28）：中档字号从 11px 升到 12px，
+/// 24px 的胶囊里那 12px 的字上下只剩 6px 气口，贴着边。
+/// 换档时只改字号不改这一档，胶囊里那行字就被切
+pub(crate) fn pill_h() -> f32 {
+    metrics().pill_h
+}
 pub(crate) const ICON: f32 = 16.0;
 
 // ---------- 壳层版面：窗口与四个列区的宽度 ----------
@@ -262,11 +553,35 @@ pub(crate) const ICON: f32 = 16.0;
 /// （`refine_style` 在官方 `.h(TITLE_BAR_HEIGHT)` 之后生效，覆盖得住）。
 ///
 /// 早先按设计稿写的 48px，实机看着"太宽"——那 14px 多出来的不是呼吸，
-/// 是把窗口上沿整整吃掉一条，3456px 宽的屏上尤其明显。40px 仍在
-/// Windows 习惯的 32–40 区间里，点 X / 最小化也照样好按。
-pub(crate) const TITLE_BAR_H: f32 = 40.0;
-/// 状态条固定高
-pub(crate) const STATUS_BAR_H: f32 = 28.0;
+/// 是把窗口上沿整整吃掉一条，3456px 宽的屏上尤其明显。
+/// 小档 40px 仍在 Windows 习惯的 32–40 区间里，点 X / 最小化也照样好按。
+///
+/// ⚠️ **它跟着字号档走**（阶段 28）：标题栏里有标题文字与窗口控件，
+/// 字放大而这一档不动，字就贴上沿/下沿。**别改成 const**——
+/// `TITLE_BAR_CTRL_W` 才是不能动的那个（系统命中区约定）
+pub(crate) fn title_bar_h() -> f32 {
+    metrics().title_bar_h
+}
+/// 状态条固定高。**跟着字号档走**（阶段 28）：里面那行"重新扫描"带
+/// `fs_sec()` 的字，写死 28 在大档（16px）就贴边了。
+/// 取 `fs_sec() × 2` ⇒ 小/中档仍是 28（**与今天一模一样，不动现有观感**），
+/// 只有大档才长到 32
+pub(crate) fn status_bar_h() -> f32 {
+    fs_sec() * 2.0
+}
+
+/// 一行「图标 + 文字（+ 右侧小按钮）」的行高。**由字号派生，不许写死**。
+///
+/// **为什么必须是函数而不是常量**（阶段 28）：三档字号差了 2~4px，
+/// 写死的那一行从中档就开始贴边、到大档必切。而"切字"这种缺陷
+/// `cargo check` 零错、单测全绿、**抓帧看着也只是"有点挤"**——
+/// 它不会以任何形式报错，只能靠把行高写成字号的函数来保证它不可能发生。
+///
+/// 1.9 倍是「上下气口加起来约等于一个字高」，与
+/// `the_pill_is_tall_enough_for_the_text_it_carries` 同一个判据口径
+pub(crate) fn row_h(text_px: f32) -> f32 {
+    text_px * 1.9
+}
 /// 导航轨列宽。
 ///
 /// 56 收成 44：轨上只放 32px 的图标按钮，左右各留 6px 正好。
@@ -284,6 +599,16 @@ pub(crate) const NAV_PAD: f32 = 6.0;
 /// ② 「身份技术栈」那类四字标签 + 12px 说明句要能一行放下不断字。
 /// 再宽就只是"一列空地"，和 `NAV_W` 当初从 56 收成 44 是同一条理由
 pub(crate) const SET_NAV_W: f32 = 190.0;
+/// 设置页表单行的**标签列宽**（阶段 31.5，`widgets::FormRows` 用）。
+///
+/// **112 是被"最长那条标签不断字"夹出来的**，不是目测：一屏里最长的
+/// 是「GitHub 令牌」（7 个拉丁 + 空格 + 2 个汉字，`fs_body()` 下实测约 95px），
+/// 中文五字标签（「关闭窗口时」）约 80px。留 112 是因为标签列一旦折行，
+/// 整页的行高就不齐了——**那正是这一轮要治的"排版乱"**。
+///
+/// ⚠️ 它是**一列**的宽，不是一档间距：全站只有 `FormRows` 读它。
+/// 别在别处再写一个 `w(px(112.))`（那是 v4 §6 登记表要挡的那一类）
+pub(crate) const FORM_LABEL_W: f32 = 112.0;
 /// 导航轨顶部内边距。
 ///
 /// **这个数不是随手取的，是一条对齐基线定死的**：
@@ -425,35 +750,79 @@ pub(crate) fn icon_md(name: impl Into<Icon>) -> Icon {
     Icon::new(name).with_size(Size::Size(px(ICON)))
 }
 
+/// 图标底块里的图标（20px，`GLYPH_ICON` 那一档）。
+///
+/// ⚠️ 这里的 `Size::Size(px(..))` **不是** AGENTS 禁写的那一条：禁的是**官方 `Button`**
+/// 的自定义 px 档（它会联动把文字放大到 16px、图标 size×0.75）。
+/// `Icon` 自己的 `with_size` 就是字面尺寸，且 `.icon(icon_md(..))` 传进 Button 时
+/// 尺寸会被无条件丢弃（`button.rs:756-761`）——所以这一档**只能直接放进容器**，
+/// 不能指望它穿过 Button 生效。
+pub(crate) fn icon_box(name: impl Into<Icon>) -> Icon {
+    Icon::new(name).with_size(Size::Size(px(GLYPH_ICON)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 导航轨的底是白卡（`sidebar.background` = #FFFFFF），设计规范板的选中面是
-    /// `sidebar.accent.background` = #EDEBE7。**遮罩叠上去必须落在这附近**——
-    /// 差太远就说明 `SELECTED_MASK_ALPHA` 跟设计规范板脱钩了，
-    /// 也说明"导航轨的选中面"和"侧栏仓库行的选中面"已经不是同一个东西。
+    /// **v4 的三条硬指标直接钉在 `theme.json` 上**（阶段 31.1 起）。
     ///
-    /// 这里的字面量是**规范板**的值，不是代码里任何一处的值：主题真源在
-    /// `gui/theme.json`，本测试钉的是"遮罩与规范板对得上"这条**关系**。
+    /// 为什么不测 `selected_mask(t)` 而测文件：`Theme` 要 gpui 上下文才造得出来，
+    /// 而 Windows 上没有 `VisualTestContext`（D40）。⇒ 判据落到那份**真源**上，
+    /// 顺带把 §10.1 那张归并表里最容易漏的三条也钉了。
+    ///
+    /// 三条各拦一种真实会犯的错：
+    /// ① **卡与画布的反差 ≥ 12/255**——这是"太普通"的头号根因（改前只有 5），
+    ///    低于它卡就是贴在底上，边界全靠描边硬撑；
+    /// ② **选中面（wash）与卡底也 ≥ 12/255**——遮罩机制已退役（见 `selected_mask`），
+    ///    选中态现在完全靠实色，这一档塌了"我在哪一屏"就没了；
+    /// ③ **标题栏 / 状态条 = 画布、斑马纹 = 卡底**——这两条是 §10.1 归并表的内容，
+    ///    它们不在任何一张色板表里，**换色板时最容易只改主战场、留下这两处旧值**。
     #[test]
-    fn mask_lands_on_the_design_boards_selection_face() {
-        let ink: Hsla = rgb(0x1A1A1A).into(); // theme.json: foreground
-        let card: Hsla = rgb(0xFFFFFF).into(); // theme.json: sidebar.background
-        let board: Hsla = rgb(0xEDEBE7).into(); // 设计规范板: 选中面
-        let got = card
-            .to_rgb()
-            .blend(ink.opacity(SELECTED_MASK_ALPHA).to_rgb());
-        let want = board.to_rgb();
-        let gap = |a: f32, b: f32| ((a - b) * 255.0).abs();
-        let worst = gap(got.r, want.r)
-            .max(gap(got.g, want.g))
-            .max(gap(got.b, want.b));
-        assert!(
-            worst <= 8.0,
-            "遮罩叠白卡得 {got:?}，规范板选中面是 {want:?}，差 {worst:.1}/255——\
-             这两个数必须看着一样，否则导航轨的选中面和侧栏仓库行的选中面已经分家了"
-        );
+    fn theme_json_holds_the_v4_contrast_rules() {
+        let raw = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/theme.json"))
+            .expect("gui/theme.json 读不到");
+        let doc: serde_json::Value = raw.parse().expect("gui/theme.json 不是合法 JSON");
+        let themes = doc["themes"].as_array().expect("themes 必须是数组");
+        assert_eq!(themes.len(), 2, "明暗两套必须都在");
+
+        let rgb_of = |hex: &str| -> [f64; 3] {
+            let h = hex.trim_start_matches('#');
+            [
+                u8::from_str_radix(&h[0..2], 16).unwrap() as f64,
+                u8::from_str_radix(&h[2..4], 16).unwrap() as f64,
+                u8::from_str_radix(&h[4..6], 16).unwrap() as f64,
+            ]
+        };
+        // 最大通道差，与 v4 §2.3 的算法一致（不是欧氏距离：那会让偏色相的小差蒙过去）
+        let gap = |a: [f64; 3], b: [f64; 3]| {
+            (a[0] - b[0])
+                .abs()
+                .max((a[1] - b[1]).abs())
+                .max((a[2] - b[2]).abs())
+        };
+
+        for th in themes {
+            let c = |k: &str| th["colors"][k].as_str().unwrap_or_else(|| panic!("缺键 {k}"));
+            let name = th["name"].as_str().unwrap();
+            let (canvas, card, wash) = (rgb_of(c("background")), rgb_of(c("secondary.background")), rgb_of(c("secondary.active.background")));
+            assert!(
+                gap(card, canvas) >= 12.0,
+                "{name}：卡与画布只差 {:.0}/255，低于 v4 §2.3 那条 12 的线——卡片又变成贴上去的了",
+                gap(card, canvas)
+            );
+            assert!(
+                gap(wash, card) >= 12.0,
+                "{name}：选中面与卡底只差 {:.0}/255，选中态等于没有",
+                gap(wash, card)
+            );
+            for k in ["title_bar.background", "status_bar.background"] {
+                assert_eq!(c(k), c("background"), "{name}：{k} 必须跟画布同值（§10.1）");
+            }
+            for k in ["list.even.background", "table.even.background"] {
+                assert_eq!(c(k), c("secondary.background"), "{name}：{k} 还留着斑马纹，而 v4 的行区分靠 hover + 左侧竖条（§10.1）");
+            }
+        }
     }
 
     /// 导航轨的**三处**内边距各由不同的理由钉死：横向被"装得下按钮"钉死、
@@ -475,61 +844,118 @@ mod tests {
             }
         }
     }
-    /// 三个字号档必须**严格递减且各自不同**（阶段 21-8 的回归闸门）。
+    /// 三个字号档必须**严格递增且各自不同**（阶段 21-8 的回归闸门，阶段 28 扩到三档）。
     ///
     /// 六档是历史上一处一处长出来的，早先长出过 9 种圆角、6 种按钮高度
     /// （AGENTS.md 视觉规范一节记着那次扫描）。字号重演同一件事时，
     /// 数字对不对得上编译器不管、lint 也不管——所以钉一条。
+    ///
+    /// ⚠️ **只碰 `UiScale::metrics()` 这个纯函数，不碰 `set_ui_scale` 那个
+    /// 运行期载体**：后者是进程级全局，而 cargo 默认多线程跑同一个二进制里的
+    /// 用例，一个用例改档会让另一个正在断言的用例拿到错的数——
+    /// 这正是 `AGENTS.md` 记着 `diag` / `scan_cache` 那两次 flaky 的形状。
     #[test]
     fn font_sizes_stay_ordered_and_distinct() {
-        let body = [FS_META, FS_SEC, FS_BODY];
-        for i in 0..body.len() {
-            for j in (i + 1)..body.len() {
-                assert_ne!(
-                    body[i], body[j],
-                    "正文的三个字号档不能共用同一个值，现在都是 {}：{body:?}",
-                    body[i]
-                );
+        for s in UiScale::ALL {
+            let m = s.metrics();
+            let six = [m.meta, m.sec, m.body, m.title, m.head, m.num];
+            for i in 0..six.len() {
+                for j in (i + 1)..six.len() {
+                    assert_ne!(
+                        six[i], six[j],
+                        "{}档里有两个字号撞了（{i} 与 {j} 都是 {}）：{six:?}",
+                        s.label(),
+                        six[i]
+                    );
+                }
             }
+            assert!(
+                m.meta < m.sec && m.sec < m.body && m.body < m.title
+                    && m.title < m.head && m.head <= m.num,
+                "{}档的六档必须一路递增：{six:?}",
+                s.label()
+            );
         }
-        assert!(
-            FS_META < FS_SEC && FS_SEC < FS_BODY,
-            "三档必须是 11 < 12 < 13 的顺序，现在是 {body:?}"
-        );
-        // 标题三档同样不许塌成一档。**不强制它们被用**，只保证有人想用
-        // 大一号时有档可取，而不是就地写 `px(17.0)`
-        let title = [FS_TITLE, FS_HEAD, FS_NUM];
-        for i in 0..title.len() {
-            for j in (i + 1)..title.len() {
-                assert_ne!(
-                    title[i], title[j],
-                    "标题三档不能共用同一个值，现在都是 {}：{title:?}",
-                    title[i]
-                );
-            }
-        }
-        assert!(
-            FS_BODY < FS_TITLE && FS_TITLE < FS_HEAD && FS_HEAD <= FS_NUM,
-            "标题档必须一路大于正文档（13），现在是 {FS_BODY} / {title:?}"
-        );
     }
 
-    /// 胶囊高度要装得下它带的字：24 高装 11px 字，上下各留 6.5px。
+    /// **底部三档两两至少差 2px——三档都要满足**（阶段 28 的核心不变式）。
+    ///
+    /// 这条是这一轮真正的判据，不是审美偏好。2026-10-06 报的
+    /// 「整个界面文字都太小、层级也乱」，量出来的根因是老的
+    /// **11 / 12 / 13 三档只差 1px**：这个步进肉眼分不出来，
+    /// 于是「三级」读起来就是「小一号的正文」而不是一个层级。
+    ///
+    /// **为什么每档都是六档全套整数、而不是「一套值 × 一个系数」**：
+    /// 系数一乘，`12×0.9 = 10.8` 与 `14×0.9 = 12.6` 只差 1.8，
+    /// 层级又回到分不出来。**这条测试就是拦住"改成系数"那一步的**——
+    /// 它会在有人想把三档并成一个倍数时立刻红。
+    #[test]
+    fn the_bottom_three_tiers_are_far_enough_apart_to_read_as_levels() {
+        for s in UiScale::ALL {
+            let m = s.metrics();
+            let steps = [(m.meta, m.sec), (m.sec, m.body)];
+            for (lo, hi) in steps {
+                assert!(
+                    hi - lo >= 2.0,
+                    "{}档：{} 与 {} 只差 {:.1}px，肉眼分不出层级（要 ≥ 2px）",
+                    s.label(),
+                    lo,
+                    hi,
+                    hi - lo
+                );
+            }
+        }
+    }
+
+    /// 胶囊高度要装得下它带的字。**每档都要验**（阶段 28 起了三档）。
     ///
     /// **20 高那一版是真出过问题的**（阶段 21-3）：11px 的字装在 20 高里
     /// 上下各只剩 4.5px，实机看着「太扁」。这条不是审美偏好，是
     /// 「气口至少要能容下一个字高」——低于它就该换档，而不是再压一点。
+    ///
+    /// ⚠️ **上界随档走**（原写死 28）：大档的字就大，胶囊 32 高仍然是徽章；
+    /// 拿中档的 28 去卡大档，会把一档配好的量判成缺陷。
     #[test]
     fn the_pill_is_tall_enough_for_the_text_it_carries() {
-        assert!(
-            PILL_H >= FS_META * 2.0,
-            "胶囊 {PILL_H} 高装 {FS_META} 的字：上下气口不足一个字高，看着会扁"
-        );
-        // 也不必过高——胶囊与并排的 `Size::Small` 按钮同高才对得齐基线
-        assert!(
-            PILL_H <= 28.0,
-            "胶囊 {PILL_H} 高过 28 就不是徽章了，它会和旁边的正文抢视觉重量"
-        );
+        for s in UiScale::ALL {
+            let m = s.metrics();
+            assert!(
+                m.pill_h >= m.meta * 2.0,
+                "{}档：胶囊 {} 高装 {} 的字：上下气口不足一个字高，看着会扁",
+                s.label(),
+                m.pill_h,
+                m.meta
+            );
+            // 也不必过高——胶囊与并排的 `Size::Small` 按钮同高才对得齐基线
+            assert!(
+                m.pill_h <= m.meta * 2.5,
+                "{}档：胶囊 {} 高过字高的 2.5 倍就不是徽章了，它会和旁边的正文抢视觉重量",
+                s.label(),
+                m.pill_h
+            );
+        }
+    }
+
+    /// 认不出的值一律落中档，**不许静默取一个"看着差不多的"**。
+    ///
+    /// 与 `theme.rs` 对配色名的处理同一条纪律：老配置里根本没有这个字段
+    /// （`#[serde(default)]` 给的是空串），而"读到空串"与"用户选了中档"
+    /// 必须落在同一档上，否则会出现"界面上没选、实际等于中"的那种骗。
+    #[test]
+    fn an_unreadable_scale_string_lands_on_medium() {
+        for s in ["", "   ", "huge", "MEDIUM", "中", "small "] {
+            // 注意 `"small "` 带尾空格：配置是人手编辑的，清一下再认
+            let got = UiScale::from_stored(s);
+            let want = if s.trim() == "small" { UiScale::Small } else { UiScale::Medium };
+            assert_eq!(got, want, "把 {s:?} 认成了 {got:?}，应该是 {want:?}");
+        }
+        // 正向两档也要认得
+        assert_eq!(UiScale::from_stored("small"), UiScale::Small);
+        assert_eq!(UiScale::from_stored("large"), UiScale::Large);
+        // 存回去的串要能被自己认回来（**往返闭合**）
+        for s in UiScale::ALL {
+            assert_eq!(UiScale::from_stored(s.stored()), s, "{}档往返不闭合", s.label());
+        }
     }
 
     /// **回弹必须看得见**——这条钉的是"过冲量落在人眼能分辨的区间里"。

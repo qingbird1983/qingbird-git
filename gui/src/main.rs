@@ -31,6 +31,7 @@ mod dialogs;
 mod drag_drop;
 mod history_tab;
 mod inspector;
+mod keys;
 mod log;
 mod ops;
 mod os;

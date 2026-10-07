@@ -166,7 +166,7 @@ fn commit_body(
                 .gap(px(GAP_TIGHT))
                 .child(
                     div()
-                        .text_size(px(FS_META))
+                        .text_size(px(fs_meta()))
                         .text_color(tier4(t))
                         .child(format!("变更摘要 · {} 个文件", st.changes.len())),
                 )
@@ -174,7 +174,7 @@ fn commit_body(
                     div()
                         .w_full()
                         .max_h(px(220.0))
-                        .rounded(px(R_LG))
+                        .rounded(px(r_lg(t)))
                         .border_1()
                         .border_color(t.colors.border)
                         .bg(t.colors.muted)
@@ -195,7 +195,7 @@ fn commit_body(
                 .gap(px(GAP_TIGHT))
                 .child(
                     div()
-                        .text_size(px(FS_META))
+                        .text_size(px(fs_meta()))
                         .text_color(tier4(t))
                         .child("提交信息"),
                 )
@@ -224,7 +224,7 @@ fn commit_body(
             b.child(
                 div()
                     .w_full()
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(t.colors.danger)
                     .child(e),
             )

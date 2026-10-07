@@ -97,14 +97,14 @@ impl Shell {
             .w_full()
             .child(
                 div()
-                    .text_size(px(FS_BODY))
+                    .text_size(px(fs_body()))
                     .text_color(body(t))
                     .child("关闭窗口之后，这个程序还在后台跑：托盘图标留着，定时自动同步照常触发。"),
             )
             .child(
                 div()
                     .mt(px(GAP_TIGHT))
-                    .text_size(px(FS_SEC))
+                    .text_size(px(fs_sec()))
                     .text_color(tier3(t))
                     .child("真的要关掉整个程序（后台同步也会停）吗？"),
             )

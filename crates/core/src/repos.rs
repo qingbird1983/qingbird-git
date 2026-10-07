@@ -360,8 +360,22 @@ pub fn normalize_path_input(s: &str) -> String {
     }
 }
 
-/// 添加仓库；已在列表里则原样返回，不重复添加
-pub fn add_repo(path: &str) -> Result<Vec<RepoEntry>, String> {
+/// 添加仓库；已在列表里则原样返回，不重复添加。
+///
+/// ## `third` 为什么是必填参数而不是事后补一句
+///
+/// 归属（我的 / 第三方）曾经只是个可选的补丁动作：这里造一条默认记录，
+/// 谁要是记得，再去调 `store::set_third_party` 补上。于是**每条添加路径
+/// 都得自己记得补**，而拖放那条（`gui/src/drag_drop.rs`）忘了——
+/// 在「第三方仓库」页拖进来的文件夹一律落进「我的仓库」（2026-10-06 实机）。
+///
+/// 这跟老版本（`11d56d0` 的 `api.addRepo(path)`）是同一个毛病，不是重写引入的。
+/// 修法不是给拖放补上那一句，而是**让它没有"忘"这个选项**：
+/// 归属是这一个函数的入参，漏传编译不过，编译器替我们记住。
+///
+/// ⚠️ 已存在时**不改归属**（与旧行为一致）：重复添加不是"改分类"，
+/// 想改归属走 `store::set_third_party` 或界面上的「移到第三方仓库」。
+pub fn add_repo(path: &str, third: bool) -> Result<Vec<RepoEntry>, String> {
     let path = path.trim().to_string();
     if !valid_repo(&path) {
         return Err("所选文件夹不是 git 仓库（未找到 .git）".to_string());
@@ -372,6 +386,7 @@ pub fn add_repo(path: &str) -> Result<Vec<RepoEntry>, String> {
             name: repo_name(&path),
             path: path.clone(),
             added_at: store::now_secs(),
+            is_third_party: third,
             ..RepoEntry::default()
         });
     }
