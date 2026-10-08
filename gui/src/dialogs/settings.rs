@@ -51,7 +51,9 @@ use std::collections::HashMap;
 use crate::detail::DetailTab;
 use crate::state::*;
 use crate::tokens::*;
-use crate::widgets::{card, CardHeader, FormRows, ghost_variant, info_dot, meta_text, pill};
+use crate::widgets::{
+    CardHeader, FormRows, card, ghost_variant, info_dot, meta_text, pill, sunken_box,
+};
 use gpui_kit::FocusHandle;
 
 /// 代理探测一次最多试几个候选。挨个试完 7897/7890/10808 加系统代理
@@ -258,7 +260,13 @@ impl Shell {
                 // 挤在 448 里的话，右边能放的字不到 30 个一行，
                 // 输入框与勾选框全得折行。**上限是视口减去两侧留白**，
                 // 官方自己会夹（`dialog.rs:580`）
-                .w(px(720.0))
+                // ⚠️ **720 → 880**（2026-10-08 用户："左边太大了，右边卡片太小了"）。
+                // 病根不是左栏宽，是**总宽只够左栏把右栏挤到 ≈480**——
+                // 而 480 正是官方 `setting::Settings` 转竖排的那条线
+                // （`settings.rs:425`），右栏一直贴着下限过活。
+                // 现在 880 − 左栏 150 − 缝 12 − 内边距 ≈ **700**，
+                // 「显示哪些模块」两栏一行一项才铺得开
+                .w(px(880.0))
                 .content({
                     let t = t.clone();
                     let this = this.clone();
@@ -595,8 +603,9 @@ impl SetCard {
     }
 
     /// 卡身内容。**收 `impl IntoElement` 而不是收 `FormRows`**：
-    /// 「显示哪些模块」那一段是两栏并排的勾选盒、不是一行一行的表单，
-    /// 为它另开一个 `build_body()` 就是同一件事两个入口（D89 那一族）。
+    /// 「显示哪些模块」那一段是**两组并排的勾选盒**，组内一行一项——
+    /// 它不是 `FormRows` 那种"左标签 + 右控件"的结构，为它另开一个
+    /// `build_body()` 就是同一件事两个入口（D89 那一族）。
     /// 传 `FormRows::new().row(..).build(t)` 与传一个 `h_flex` 走同一条路
     fn build(self, t: &Theme, gv: ButtonCustomVariant, content: impl IntoElement) -> Div {
         let mut hdr = CardHeader::new(self.title);
@@ -660,14 +669,22 @@ fn settings_body(
         .child(set_pane(t, st, this, gv))
 }
 
-/// 正文那块的定高。夹在 300..480：低于 300 装不下「身份与访问」那一页的
-/// 五格输入（实测 410），高于 480 弹窗会顶到官方那道 `max_h`
-/// （`dialog.rs:582` 的 `view_size − margin × 2`），于是又多一层我们管不到的裁切
+/// 正文那块的定高。**0.55 / 上限 480 → 0.72 / 上限 600**（2026-10-08 用户："右边卡片太小了"）。
 ///
-/// **定高而不是让它随内容长**：三页内容量差两倍（网络页 250 / 身份页 410），
-/// 跟着内容走的话每切一次分类弹窗就长高或缩一截，焦点跟着跳
+/// 三页内容量差很多（网络页 250 / 身份页 410 / **显示页在「模块」改成一行一项之后 557**），
+/// 而 480 那一档是"模块两列"时代量的——列数一改成 1，显示页就装不下了，
+/// 最后两项掉到滚动线以下。**卡片太小这件事有两半：宽（弹窗 720→880、左栏 190→140）
+/// 和高（就是这一档）**，只改宽等于把内容挤得更长。
+///
+/// 上限 600 的天花板仍是官方那道 `max_h`（`dialog.rs:582` 的 `view_size − margin × 2`）：
+/// 1080 高的窗口给 ≈760，弹窗 = 标题 50 + 正文 + 底部按钮 60 + 内边距 ⇒ 正文 600 放得下。
+/// 小窗口那一头由 `×0.72` 自己跟上（600 高的窗口 → 403），**下限 300 不动**：
+/// 低于 300 连身份页那五格输入都放不下（实测 410）
+///
+/// **定高而不是让它随内容长**：跟着内容走的话每切一次分类弹窗就长高或缩一截，
+/// 焦点跟着跳
 fn pane_height(window: &Window) -> Pixels {
-    (window.viewport_size().height * 0.55).clamp(px(300.0), px(480.0))
+    (window.viewport_size().height * 0.72).clamp(px(300.0), px(600.0))
 }
 
 /// 左侧分类导航。**不是官方 `setting::Settings`**——查过了，三个理由：
@@ -1012,9 +1029,11 @@ fn display_page(t: &Theme, st: &SettingsState, this: &Entity<Shell>, gv: ButtonC
                 .build(
                     t,
                     gv,
-                    // **两栏并排，不是两行**：九项勾成一列要 300px 高，而这两组是
-                    // **同一件事的两份**（同一批模块、两种仓库），并排才读得出
-                    // "它们在对照"；上下排会读成两个独立段落
+                    // **两组并排，不是一上一下**：这两组是**同一件事的两份**
+                    // （同一批模块、两种仓库），并排才读得出"它们在对照"；
+                    // 上下排会读成两个独立段落。
+                    // ⚠️ 组**内部**是一行一项（`MOD_COLS`，2026-10-08 用户定）——
+                    // "并排"说的是两组之间这一层，别拿它去压组内的列数
                     v_flex()
                         .w_full()
                         .gap(px(GAP_LG))
@@ -1135,10 +1154,14 @@ fn close_action_picker(st: &SettingsState, this: &Entity<Shell>) -> impl IntoEle
         })
 }
 
-/// 勾选区一行放几颗。**两列**（阶段 31.5 从三列改过来）：
-/// 两组现在是**并排的两个盒子**，每栏只剩 ~200px，三列每列 60px 连"语言技术栈"
-/// 都放不下。⇒ 改的是**版面约束**，不是审美：并排之后放得下的列数变了
-const MOD_COLS: usize = 2;
+/// 勾选区一行放几颗。**一行一项**（2026-10-08 用户："把显示哪些模块按照一行一行的排版"）。
+///
+/// 这一档**从来不是审美，是宽度的函数**：三列 → 两列（阶段 31.5，因为并排两盒之后
+/// 每栏只剩 ~200px，"语言技术栈"放不下）→ 一列（弹窗 720 → 880、左栏 190 → 150，
+/// 每栏现在 ~340px，一行一项还有余量）。
+/// ⇒ **以后动这一档要先动的是宽度**：`SET_NAV_W` 与弹窗 `.w()` 在那头，
+/// 只把这里改回 2 的话，两列并排会重新挤成折行
+const MOD_COLS: usize = 1;
 
 /// 这一页能勾的那些模块：`(配置里的键, 界面上的名字)`。
 ///
@@ -1196,18 +1219,20 @@ fn mod_grid(t: &Theme, st: &SettingsState, third: bool, this: &Entity<Shell>) ->
     let applicable = |k: &str| store::module_applicable(third, k);
     let (on, total) = mod_counts(third, &items, shown);
 
-    v_flex()
-        .flex_1()
-        // 少了 `min_w_0`，栏里任意一行字变长就把整栏顶宽，另一栏被挤到可视区外
-        // （与 Q17 那个挤压是同一族：**并排的列一定要 `flex_1 + min_w_0` 成对写**）
-        .min_w_0()
-        .gap(px(GAP_TIGHT))
-        .p(px(GAP))
-        .rounded(px(r_lg(t)))
-        .bg(t.colors.muted)
-        .border_1()
-        .border_color(track(t))
-        .child(
+    // 模块开关那一组是**只读的一栏**（里面没有可点的行，开关在栏的每一行里）
+    // ⇒ 走 `sunken_box`：`card-sunken` 底 + `line_soft` 边 + `r_lg`，
+    // 与提交弹窗那份变更清单同一个出处
+    sunken_box(
+        v_flex()
+            .flex_1()
+            // 少了 `min_w_0`，栏里任意一行字变长就把整栏顶宽，另一栏被挤到可视区外
+            // （与 Q17 那个挤压是同一族：**并排的列一定要 `flex_1 + min_w_0` 成对写**）
+            .min_w_0()
+            .gap(px(GAP_TIGHT))
+            .p(px(GAP)),
+        t,
+    )
+    .child(
             h_flex()
                 .w_full()
                 .items_center()
@@ -1374,16 +1399,41 @@ mod tests {
     /// 要求，而阶段 31.5 之前的 `hint()` 是一句 18 字长句，实测折成三行。
     /// **目标写在了注释里、内容没跟上**，就是这种没人管的漂移。
     ///
-    /// 14 个字是量出来的：190px 那一列减去左右内边距（8 + 4）与图标位，
-    /// `fs_meta()`（中档 12px）下一行放得下约 14 个汉字
+    /// ⚠️ **预算从列宽算出来，不抄字数**（D78 那条判据：让"忘"没有选项）。
+    /// 早先这里写死 `<= 14`，而那个 14 是"190px 那一列"推出来的——2026-10-08
+    /// 列宽收到 140 之后，14 这条断言就变成**绿着放不下**：断言还在、
+    /// 尺子已经不是那一列了（第一版改成 `<= 11` 时它立刻把「名字 · 令牌 · SSH」
+    /// 判红了，而那句在帧上实测只有 96px，是**误报**）。
+    ///
+    /// ⇒ 尺子按**字符类型加权**算宽：汉字按 `fs_meta` 中档 12px，
+    /// 拉丁 / 空格 / 「·」按半宽 6px（帧上那句 13 个字符量出来 96px，
+    /// 这个口径算出 114px，**偏保守但不误报**）。
+    /// 预算 = 列宽 − 缩进 14（`pl 8` + `pr 4` + `border_l 2`，见 `set_nav`）。
+    /// ⚠️ **大字号档（`fs_meta` 14px）下预算只剩 90**，这一列在大档会折行——
+    /// 已知取舍：切到大档时整屏都在变紧，不为这一列单独开一档宽度
     #[test]
     fn each_category_hint_fits_on_one_line_of_the_nav_column() {
+        const NAV_INDENT: f32 = 14.0;
+        const CJK_PX: f32 = 12.0;
+        let hint_px = |s: &str| -> f32 {
+            s.chars()
+                .map(|c| {
+                    if ('一'..='鿿').contains(&c) {
+                        CJK_PX
+                    } else {
+                        CJK_PX / 2.0
+                    }
+                })
+                .sum()
+        };
+        let budget = crate::tokens::SET_NAV_W - NAV_INDENT;
         for c in SetCat::ALL {
-            let n = c.hint().chars().count();
+            let w = hint_px(c.hint());
             assert!(
-                n <= 14,
-                "{} 的说明句 {n} 字，导航那一列放不下：{}",
+                w <= budget,
+                "{} 的说明句估宽 {w:.0}px，导航那一列只有 {:.0}px：{}",
                 c.label(),
+                budget,
                 c.hint()
             );
         }

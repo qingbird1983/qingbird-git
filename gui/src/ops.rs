@@ -450,12 +450,19 @@ impl Shell {
     /// 扫当前仓库的档案数据：语言统计 / 近 30 天活跃度 / README 原文。
     /// 一个后台任务跑完一次性上屏。
     ///
-    /// **README 与语言构成两类仓库都跑，只有活跃度只给第三方。**
+    /// **README 与语言构成两类仓库都跑，活跃度 2026-10-08 起也两类都跑。**
     /// README 在两类仓库的「说明」页签里都有，读一个文件又不贵；
     /// 语言构成 2026-10-05 起是概览页的**语言技术栈段**，那也是两类都有
     /// （`repo_languages` 要遍历 `git ls-files` 的每个文件，但不派生网络请求，
     /// 一次 ls-files + 一轮 metadata 足够，第三方那屏也正是靠它出那张条）。
-    /// `commit_activity` 要扫 30 天 log，那条只留给第三方的「仓库档案」卡
+    ///
+    /// ⚠️ 活跃度原来**只给第三方**，理由是"那条只留给第三方的「仓库档案」卡"。
+    /// 这个动机今天不成立了：用户第⑦条点名要把原型那句
+    /// 「近 30 天 11 天有提交 · 共 61 次」放到**头卡页签行右边**，而头卡是
+    /// **两类仓库共用的一块**（本文件顶上就写着"两类仓库共用同一个头"）。
+    /// 只给第三方 ⇒ 「我的仓库」那一屏那句话永远是空的。
+    /// 代价是一条本地 `git log --since`（不派网络请求，与 `ls-files` 同量级），
+    /// 而且它已经进了 `scan_cache`，第二次打开这个仓库直接读库
     pub(crate) fn scan_profile(&mut self, cx: &mut Context<Self>) {
         self.profile_seq += 1;
         self.profile_task = None;
@@ -463,7 +470,6 @@ impl Shell {
             self.profile = ProfileState::default();
             return;
         };
-        let third = self.selected_is_third();
         let seq = self.profile_seq;
         // ⚠️ 与 `scan_space` 同一个道理：**先把库里的那份灌进来**。
         // 否则 `ProfileState { scanning: true, ..Default }` 一执行，
@@ -483,11 +489,10 @@ impl Shell {
             let r = cx
                 .background_executor()
                 .spawn(async move {
-                    let activity = if third {
-                        repos::commit_activity(&repo, PROFILE_ACTIVITY_DAYS)
-                    } else {
-                        Vec::new()
-                    };
+                    // 活跃度**两类仓库都扫**（2026-10-08 第⑦条：那句统计要落到
+                    // 两类共用的头卡页签行右边）。原来 `if third` 那一臂留着，
+                    // 「我的仓库」那一屏就永远只能显示空的
+                    let activity = repos::commit_activity(&repo, PROFILE_ACTIVITY_DAYS);
                     (
                         repos::repo_languages(&repo),
                         activity,

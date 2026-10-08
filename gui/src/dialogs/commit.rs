@@ -23,7 +23,7 @@ use qingbird_core::repos::ChangeEntry;
 
 use crate::changes::changes_list;
 use crate::state::*;
-use crate::widgets::ghost_variant;
+use crate::widgets::{ghost_variant, sunken_box};
 use crate::tokens::*;
 
 /// 变更摘要最多列几条。超出的在末尾给"还有 N 个…"。
@@ -171,13 +171,11 @@ fn commit_body(
                         .child(format!("变更摘要 · {} 个文件", st.changes.len())),
                 )
                 .child(
-                    div()
-                        .w_full()
-                        .max_h(px(220.0))
-                        .rounded(px(r_lg(t)))
-                        .border_1()
-                        .border_color(t.colors.border)
-                        .bg(t.colors.muted)
+                    // 只读内容 → `sunken_box`（`card-sunken` 底 + `line_soft` 边）。
+                    // 原来这里自己写了 `border_color(t.colors.border)`——那是
+                    // **主描边**档（#D7E0E4），比卡边还重一档，坐在全是 `track`
+                    // 边的卡里就是"这一圈的边比卡的边粗"
+                    sunken_box(div().w_full().max_h(px(220.0)), t)
                         .id("commit-changes-scroll")
                         .overflow_y_scroll()
                         .py(px(GAP_TIGHT))

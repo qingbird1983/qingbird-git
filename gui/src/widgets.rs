@@ -188,42 +188,40 @@ pub(crate) fn stat_card(
     t: &Theme,
 ) -> Div {
     let tint = if n > 0 { color } else { tier4(t) };
-    h_flex()
-        .flex_1()
-        .items_center()
-        .gap(px(GAP_LG))
-        .px(px(GAP_XL))
-        .py(px(GAP_LG))
-        .rounded(px(r_xl(t)))
-        .bg(card_face(t))
-        .border_1()
-        .border_color(track(t))
-        .shadow(sh_2(t))
-        // 图标在数字**左边**：先认形状、再读数——中文语境下数字不是
-        // 段首，左边一个图标把这一行锚住，四张卡的视觉重量才对齐
-        .child(glyph(t, icon, tint))
-        .child(
-            v_flex()
-                .gap(px(GAP_DENSE))
-                .child(
-                    div()
-                        // 两行的行高都按 `num_row_h` 给，不落到 `row_h` 的 1.9 倍：
-                        // 竖着叠两行时那 0.7 个字高的余量要翻倍，卡会被撑到 98 高
-                        // （实测与推导见 `tokens::num_row_h`）
-                        .h(px(num_row_h(fs_num())))
-                        .text_size(px(fs_num()))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(tint)
-                        .child(n.to_string()),
-                )
-                .child(
-                    div()
-                        .h(px(num_row_h(fs_meta())))
-                        .text_size(px(fs_meta()))
-                        .text_color(tier3(t))
-                        .child(label.to_string()),
-                ),
-        )
+    card_shell(
+        h_flex()
+            .flex_1()
+            .items_center()
+            .gap(px(GAP_LG))
+            .px(px(GAP_XL))
+            .py(px(GAP_LG)),
+        t,
+    )
+    // 图标在数字**左边**：先认形状、再读数——中文语境下数字不是
+    // 段首，左边一个图标把这一行锚住，四张卡的视觉重量才对齐
+    .child(glyph(t, icon, tint))
+    .child(
+        v_flex()
+            .gap(px(GAP_DENSE))
+            .child(
+                div()
+                    // 两行的行高都按 `num_row_h` 给，不落到 `row_h` 的 1.7 倍：
+                    // 竖着叠两行时那 0.7 个字高的余量要翻倍，卡会被撑到 98 高
+                    // （实测与推导见 `tokens::num_row_h`）
+                    .h(px(num_row_h(fs_num())))
+                    .text_size(px(fs_num()))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(tint)
+                    .child(n.to_string()),
+            )
+            .child(
+                div()
+                    .h(px(num_row_h(fs_meta())))
+                    .text_size(px(fs_meta()))
+                    .text_color(tier3(t))
+                    .child(label.to_string()),
+            ),
+    )
 }
 
 /// 圆角胶囊徽章：蓝灰「未提交 / 待推送 / 运行中」与暖橙「可更新」
@@ -336,13 +334,21 @@ pub(crate) fn status_mark(ok: bool, color: Hsla) -> AnyElement {
 /// 这两个数**必须一起改**：把卡内边距调成 20 而这里还写 -16，线就两头缩进，
 /// 而"线没对齐卡边"这种事抓帧看着只是"有点怪"，谁都不会去查一个常量。
 ///
+/// ⛔ **这里绝对不能写 `.w_full()`**（2026-10-08 用户报「网址下面的发丝线 右边没顶到
+/// 卡片边」查出来的）：`w_full` 是"父内容宽的 100%"，**是一个定宽**，
+/// 配上负 margin 只会把盒子**整体左移**而不会变宽 ⇒ 左端顶到卡边、
+/// **右端短 32px**（帧实测：线 403..1246，卡 403..1278）。
+/// 让它横向铺开的正确写法是**什么都不写**——父 `v_flex` 的交叉轴默认就是 stretch，
+/// 而 stretch 是"填满再减掉 margin"，负 margin 于是真的把盒子撑宽 32。
+/// 与 `CardHeader` 那次 `.w_full()` 多余是同一条（AGENTS 已记），
+/// 差别是那次只是多余，这一次**有害**：它把负 margin 的用途整条废掉了
+///
 /// 用法有两种，都走这一个出处：① 单纯断一段（不给 child）；
 /// ② 承载一行分段控件（仓库头下面那排页签就是这种——原型
 /// `.tabs-row { margin: 13px -18px 0; padding: 0 18px; border-top: 1px solid var(--line-soft) }`
 /// 说的正是"页签是这张卡的一部分，不是浮在卡外面的一行"）。
 pub(crate) fn card_split(t: &Theme) -> Div {
     div()
-        .w_full()
         .flex_shrink_0()
         .mx(px(-GAP_XL))
         .px(px(GAP_XL))
@@ -532,6 +538,60 @@ pub(crate) fn meta_text(text: impl Into<String>, t: &Theme) -> Div {
         .child(text.into())
 }
 
+/// 卡外壳的**那五样**：圆角 `r_xl` + `card_face` 底 + 1px `track` 边 + `sh_2` 薄阴影。
+///
+/// ⚠️ **它与 `card()` 的分工**：`card()` 是"一张竖排段卡"——连内边距、块间距、
+/// `w_full` 一起给；这一颗**只给外壳那五样**，把方向与内边距留给调用方。
+/// 因为全站有三类卡的方向和 padding 天生不同：段卡竖排 16、统计卡横排
+/// （`px` 16 / `py` 12）、总览活跃度卡竖排 12。
+/// 2026-10-08 之前这三份各自手搓了一遍那五样（`grep -c 'shadow(sh_2'` 数出 3 处），
+/// 而"同一属性两个出处"正是这台闸 R1 判过四次的毛病：描边色那一次就是
+/// 三份里两份 `track`、一份 `border`，肉眼是"有的卡边重有的轻"。
+/// ⇒ **新增任何一类卡都从这里过一遍**，别再抄那五行
+pub(crate) fn card_shell(el: Div, t: &Theme) -> Div {
+    el.rounded(px(r_xl(t)))
+        .bg(card_face(t))
+        .border_1()
+        // ⚠️ **卡描边只用 `line_soft`**（v4 §2 那张表把它的用途写成"卡内分隔、卡描边"，
+        // §8.2 深色那节再钉一遍"卡与画布的分界由 `line_soft` 承担"）。
+        // 这里原来写的是 `t.colors.border`（= `line` #D7E0E4，深一档），而
+        // `stat_card` 与总览活跃度卡走的是 `track(t)`（= `line_soft` #E8EEF0）
+        // ⇒ **同一屏三种卡、两种描边色**（帧上实测 215,224,228 对 225,231,233，差 10/255，
+        // 肉眼就是"有的卡边重有的轻"）。`line` 归"主描边／分隔线"那一格，不是卡
+        .border_color(track(t))
+        .shadow(sh_2(t))
+}
+
+/// 卡内**装可点行的列表盒**：圆角 `r_lg` + 1px `track` 边，**不给底**。
+///
+/// 与 `sunken_box` 的分工是一条**内容判据**，不是两种审美：
+/// 里面一行行**可以点**（选仓库 / 勾要删的路径 / 表格行）→ 这一颗；
+/// 里面是一段**只读内容**（变更清单、同步档案明细）→ `sunken_box`。
+///
+/// ⚠️ **为什么不写 `.bg()`**：它坐在白卡里，而 v4 的"列表底"（`list.background`）
+/// 与卡面（`secondary.background`）在两条主题里**都是同一个白**。原来
+/// `dialogs/init.rs` 与 `dialogs/purge.rs` 各写了一份 `.bg(t.colors.background)`
+/// ——那是**画布**档（浅 #E8EDF0），于是白卡里出现一块比桌面还灰的洞，
+/// 而同一屏总览页那张表格盒是白的 ⇒ 两类列表盒两种底。
+/// 不写底 = 继承卡面，"洞"与"盒"两种观感一次消掉
+pub(crate) fn list_box(el: Div, t: &Theme) -> Div {
+    el.rounded(px(r_lg(t))).border_1().border_color(track(t))
+}
+
+/// 卡内**装只读内容的下沉盒**：圆角 `r_lg` + `card-sunken` 底 + 1px `track` 边。
+///
+/// 底色读 `muted.background` 是 v4 §2 那行写死的对应（`card-sunken` 浅 #F4F7F8 /
+/// 深 #101E22，用途栏原文就是"卡内下沉区：输入框底、**分组盒**、表头"），
+/// 不是"挑一个比白灰一点的色"。⚠️ **不许拿 `popover` 顶它**：
+/// `popover.background` 在两条主题里都等于**卡面白**（浅 #FFFFFF / 深 #16262B），
+/// 拿它当"下沉"就是一片白里画了个白框——假 affordance 那一族
+pub(crate) fn sunken_box(el: Div, t: &Theme) -> Div {
+    el.rounded(px(r_lg(t)))
+        .bg(t.colors.muted)
+        .border_1()
+        .border_color(track(t))
+}
+
 /// 每一段的**共同外壳**：白卡 + 1px 边 + `R_XL` 圆角 + **16px 内边距** + 薄阴影。
 ///
 /// 2026-10-05 收口。原先有两份：`log::section`（内边距 8）与 `space_tab::section`
@@ -552,21 +612,15 @@ pub(crate) fn meta_text(text: impl Into<String>, t: &Theme) -> Div {
 /// **不给高度**：日志要 `flex_1` 吃剩余，其余各段要 `flex_shrink_0` 按内容高，
 /// 压不动。这个差别由调用方加
 pub(crate) fn card(t: &Theme) -> Div {
-    v_flex()
-        .w_full()
-        .gap(px(GAP_LG))
-        .p(px(GAP_XL))
-        .rounded(px(r_xl(t)))
-        .bg(card_face(t))
-        .border_1()
-        // ⚠️ **卡描边只用 `line_soft`**（v4 §2 那张表把它的用途写成"卡内分隔、卡描边"，
-        // §8.2 深色那节再钉一遍"卡与画布的分界由 `line_soft` 承担"）。
-        // 这里原来写的是 `t.colors.border`（= `line` #D7E0E4，深一档），而
-        // `stat_card` 与总览活跃度卡走的是 `track(t)`（= `line_soft` #E8EEF0）
-        // ⇒ **同一屏三种卡、两种描边色**（帧上实测 215,224,228 对 225,231,233，差 10/255，
-        // 肉眼就是"有的卡边重有的轻"）。`line` 归"主描边／分隔线"那一格，不是卡
-        .border_color(track(t))
-        .shadow(sh_2(t))
+    card_shell(
+        v_flex()
+            .w_full()
+            .gap(px(GAP_LG))
+            .p(px(GAP_XL))
+            // 外壳五样（圆角 / 底 / 边 / 阴影）走 `card_shell`，不在这里复述
+            ,
+        t,
+    )
 }
 
 /// 卡内**段标题**：一行「标题 + 附注」，比 `CardHeader` 低一档。
@@ -616,11 +670,18 @@ pub(crate) fn mini_head(title: &str, note: Option<&str>, t: &Theme) -> Div {
 ///
 /// `hot` 那一档给 warn 色：原型 `.m.hot` 专给"可清理"，因为它是这一屏里
 /// 唯一"该动手"的读数，其余三格是陈述
+///
+/// `sep` = 这一格左边**画不画那条分隔线**。原型是 `.m + .m{border-left}`——
+/// **第一格没有**（探针实测：四格只量到三条线）。所以它进签名而不是让调用方
+/// 自己记得：漏掉的话第一格左边会挂一根**悬空的短线**，而那种线在帧上
+/// 只是"读起来有点怪"，没人会去数线头（D78 那一族：必填的判据不进签名，
+/// 每条调用路径都得自己记得）
 pub(crate) fn metric_cell(
     value: String,
     unit: Option<String>,
     label: &str,
     hot: bool,
+    sep: bool,
     t: &Theme,
 ) -> Div {
     v_flex()
@@ -628,15 +689,18 @@ pub(crate) fn metric_cell(
         .items_start()
         .justify_center()
         .px(px(GAP_XL))
-        .border_l_1()
-        .border_color(track(t))
+        .when(sep, |c| c.border_l_1().border_color(track(t)))
         .child(
             h_flex()
                 .items_center()
                 .gap(px(GAP_DENSE))
                 .child(
                     div()
-                        .text_size(px(fs_sec()))
+                        // ⚠️ **数值走 `fs_title`（medium 档 16）不是 `fs_sec`**：
+                        // 原型 `.mv` 是 15.5/700，探针量的。上一版落的是 `fs_sec`(12)，
+                        // 与名字那格 fs_head(19) 只差一档 ⇒ 四格读起来是"一排小字"，
+                        // 而他第③条说的就是这个位置的排版
+                        .text_size(px(fs_title()))
                         .font_weight(FontWeight::BOLD)
                         .text_color(if hot { orange_text(t) } else { body(t) })
                         .child(value),

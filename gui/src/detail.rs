@@ -8,7 +8,7 @@
 // 图标只认这一套：assets 里是完整 lucide，外加品牌 Bird。
 // 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
 // 混在同一屏里一眼就能看出不一致。
-use gpui_kit::base::v_flex;
+use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::tab::{Tab, TabBar, TabVariant};
 use gpui_kit::component::{Sizable, Size, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -234,18 +234,47 @@ impl Shell {
                         // gap 12→16、页签高 22→26、**字号不变**（两档都 `text_sm()`，
                         // `tab.rs:803-807` 的 `_` 臂）。也就是"要的就是间距变大"。
                         crate::widgets::card_split(t).child(
-                            TabBar::new("detail-tabs")
+                            // 原型 `.tabs-row{display:flex;align-items:center}` 的
+                            // **右半边不是空的**：`.sp` 之后挂着一句
+                            // 「近 30 天 11 天有提交 · 共 61 次」（11.5px / faint）。
+                            // 2026-10-08 用户第⑦条点的就是这一句"你没加"。
+                            //
+                            // ⚠️ 这句话**住在页签行，不住在名字后面那枚徽标**——
+                            // 头卡是两类仓库共用的一块，而原来那枚 `activity_chip`
+                            // 只在第三方出现（活跃度以前只给第三方扫）。
+                            // 现在两类都扫 ⇒ 句子给两类都显示；柱子仍只给第三方
+                            // （"这项目还活着吗"是评估别人项目时才要问的）
+                            h_flex()
                                 .w_full()
-                                .flex_shrink_0()
-                                .with_variant(TabVariant::Underline)
-                                .with_size(Size::Medium)
-                                .selected_index(ix)
-                                .on_click(cx.listener(|this, ix, _, cx| {
-                                    this.detail_tab = *ix;
-                                    this.sync_detail_tab(cx);
-                                    cx.notify();
-                                }))
-                                .children(tabs.iter().map(|tb| Tab::new().label(tb.label()))),
+                                .items_center()
+                                .gap(px(GAP))
+                                .child(
+                                    TabBar::new("detail-tabs")
+                                        .flex_shrink_0()
+                                        .with_variant(TabVariant::Underline)
+                                        .with_size(Size::Medium)
+                                        .selected_index(ix)
+                                        .on_click(cx.listener(|this, ix, _, cx| {
+                                            this.detail_tab = *ix;
+                                            this.sync_detail_tab(cx);
+                                            cx.notify();
+                                        }))
+                                        .children(tabs.iter().map(|tb| Tab::new().label(tb.label()))),
+                                )
+                                .child(div().flex_1())
+                                .when(third, |row| row.child(self.activity_chart(t)))
+                                .child(crate::widgets::meta_text(
+                                    crate::panels::activity_note(
+                                        self.profile
+                                            .activity
+                                            .iter()
+                                            .filter(|d| d.count > 0)
+                                            .count(),
+                                        self.profile.activity.iter().map(|d| d.count).sum(),
+                                        self.profile.scanning,
+                                    ),
+                                    t,
+                                )),
                         ),
                     ),
             )
@@ -386,14 +415,16 @@ impl Shell {
         v_flex()
             .flex_1()
             .min_h_0()
-            // ⚠️ **卡间只认 `GAP_LG`，而且只由这一条 gap 给**（用户第③条：
-            // 「仓库名卡片和语言技术栈卡片之间的间距要和下面日志的间距一样大」）。
-            // 病根不在数字上：外层（`detail_body` 那层）用 `GAP_LG`、这一层用 `GAP`，
-            // 于是**头卡→同步卡 12、同步卡→日志卡 8**，同一屏里两种"卡间"。
-            // 现在两层都是 `GAP_LG`，并且这里**不再叠任何 `mt` / `padding-top`**——
-            // 阶段 28 那次"给滚动容器又加一层 padding"叠在父 gap 上，
-            // 出来的就是用户报的那种"看着就是不齐"而根因不是数值（D90）。
-            .gap(px(GAP_LG))
+            // ⚠️ **卡间只有一个值：`GAP_TIGHT`（代码 4，帧上量 6）**，
+            // 而且只由这一条 gap 给（用户 2026-10-08 定「卡片与卡片之间统一 6px」）。
+            // 这里曾经写过 `GAP_LG`(12)，而外层 `detail_page` 那一列是 `GAP_TIGHT`(4)
+            // ⇒ **同一屏两种"卡间"**：头卡→同步卡 6、同步卡→日志卡 14，
+            // 他一眼看出来（「日志的卡片跟上面卡片内间距不是 6px」）。
+            // 更早一版是外层 `GAP_LG` / 这一层 `GAP`，那条注释讲的病根一模一样，
+            // 只是当时把两层都收成了 12——**收拢到同一个数是做对了，收成哪个数做错了**。
+            // 与外层那条 gap 同值不等于双写：两层容器各管自己那一层的相邻卡，
+            // 但**值只允许有一个**（v4 §3.2）
+            .gap(px(GAP_TIGHT))
             .when(on(store::MOD_SEC_FORK), |b| b.children(self.fork_card(t, cx)))
             .when(on(store::MOD_SEC_SYNC), |b| {
                 b.child(self.sync_card(path, t, cx, on(store::MOD_SEC_LANG)))

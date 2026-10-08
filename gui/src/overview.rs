@@ -23,8 +23,8 @@ use gpui_kit::component::empty::{Empty, EmptyContent, EmptyHeader, EmptyTitle};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme, Sizable, Size, Theme};
 use gpui_kit::{
-    div, px, AnyElement, App, Context, Div, Entity, FontWeight, IntoElement, ParentElement, Styled,
-    Window,
+    div, px, AnyElement, App, Context, DefiniteLength, Div, Entity, FontWeight, IntoElement,
+    ParentElement, Styled, Window,
 };
 use chrono::{DateTime, Duration, Local};
 use qingbird_core::repos::ActivityDay;
@@ -358,22 +358,22 @@ impl Shell {
         // 卡头右上那枚胶囊报的是**总数**——柱状图只给得出形状，给不出"这两周一共多少次"
         let total: u32 = bars.iter().map(|b| b.count).sum();
 
-        let card = v_flex()
-            .w_full()
-            .flex_shrink_0()
-            // 卡高**不写死**：由「上下内边距 + 表头行 + gap + 图区 `OV_CHART_H`」
-            // 推出来。原来这里钉着 `.h(px(160.0))`，比内容高出一截，
-            // 多出来的那一段全变成图区上下的空白（2026-10-07 用户挑出来的那条）
-            .p(px(GAP_LG))
-            .gap(px(GAP_TIGHT))
-            // 外壳与上面那 4 张 `widgets::stat_card` 同一套（底 `card_face` /
-            // 圆角 `r_xl` / 1px `track` 边 / `sh_2`）——同一屏里同类卡片不许
-            // 手搓第二份外壳。内边距这一轮不动
-            .rounded(px(r_xl(t)))
-            .bg(card_face(t))
-            .border_1()
-            .border_color(track(t))
-            .shadow(sh_2(t))
+        let card = card_shell(
+            v_flex()
+                .w_full()
+                .flex_shrink_0()
+                // 卡高**不写死**：由「上下内边距 + 表头行 + gap + 图区 `OV_CHART_H`」
+                // 推出来。原来这里钉着 `.h(px(160.0))`，比内容高出一截，
+                // 多出来的那一段全变成图区上下的空白（2026-10-07 用户挑出来的那条）
+                .p(px(GAP_LG))
+                .gap(px(GAP_TIGHT)),
+            t,
+        );
+        // 外壳那五样走 `card_shell`（与 `card()` / `stat_card()` 同一个出处）。
+        // 原来这里手搓了第二份 `rounded + bg + border + shadow`，正是机器闸 R1
+        // 那一类"同一属性两个出处"——描边色那次翻车就是这三份里两份 `track`、
+        // 一份 `border`，一屏三种卡两种边重
+        let card = card
             // 表头走全站唯一的 `CardHeader`（原来这里手搓了一份 h_flex：
             // 标题 + 附注，右侧什么都没有）。**卡头右上那枚胶囊是原型有的，
             // 我一直没落**——它报的是"这两周一共多少次提交"，
@@ -569,17 +569,11 @@ impl Shell {
         let head = CardHeader::new("全部仓库");
         let (body, head) = if self.repos.is_empty() {
             (
-                v_flex()
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .rounded(px(r_lg(t)))
-                    .bg(t.colors.popover)
-                    .border_1()
-                    // **卡内的框跟卡同一个描边档**（`line_soft`，v4 §2 用途表）：
-                    // 这一格坐在 `card(t)` 里面，它外圈已经是卡边，
-                    // 里圈再深一档就成了"一张卡两圈不同重的边"
-                    .border_color(track(t))
+                list_box(v_flex().w_full().flex_1().min_h_0(), t)
+                    // 与有数据那一格同一个 `list_box`（原来这里自己写了一份
+                    // `rounded + bg(popover) + border(track)`，而 `popover.background`
+                    // 在两条主题里都等于卡面白 ⇒ 那个 `.bg()` 是个空操作，
+                    // 却让人以为"空态盒比表格深一档"）
                     .child(
                         Empty::new()
                             .border_0()
@@ -612,15 +606,11 @@ impl Shell {
                 .into_any_element();
             // 官方 `DataTable` 同样没有 `Styled`，撑高交给外层
             (
-                div()
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .rounded(px(r_lg(t)))
+                list_box(div().w_full().flex_1().min_h_0(), t)
+                    // `overflow_hidden` 不进 `list_box`：它是这一格**特有**的
+                    // （`DataTable` 自己画方角的行底与表头，不裁就顶出圆角），
+                    // 而空态那一格没有要裁的东西
                     .overflow_hidden()
-                    .border_1()
-                    // 与上面那格同理：**卡内的框取 `line_soft`**（v4 §2）
-                    .border_color(track(t))
                     .child(
                         // 官方 `DataTable` 没有 `accessibility_label`（那是 `table::Table`
                         // 才有的），裸 `div` 也没有——所以这块不硬凑一个可访问名，
@@ -671,8 +661,12 @@ impl Shell {
     ///
     /// 2026-10-08 曾为凑用户算的"上缩进 94"把它压成单行（94 那笔账只有按单行才加得平）。
     /// 他这一轮的原话是「你最起码总览页先完善到位」，而"到位"的基准是原型
-    /// ⇒ **形态回到两行，缩进让位**。要回到 94 那一版，把下面 `v_flex` 换回 `h_flex` 即可，
-    /// 代价是页头比原型少一行、上缩进少 27px
+    /// ⇒ **形态回到两行，缩进让位**。
+    /// ⚠️ **同一天晚些时候两行与 94 同时成立了**：把两行的行盒从 `LH_ROW` 收到
+    /// `LH_HEAD` 之后，第一张统计卡的顶边实测落在帧上 **y=94**（改前两行是 104）。
+    /// 他那笔"上缩进 94"的参照是**窗口顶**（含 36 高的标题栏），不是客户区上沿——
+    /// 按客户区量是 58，**别拿那个数去对账**。
+    /// ⇒ **不要再为了"上缩进"砍这一行**：那笔账的真正出处是行盒，不是行数
     fn ov_head(&self, t: &Theme) -> Div {
         let mine = self.repos.iter().filter(|r| !r.is_third_party).count();
         let third = self.repos.len() - mine;
@@ -686,7 +680,19 @@ impl Shell {
             // 判据是**派生量**不是像素：圆角改成 14 那天，这一格自己跟上，
             // 不会留下"标题又伸进圆角切掉的那块空里"的账（同 `TITLE_BAR_PAD_L` 那条）
             .pl(px(r_xl(t)))
+            // **对齐基线**：第一个导航键的图标中心要与这一行的文字中心同高
+            // （`tokens::NAV_PAD_TOP` 那条，他对 6px 的偏差就报过一次）。
+            // 行盒从 1.7 收到 `LH_HEAD` 之后标题中心跟着上移了 4（实测 49 对图标 53），
+            // 而轨上那 3px 已经是图标能贴顶的极限 ⇒ 让**页头**补这一格，
+            // 不是让图标往上钻。改 `LH_HEAD` / `title_bar_h` 任一处都要回来重量这两个中心
+            .pt(px(GAP_TIGHT))
             .mb(px(GAP - GAP_TIGHT))
+            // **两行的行盒一起收到 `LH_HEAD`**（推导与实测账见那个常量）。
+            // 设在**这一列**上而不是逐行设：gpui 的 `.line_height()` 原文是
+            // "of this element **and its children**"，副标题那一行里
+            // `ov_num` / `ov_txt` / `ov_sep` 六段各自带字号，逐段去挂就是
+            // 同一个属性六个出处——它们只要跟着这一列走就够了
+            .line_height(DefiniteLength::Fraction(LH_HEAD))
             // 原型 `.page-head .sub { margin-top: 6px }`——我们最近的档是 `GAP_TIGHT`(4)，
             // **不为 2px 开一档**（v4 §3.2），所以这一格取 4 不取 6
             .gap(px(GAP_TIGHT))

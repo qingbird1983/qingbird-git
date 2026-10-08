@@ -37,7 +37,7 @@ use qingbird_core::store;
 
 use crate::state::*;
 use crate::tokens::*;
-use crate::widgets::{ghost_variant, meta_text, skeleton_bar, CardHeader};
+use crate::widgets::{ghost_variant, meta_text, sunken_box, skeleton_bar, CardHeader};
 
 /// 一次列多少条。`history::commit_log` 自己还会夹到它自己的上限
 const LOG_LIMIT: usize = 200;
@@ -720,17 +720,15 @@ fn patch_pane(t: &Theme, st: &HistoryState) -> AnyElement {
         // 官方 `TextView` 在这里不合适：它按 markdown 解析，diff 里的
         // `#` / `*` / `---` 会被吃掉，还原不成原文
         .child(
-            v_flex()
-                .flex_1()
-                .min_h_0()
-                .id("commit-patch")
-                .overflow_y_scroll()
-                .rounded(px(R_MD))
-                .border_1()
-                .border_color(t.colors.border)
-                .bg(t.colors.muted)
-                .py(px(GAP_TIGHT))
-                .children(
+            sunken_box(
+                v_flex().flex_1().min_h_0().py(px(GAP_TIGHT)),
+                t,
+            )
+            // 与日志输出流同一个 `sunken_box`（原来这里是第二份
+            // `R_MD + muted + t.colors.border` 拷贝）
+            .id("commit-patch")
+            .overflow_y_scroll()
+            .children(
                     lines[..shown]
                         .iter()
                         .enumerate()

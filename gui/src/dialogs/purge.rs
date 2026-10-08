@@ -38,7 +38,7 @@ use qingbird_core::purge;
 
 use crate::state::*;
 use crate::tokens::*;
-use crate::widgets::{ghost_variant, meta_text};
+use crate::widgets::{ghost_variant, list_box, meta_text};
 
 /// 每组最多列几项。超出的并成一行「还有 N 个…」——
 /// 这一屏的作用是让用户看清**将要发生什么**，不是给一张完整对账单。
@@ -192,18 +192,19 @@ fn group_list(
 ) -> impl IntoElement {
     let shown: Vec<&String> = paths.iter().take(MAX_PER_GROUP).collect();
     let rest = paths.len().saturating_sub(shown.len());
-    v_flex()
-        .id(id)
-        .w_full()
-        .max_h(px(220.0))
-        .overflow_y_scroll()
-        .gap(px(GAP_DENSE))
-        .p(px(GAP))
-        .rounded(px(r_lg(t)))
-        .bg(t.colors.background)
-        .border_1()
-        .border_color(t.colors.border)
-        .children(shown.into_iter().map(|p| {
+    // 与 `dialogs/init.rs` 同一类东西（装可勾选行的盒）⇒ 走同一颗 `list_box`。
+    // 原来这两处是逐行相同的两份拷贝，各自写着 `.bg(background)` + `.border(border)`
+    list_box(
+        v_flex()
+            .w_full()
+            .max_h(px(220.0))
+            .gap(px(GAP_DENSE))
+            .p(px(GAP)),
+        t,
+    )
+    .id(id)
+    .overflow_y_scroll()
+    .children(shown.into_iter().map(|p| {
             pick_row(t, this, p, picked.contains(p), danger)
         }))
         .when(rest > 0, |el| {

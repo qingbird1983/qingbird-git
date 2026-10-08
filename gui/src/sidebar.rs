@@ -10,7 +10,7 @@ use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::sidebar::{SidebarItem as _, SidebarMenuItem};
 use gpui_kit::component::spinner::Spinner;
@@ -33,6 +33,45 @@ use crate::widgets::*;
 
 // ================= 侧栏骨架 =================
 
+/// 侧栏那一列的外壳：**就是 `widgets::card` 那一张卡**，这里只覆盖内距与外边距。
+///
+/// 2026-10-08 之前它不是卡：`.bg(t.colors.background).border_r_1()` —— 一根与画布
+/// 同灰的柱子，右边一条分隔线。那是阶段 21 那次"左栏改与画布同灰"留下的形态，
+/// 而它当时的病是**旧画布 #FAFAF9 与白卡只差 5/255**，侧栏读成"一块分不清的白板"。
+/// 画布换成冷灰蓝之后那条动机已经不存在（卡与底差 23/255，卡自己浮得起来），
+/// 而原型 `.sidebar` 与 `.card` 本来就是同一套底（card 面 + `line-soft` 边 +
+/// `r-card` 圆角 + `sh-2`）⇒ 归位成卡。
+///
+/// ⚠️ **外壳不重写一份**：底色 / 圆角 / 描边 / 阴影全部来自 `card(t)`，
+/// 这里只覆盖 `p` / `gap` 并加 `mt` / `mb` / `mr`。内距与主区不同是**两种关系**
+/// （这里放的是一列行，行自己带水平内距），不是同一种关系写了两个值。
+///
+/// `mt(GAP)` 与主区那一列的 `pt(GAP)`（`detail.rs`）**同源**：两张卡的顶边必须在
+/// 同一条线上；`mr(GAP_TIGHT)` 就是"卡与卡之间"那一档（代码 4，帧上量 6，
+/// 因为相邻两张卡各有一条 1px 边）。
+fn side_shell(t: &Theme) -> Div {
+    crate::widgets::card(t)
+        .flex_none()
+        // ⚠️ **不是 `h_full()`**：`h_full` 是"100% 父高"，加上 `mt`/`mb` 之后
+        // 总高超出父容器，**下面那条 `mb(GAP)` 直接被吃掉**（实测卡底 791 正压在
+        // 状态条 792 上，那 8px 缝没了）。`flex_1 + min_h_0` 才是"占满剩余、
+        // 且让外边距从剩余里扣"的写法
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .gap(px(GAP_TIGHT))
+        .p(px(GAP))
+        .pt(px(GAP_LG))
+        .pb(px(GAP))
+        .mt(px(GAP))
+        // ⚠️ **这里没有 `mb`，是有意的**：主区那一列的底部外边距是 **0**
+        // （用户 2026-10-08 定的「下 28 = 主区 0 + 状态条 28」）。上一版留了 8，
+        // 结果**侧栏卡底 782、日志卡底 790**——两列下边差 8px，他一眼看出来
+        // "日志的卡片跟侧栏下边不平行"。两条诉求要同时成立，
+        // 只能让侧栏也跟着贴到状态条上沿
+        .mr(px(GAP_TIGHT))
+}
+
 impl Shell {
     /// 侧栏三段：头（标题 + 筛选）/ 身（一组树，可滚动）/ 脚（两个动作）。
     ///
@@ -51,7 +90,23 @@ impl Shell {
             .id("sidebar-tree")
             .track_scroll(&self.tree_scroll)
             .overflow_y_scroll()
-            .px(px(GAP))
+            // ⚠️ **`.mx(px(-GAP))` 不是排版，是为了让裁剪盒变宽**：
+            // 滚动容器的裁剪盒 = **它自己的边框盒，且两个轴都裁**
+            // （`style.rs:639` `overflow_mask`——`overflow_y_scroll` 只把 y 设成 Scroll，
+            // x 仍是默认的 Visible，落到 `(true,false)` 那一臂，取的是
+            // `min.x..max.x` = 边框盒的整个横向）。
+            // 竖条要住在卡的 padding 里（原型实测"距卡左外缘 +1"），
+            // 而它挂在行里、行在树里 ⇒ **树不铺到那儿，竖条就被裁掉**：
+            // 帧上 49..58 逐列打色全是卡的白面，一像素都不出，而同尺寸同纵向写法的
+            // 一根条放在 59（边框盒内）就出。树往外扩 `GAP`(=壳的 `px`) 之后
+            // 边框盒 = 49..402，气口进了裁剪盒，竖条才落得下去。
+            //
+            // ⚠️ `px(SIDE_GUTTER)`（10）**必须等于原来那两层 padding 之和**
+            //（壳 8 + 树 2）：树扩出去了，内容要收回**原位**，否则分组标题、
+            // 空态、每一行会一起往左跑 8px。负 `mx` 与这个 `px` 是一对，
+            // **改一个必须同时改另一个**
+            .mx(px(-GAP))
+            .px(px(SIDE_GUTTER))
             .py(px(GAP_TIGHT))
             .gap(px(GAP_DENSE));
 
@@ -67,7 +122,7 @@ impl Shell {
         let mut ix = 1usize;
         if self.group_open[self.side_focus.ix()] {
             for r in rows {
-                tree = tree.child(self.repo_row(r, ix, t, window, cx));
+                tree = tree.child(self.repo_row(r, ix, t, cx));
                 ix += 1;
             }
         }
@@ -89,13 +144,7 @@ impl Shell {
                 .repos
                 .iter()
                 .any(|r| r.is_third_party == self.side_focus.is_third());
-            return v_flex()
-                .w_full()
-                .h_full()
-                .min_w_0()
-                .bg(t.colors.background)
-                .border_r_1()
-                .border_color(track(t))
+            return side_shell(t)
                 // ⚠️ **空态也画分组标题**（阶段 21-5 的连带）。
                 // 侧栏头那一行删掉之后，「这一组叫什么」就没有别的落脚点了——
                 // 空态只剩一句「我的仓库里还没有仓库」，**筛选键也跟着消失**
@@ -108,13 +157,7 @@ impl Shell {
                 .child(self.sidebar_footer(t, cx));
         }
 
-        v_flex()
-            .w_full()
-            .h_full()
-            .min_w_0()
-            .bg(t.colors.background)
-            .border_r_1()
-            .border_color(track(t))
+        side_shell(t)
             .child(self.sidebar_header(t, cx))
             .child(tree)
             .child(Separator::horizontal().color(t.colors.border))
@@ -296,7 +339,6 @@ impl Shell {
         r: &RepoEntry,
         ix: usize,
         t: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let path = r.path.clone();
@@ -328,21 +370,106 @@ impl Shell {
             bucket_badge(&status, changed, third, t)
         };
 
-        let item = SidebarMenuItem::new(self.title(&path))
-            .icon(icon_sm(bucket_icon(b)).text_color(dot_color(b, t)))
-            .active(selected)
-            .suffix(move |_, _| {
-                // `suffix` 是 `Fn` 不是 `FnOnce`，所以每帧重新 clone 一份再匹配。
-                // 徽标是 Clone 的小枚举，比把 &Theme 抓进闭包干净
-                match badge.clone() {
-                    Badge::None => div().into_any_element(),
-                    Badge::Pill { text, fg, bg } => pill(&text, fg, bg).into_any_element(),
-                    Badge::Spinner { color } => Spinner::new()
-                        .color(color)
-                        .with_size(Size::XSmall)
-                        .into_any_element(),
-                }
+        // ⚠️ **这一行是自绘的，不再是官方 `SidebarMenuItem`**（2026-10-08 用户令
+        // 「42 有点太高了，改到 36」）。官方件把行高写死在 `menu.rs:323` 的 `h_7()`
+        // = 28px，**没有 size 档，外面挂 `.h()` 也压不到它内部的元素** ⇒ 要 36 只能自己画。
+        // 官方件原本给的四样在这里都补齐了，一样都没少：
+        //   命中区 `on_click` / 悬停面 `.hover` / 右键菜单 `ContextMenuExt`
+        //   / 元素 id（滚动定位靠它，`apply_reveal` 按 `side-repo-{ix}` 找行）
+        //
+        // ## 行是**两层**的，不是一层
+        //
+        // 外层 = 命中区，盒子铺到**卡的 padding 边**（帧实测 49..402）；
+        // 内层 `.child(face)` = 淡底/悬停面，距卡内缘 10（帧 59..392）。
+        // 分成两层只有一个理由：原型那根竖条（`.repo-item.on::before`）**住在卡的
+        // padding 里**，实测位置是"距卡左外缘 +1"，而淡底在 +11——**竖条与淡底之间
+        // 隔着 7px 白**。淡底要是行的底色，竖条就只能画在淡底上（+11），
+        // 那就不是原型那个东西了。
+        //
+        // ⛔ **外层为什么用负 `mx` 而不是给竖条写负 `left`：gpui 的绝对定位把负 inset 丢了。**
+        // 2026-10-08 一次构建里同排两根 3×20 的条做对照：`left(0)` 那根出（帧 x59..61
+        // 实测到色），`left(-10)` 那根**一像素都没出**（x49..58 逐列打色全是卡的白面），
+        // 而两者的纵向 `top_1_2 + mt(-10)` 完全一样 ⇒ 坏的只有那一个负 `left`。
+        // 负 **margin** 是通的——`widgets::card_split` 就靠 `.mx(px(-GAP_XL))` 铺满整卡宽，
+        // 那条早就在帧上验过。所以行的盒子往外扩（`.mx(px(-SIDE_GUTTER))`），
+        // 淡底那一层再用 `mx(SIDE_GUTTER)` 收回**改之前一模一样的位置**，
+        // 多出来的那 10px 气口就是竖条的落点（与 `card_split` 同一条 idiom，不是新发明）。
+        //
+        // ⚠️ **气口不能做成行的 `px`，必须做成淡底那层的 `mx`**（同一轮帧上实测翻出来的一条）：
+        // 绝对定位子元素的包含块是父元素的 **padding 盒**，而 `px` 不减 padding 盒的左缘——
+        // 第一版写成 `.mx(-10).px(10)`，竖条 `left_0` 落在 59（淡底那一格）而不是 49，
+        // 又因为它在 `children` 里排在淡底**前面**，被淡底那层不透明底色整个盖住，
+        // 帧上 49..58 依旧全白。改成"行没有水平内距 + 淡底自己带 `mx`"之后
+        // 包含块的左缘 = 盒子本身 = 49，竖条与淡底也**不再重叠**，两处一起对上。
+        //
+        // ⚠️ 这条负 `mx` 能不能落地还取决于**树有没有把裁剪盒扩到那里**
+        //（见 `sidebar()` 里那条 `.mx(px(-GAP))`）——**两者是一对，少一边竖条就整个消失**
+        let name = self.title(&path);
+        h_flex()
+            .id(format!("side-repo-{ix}"))
+            .h(px(SIDE_ROW_H))
+            .flex_shrink_0()
+            // ⚠️ **`items_stretch` 不是 `items_center`**：`h_flex` 默认在交叉轴上居中，
+            // 那样淡底会缩成**内容高**（字 20 上下留白），选中那一抹淡底就不铺满 36 了。
+            // 淡底要占满整行高 = 让这一行的交叉轴拉伸（AGENTS「h_flex 与 v_flex 不对称」）
+            .items_stretch()
+            .mx(px(-SIDE_GUTTER))
+            .relative()
+            // 选中那根左侧 3px 品牌竖条（原型 `.repo-item.on::before`）
+            .when(selected, |r| {
+                r.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_1_2()
+                        .mt(px(-SIDE_BAR_H / 2.0))
+                        .w(px(SIDE_BAR_W))
+                        .h(px(SIDE_BAR_H))
+                        .rounded_r(px(R_SM))
+                        .bg(t.colors.accent),
+                )
             })
+            .child(
+                h_flex()
+                    .id(format!("side-face-{ix}"))
+                    .flex_1()
+                    .min_w_0()
+                    // ⚠️ **淡底靠自己的 `mx` 收回气口**，不是靠行的 `px`——
+                    // 写成行的 `px` 会把竖条的包含块一起往右推（见上面那段实测）
+                    .mx(px(SIDE_GUTTER))
+                    .items_center()
+                    .gap(px(GAP))
+                    .px(px(SIDE_GUTTER))
+                    .rounded(px(r_lg(t)))
+                    .text_color(tier3(t))
+                    .when(selected, |s| s.bg(wash(t)))
+                    .hover(|s| s.bg(if selected { wash(t) } else { track(t) }))
+                    .child(icon_sm(bucket_icon(b)).text_color(dot_color(b, t)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(fs_sec()))
+                            // 选中那行名字升一档墨色并加粗（原型 `.repo-item.on .nm{ink;700}`）：
+                            // 淡底色差只有 12/255，**只靠底色说不清"是哪一行被选了"**
+                            .text_color(if selected { body(t) } else { tier3(t) })
+                            .font_weight(if selected {
+                                FontWeight::BOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
+                            .child(name),
+                    )
+                    .child(match badge {
+                        Badge::None => div().into_any_element(),
+                        Badge::Pill { text, fg, bg } => pill(&text, fg, bg).into_any_element(),
+                        Badge::Spinner { color } => Spinner::new()
+                            .color(color)
+                            .with_size(Size::XSmall)
+                            .into_any_element(),
+                    }),
+            )
             .on_click({
                 let me = me.clone();
                 let path = path.clone();
@@ -356,8 +483,7 @@ impl Shell {
             .context_menu({
                 let me = me.clone();
                 move |menu, _, cx| repo_context_menu(menu, &path, &me, cx)
-            });
-        item.render(format!("side-repo-{ix}"), window, cx)
+            })
             .into_any_element()
     }
 }

@@ -29,7 +29,7 @@ use qingbird_core::repos;
 use qingbird_core::types::ProgressEvent;
 
 use crate::state::*;
-use crate::widgets::{ghost_variant, progress_readout, progress_text};
+use crate::widgets::{ghost_variant, progress_readout, progress_text, sunken_box};
 use crate::tokens::*;
 
 /// 实时输出最多留多少行。git 的进度行按 \r 反复刷新同一句，
@@ -436,18 +436,18 @@ fn hint(t: &Theme) -> Div {
 /// 官方的 `Progress::loading(true)` 不定态条——一个一直在跳的假进度
 /// 比没有进度更让人焦
 fn progress_block(t: &Theme, st: &CloneView) -> Div {
-    let mut log = v_flex()
-        .id("clone-out")
-        .w_full()
-        .max_h(px(140.0))
-        .overflow_y_scroll()
-        .gap(px(GAP_TIGHT))
-        .p(px(GAP))
-        .rounded(px(R_MD))
-        .bg(t.colors.muted)
-        .border_1()
-        .border_color(t.colors.border)
-        .font_family(t.mono_font_family.clone());
+    // 第三份等宽输出盒（另两份在 `log.rs` 与 `history_tab.rs`）⇒ 同一颗 `sunken_box`
+    let mut log = sunken_box(
+        v_flex()
+            .w_full()
+            .max_h(px(140.0))
+            .gap(px(GAP_TIGHT))
+            .p(px(GAP))
+            .font_family(t.mono_font_family.clone()),
+        t,
+    )
+    .id("clone-out")
+    .overflow_y_scroll();
 
     if st.output.is_empty() {
         log = log.child(

@@ -63,6 +63,18 @@
 | `bad` / `bad-wash` | `#B23A3E` / `#F8E2E3` | 失败、分叉 | `danger.*` |
 | `info` / `info-wash` | `#0E4F55` / `#DCEFF0` | 待推送、进行中 | `info.*` |
 
+**卡内的盒只有两档，判据是「里面那一样东西点不点得动」**：
+
+* **装可点的行**（列表、表格、勾选项）→ `r_lg` + 1px `line-soft` 边，**不给底**（继承 `card` 白）。
+  给底就把行与底块糊在一起；而 `card-sunken` 那档（#F4F7F8）比悬停面 `wash-soft`（#EEF6F7）
+  还浅一档，铺在它下面 hover 直接看不见。
+* **装一段只读内容**（变更清单、模块勾选栏、输入框）→ `r_lg` + `card-sunken` 底 + 1px `line-soft` 边。
+
+⚠️ 两档的边**都是 `line-soft`**，不许写 `line`：那一格比卡自己的描边还重，坐在卡里就是
+"里圈比外圈粗"。⚠️ 也别拿 `popover.background` 顶 `card-sunken`——它在两条主题里
+都等于 `card` 白（浅 #FFFFFF / 深 #16262B），拿它当下沉就是白里画了个白框。
+落点：`widgets::list_box` / `widgets::sunken_box`（**全站只这两个出处**）。
+
 **语义色的用法**：**浅 wash 底 + 深字**，不是实底白字。徽章、告警段、状态胶囊全走这一式。
 
 **语义色的 hover / active 是推出来的，不是现编的**：`hover = 本体明度 ×0.87`、`active = ×0.75`。 系数取自旧版三档的实测比例（success 0.828 / 0.691，warning 0.878 / 0.738，danger 0.884 / 0.767 的中值）， 换色相不换手感。落定的六个值：

@@ -6,12 +6,12 @@
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::description_list::DescriptionList;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::{Sizable, Size, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, Context, Div, FontWeight, Hsla, ParentElement, SharedString, Styled,
+    div, px, AnyElement, Context, Div, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
+    Styled,
 };
 use qingbird_core::types::RepoStatus;
 
@@ -252,17 +252,49 @@ impl Shell {
         // 状态句与告警**由同一个函数一起出**——判据只有一份（见 `sync_readout`）。
         // 这里只取主句；`alert` 为 `Some` 时主句降到中性灰，详情交给头卡那颗感叹号
         let (sentence, alert) = sync_readout(&status, b, lg);
+        // 「上次同步」的值**跨会话**答：本会话没跑过就去那台仓库的历史里翻最后一次。
+        // ⚠️ 读的是**这一屏的 `path`**，不是 `self.selected`——原来那一格拿的是
+        // `selected`，两个不一致时（切了组没换选中、或反过来）会答成**另一台仓库**的记录。
+        // 判据与 D78 同一条：**能被参数化的就别从"当前那个"里捞**
+        let synced = match lg.ts {
+            0 => self.op_log_when(path).unwrap_or_else(|| "还没有记录".into()),
+            ts => rel_time(ts),
+        };
+        // 第三方那几段补充读数（方案 A，2026-10-08 用户点）：**并进状态句那一行**，
+        // 不再独占一行四列。判据"只补主句没说的"写在 `third_bits` 里，由单测钉着
+        let bits: Vec<(&'static str, String)> = if third {
+            third_bits(&status, b, lg, &synced)
+        } else {
+            Vec::new()
+        };
 
-        // 「有该做的」的那把键给 primary。落后与待推送是互斥的，
-        // 分叉时两把都要（得先变基或拉取，推送也会被拒）
-        let pull_hot = b == Bucket::Behind || b == Bucket::Forked;
-        let push_hot = !third && (b == Bucket::Ahead || b == Bucket::Forked);
+        // ⚠️ **「一屏只留一颗主按钮」——原型 `.sync-row` 上面那段注释就是这条**：
+        // 「真正要用户做的是什么，primary 就给什么，其余一律降级」。
+        // 原来这里是"三键里哪把该点给哪把"，而「提交并推送」是 ghost ⇒
+        // 有未提交改动时，屏幕上最重的那颗键恰恰**不是**该做的事，
+        // 而原型把 primary 给它。现在按同一条判据排优先级：
+        //   有未提交改动 → 提交并推送；否则落后/分叉 → 拉取；否则待推送 → 推送；
+        //   都不成立（已同步）→ 这一屏没有"该做的"，**一颗 primary 都不给**
+        // （硬给一颗等于催用户点一个什么都不发生的东西——谎报干净那一族的镜像）
+        let commit_hot = !third && changed > 0;
+        // 落后与待推送是互斥的，分叉时两把都要（得先变基或拉取，推送也会被拒）
+        let pull_hot = !commit_hot && (b == Bucket::Behind || b == Bucket::Forked);
+        let push_hot = !commit_hot && !third && (b == Bucket::Ahead || b == Bucket::Forked);
 
         // tooltip 走官方 `tooltip_with_action`：它自己从已绑定的 keymap 里查
         // 出这颗键的 `Kbd` 画上去。**不要手写「（1）」进文案**——键位一改，
         // 手写的那份就成了假提示，而查出来的那份永远不会错
+        //
+        // ⚠️ **降级那两把一律 `.secondary().outline()`**：原型的 `.btn.ghost` 是
+        // **白底 + 1px `line` 描边 + 13 字 + 14 图标**（探针量的：34 高 / padding 0 16 / gap 7）。
+        // 只给 `.secondary()` 不够——theme 里 `secondary.background` 就是 #FFFFFF，
+        // **白卡上的白底 = 看不见边框**，三键在帧上就是三个裸文字（他第⑧条
+        // "跟原型相差太大"最先看到的就是这个）。官方 `Button::outline()`（`button.rs:328`）
+        // 正是为这一档存在的：描边取色与 hover/active 都由基座自己管，
+        // **不用换 `Custom`**（那是 Q12 里"重新设计那颗按钮"的量级，不在这一条）
         let key = |id: &'static str,
                    label: &'static str,
+                   icon: AssetIcon,
                    hot: bool,
                    tip: String,
                    op: Op,
@@ -271,9 +303,10 @@ impl Shell {
                    cx: &mut Context<Self>| {
             Button::new(SharedString::from(id))
                 .label(label)
+                .icon(icon)
                 .tooltip_with_action(SharedString::from(tip), action, None)
                 .when(hot, |btn| btn.primary())
-                .when(!hot, |btn| btn.secondary())
+                .when(!hot, |btn| btn.secondary().outline())
                 .loading(busy && lg.op == Some(op))
                 .with_size(Size::Medium)
                 .disabled(busy)
@@ -286,6 +319,10 @@ impl Shell {
             // 文案与 `Op` 都取自 `state.rs::SYNC_SLOTS` / `SYNC_SLOT_LABELS`，
             // 与 `shell.rs::bind_keys` 绑的 `1` `2` `3` 同序——**改一处必须改三处**
             SYNC_SLOT_LABELS[0],
+            // 三键各带一颗图标（原型 `.sync-row button > svg` 14×14：
+            // 向下到线 = 拉取、向上出线 = 推送、放大镜 = 只看不动）。
+            // **方向相反的两个字最容易看错**，而点错的代价是一次真的网络操作
+            AssetIcon::ArrowDownToLine,
             pull_hot,
             if status.behind > 0 {
                 format!("云端有 {} 个新提交，点这里接上来", status.behind)
@@ -297,13 +334,18 @@ impl Shell {
             lg,
             cx,
         ));
-        if third {
-            // 第三方没有推送：留一个同尺寸的空格子，别让「检测」跳到第二个位置
-            keys = keys.child(div().w(px(PUSH_KEY_W)).h(px(1.0)).flex_shrink_0());
-        } else {
+        // 第三方没有推送键 ⇒ **不画推送，也不给它留格子**。
+        // 早先这里塞了一个 `PUSH_KEY_W`(76) 的透明 div，理由是"别让「检测」跳到
+        // 第二个位置，而 1·2·3 是按位置对位的"——那条理由站不住：
+        // **键位提示是 `tooltip_with_action` 从 keymap 查出来画在 tooltip 上的**，
+        // 不靠"第几颗"对位；而留下的洞是**肉眼看得见的 84px 空白**（76 + gap 8），
+        // 用户看到的只是"这两颗键中间怎么空了一块"（2026-10-08 实机报的那条）。
+        // ⇒ 占位守的是一个看不见的约定，赔的是一屏看得见的空白
+        if !third {
             keys = keys.child(key(
                 "sync-push",
                 SYNC_SLOT_LABELS[1],
+                AssetIcon::ArrowUpFromLine,
                 push_hot,
                 if status.ahead > 0 {
                     format!("本地有 {} 个提交没推上去", status.ahead)
@@ -319,6 +361,7 @@ impl Shell {
         keys = keys.child(key(
             "sync-check",
             SYNC_SLOT_LABELS[2],
+            AssetIcon::Search,
             false,
             "只看云端有没有更新，不动本地".into(),
             SYNC_SLOTS[2],
@@ -330,44 +373,13 @@ impl Shell {
         crate::widgets::card(t)
             .flex_shrink_0()
             .gap(px(GAP_TIGHT))
-            // 第一行：状态句 + 定时同步入口 +（右栏收着时的）展开入口
-            .child(
-                h_flex()
-                    .w_full()
-                    // 阶段 28：跟着这行 `fs_body()` 的状态句走
-                    .h(px(row_h(fs_body())))
-                    .flex_shrink_0()
-                    .gap(px(GAP_TIGHT))
-                    .items_center()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(fs_body()))
-                            .font_weight(FontWeight::MEDIUM)
-                            // ⚠️ 有告警时主句**降到中性灰**（`tier3`）：详情已经进
-                            // 头卡那颗感叹号的气泡了，这里再穿前景色 + 占最主位的字，
-                            // 就是"一条提示压过这一屏的操作"——用户不要的那个形态
-                            .text_color(if alert.is_some() {
-                                tier3(t)
-                            } else {
-                                t.colors.foreground
-                            })
-                            .truncate()
-                            .child(sentence),
-                    )
-                    .child(
-                        Button::new("sync-timer")
-                            .label("定时同步")
-                            .custom(ghost_variant(cx))
-                            .with_size(Size::XSmall)
-                            .tooltip("后台定时自动检测并按设置处理（间隔 / 每天定时 / 检测后自动拉取）")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_sync_dlg(window, cx)
-                            })),
-                    ),
-            )
-            // 第二行：三键 + 提交 + 变更入口
+            // 第一行 = 原型 `.sync-row`：**一行装完**（探针量的：34 高、gap 9、
+            // 三键 81 宽 / padding 0 16 / 图标 14 / 字 13）。
+            // 原来这里排的是**两行**——第一行整行只有一句状态话 + 一颗「定时同步」
+            // 文字键，第二行才是三键。他第⑧条「跟原型相差太大」看到的正是这个：
+            // 一屏最该先看到的操作被压到第二行，而第一行那句"与云端已同步"
+            // 白占一行还什么都不是（原型那一屏**没有**这一行——
+            // 它把待推送/未提交放进了头卡那四格）
             .child(
                 h_flex()
                     .w_full()
@@ -376,15 +388,43 @@ impl Shell {
                     .gap(px(GAP))
                     .child(keys)
                     .child(div().flex_1())
-                    // 「提交并推送…」与「提交是改自己的历史」绑在一起：
-                    // 第三方不出现。它那一格空出来的位置由**下面第三行**的
-                    // 只读档案明细接手——少一把键总得少一份信息量，
-                    // 换个地方给回去，而不是让这一行空着
+                    // 顺序照原型：**先"看清单"（说的是"有什么"）→ 再"提交并推送"
+                    // （说的是"该做什么"，primary 在它身上）→ 最后那颗图标键**。
+                    // 原来"提交并推送"排在"看清单"前面，读起来是先做事再看有什么事
+                    // 变更摘要兼**入口**：变更是中栏的一个页签了，
+                    // 而概览页原来那张「未提交的改动」卡已经删掉。
+                    // 这一行是概览页上唯一提到未提交改动的地方，
+                    // 留一个可点的入口才不会让人以为要自己去页签栏找。
+                    // **用官方 `Button` 而不是给文字挂 `on_click`**：
+                    // 纯 div 的命中区只有那行字，悬停底色还得自己在 `Shell`
+                    // 上存一个状态字段来回传
+                    .when(changed > 0, |row| {
+                        row.child(
+                            Button::new("sync-changes-jump")
+                                .label(format!("{changed} 个文件待提交 · 看清单"))
+                                .custom(ghost_variant(cx))
+                                .with_size(Size::Small)
+                                .tooltip("打开「变更」页签，逐个看未提交的文件")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_detail_tab(DetailTab::Changes, cx)
+                                })),
+                        )
+                    })
+                    // 「提交并推送…」与「提交是改自己的历史」绑在一起：第三方不出现。
+                    // 它那一格空出来的位置由**下面那行**的只读档案明细接手——
+                    // 少一把键总得少一份信息量，换个地方给回去，而不是让这一行空着
                     .when(!third, |row| {
                         row.child(
                             Button::new("sync-commit")
-                                .label("提交并推送…")
-                                .custom(ghost_variant(cx))
+                                .label("提交并推送")
+                                // ⚠️ **图标在文字右边**（原型 `.btn.primary` 就是
+                                // 文字 + 一颗向上箭头排在后面），而官方 `Button::icon`
+                                // 只给"图标在左"那一个位置。要放右边得用 `icon_with_text`
+                                // 那类内部件 ⇒ 这一条**先不落**，落之前要查清官方有没有
+                                // 右侧图标的口；现在按"图标在左"给，形态上仍比裸文字强
+                                .icon(AssetIcon::ArrowUp)
+                                .when(commit_hot, |b| b.primary())
+                                .when(!commit_hot, |b| b.secondary().outline())
                                 .with_size(Size::Medium)
                                 .disabled(busy)
                                 .tooltip("先提交本地改动，再推到云端")
@@ -393,44 +433,105 @@ impl Shell {
                                 })),
                         )
                     })
-                    // 变更摘要兼**入口**：变更是中栏的一个页签了，
-                    // 而概览页原来那张「未提交的改动」卡已经删掉。
-                    // 这一行是概览页上唯一提到未提交改动的地方，
-                    // 留一个可点的入口才不会让人以为要自己去页签栏找。
-                    // **用官方 `Button` 而不是给文字挂 `on_click`**：
-                    // 纯 div 的命中区只有那行字，悬停底色还得自己在 `Shell`
-                    // 上存一个状态字段来回传
-                    .when(
-                        changed > 0,
-                        |row| {
-                            row.child(
-                                Button::new("sync-changes-jump")
-                                    .label(format!("{changed} 个文件待提交 · 看清单"))
-                                    .custom(ghost_variant(cx))
-                                    .with_size(Size::XSmall)
-                                    .tooltip("打开「变更」页签，逐个看未提交的文件")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.open_detail_tab(DetailTab::Changes, cx)
-                                    })),
-                            )
-                        },
-                    )
-                    .when(
-                        changed == 0 && !third,
-                        |row| {
-                            row.child(meta_text("工作区干净，没有可提交的内容", t))
-                        },
+                    // 「定时同步」从一颗文字键降成**图标键**（原型 `.btn.ghost.icon`
+                    // 34×34、只有一颗时钟）。它是这一屏的**设置入口**不是动作，
+                    // 与三键并排摆文字会抢读；tooltip 仍把"间隔 / 每天定时 /
+                    // 检测后自动拉取"说全，图标不猜
+                    .child(
+                        Button::new("sync-timer")
+                            .icon(AssetIcon::Clock)
+                            // ⚠️ 与三键**同一种重量**（原型这颗就是 `.btn.ghost.icon`
+                            // = 白底 + 1px 描边 34×34，不是透明那档）。
+                            // 用 `.ghost()` 会把它降成透明——同一行里"带边的方框"
+                            // 与"没边的方框"混着摆，就是他说的"大杂烩"那种形态
+                            .secondary()
+                            .outline()
+                            .with_size(Size::Medium)
+                            .tooltip("后台定时自动检测并按设置处理（间隔 / 每天定时 / 检测后自动拉取）")
+                            .accessibility_label("定时同步设置")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_sync_dlg(window, cx)
+                            })),
                     ),
             )
-            // 第三行（**只有第三方有**）：那一行只读档案明细。
+            // 第二行（**只在"有话说"时才有**）：状态句 + 第三方的补充读数。
             //
-            // ⚠️ **必须自己占一行，不能塞进上面那行按钮里**：它是四列
-            // `DescriptionList`，和三键 + 变更入口抢同一行的宽度时，
-            // 右端两颗（定时同步 / 看清单）会被**顶出画面**——
-            // 2026-10-05 抓帧实锤，那一行右侧整块是裁掉的。
-            // 少一把推送键省下的空间不够它用，宽度只能靠"独占一行"来给
+            // 判据是 `!bits.is_empty() || alert.is_some() || b != Bucket::Synced`。
+            // 比原来多一项 `bits`：第三方即使已经同步，那句里还有「跟踪 origin/main」
+            // 要说——档案行撤掉之后，**这一行就是它唯一的落点**，
+            // 再让"同步了就不出现"把整行藏掉，等于把那份信息静默丢了（D73 那一族）。
+            //
+            // ⚠️ 主句原来挂 `.flex_1().truncate()`：那是"这一行只有主句"时的写法。
+            // 现在后面要跟几段读数，`flex_1` 会把它们**整排推到最右边**，
+            // 读起来成"右边那一堆跟这句话没关系"。⇒ 主句按内容宽排，
+            // 整行 `flex_wrap()`：窗口窄到放不下时折第二行，而不是裁掉尾巴
+            .when(!bits.is_empty() || alert.is_some() || b != Bucket::Synced, |col| {
+                col.child(
+                    h_flex()
+                        .w_full()
+                        .flex_shrink_0()
+                        .gap(px(GAP_TIGHT))
+                        .flex_wrap()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_size(px(fs_sec()))
+                                .font_weight(FontWeight::MEDIUM)
+                                // ⚠️ 有告警时主句**降到中性灰**（`tier3`）：详情已经进
+                                // 头卡那颗感叹号的气泡了，这里再穿前景色 + 占最主位的字，
+                                // 就是"一条提示压过这一屏的操作"——用户不要的那个形态
+                                .text_color(if alert.is_some() {
+                                    tier3(t)
+                                } else {
+                                    body(t)
+                                })
+                                .child(sentence),
+                        )
+                        // 补充段：` · 标签 值`，标签为空的段（"没有落后"）只有值。
+                        // **标签走 `tier4`、值走 `body`** —— 与这一屏其它"键 + 值"
+                        // 的分工同一套（淡的是脚手架，墨的才是内容）
+                        .children({
+                            let mut segs: Vec<AnyElement> = Vec::new();
+                            for (label, value) in bits.iter() {
+                                segs.push(
+                                    div()
+                                        .text_size(px(fs_sec()))
+                                        .text_color(tier4(t))
+                                        .child("·")
+                                        .into_any_element(),
+                                );
+                                if !label.is_empty() {
+                                    segs.push(
+                                        div()
+                                            .text_size(px(fs_sec()))
+                                            .text_color(tier4(t))
+                                            .child(label.to_string())
+                                            .into_any_element(),
+                                    );
+                                }
+                                segs.push(
+                                    div()
+                                        .text_size(px(fs_sec()))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(body(t))
+                                        .child(value.clone())
+                                        .into_any_element(),
+                                );
+                            }
+                            segs
+                        }),
+                )
+            })
+            // 只读声明（**只有第三方有**）：撤掉档案行之后这一句留下，
+            // 它是"这一类仓库不给写"的规则说明，不是读数，没有别处说它
             .when(third, |col| {
-                col.child(self.third_archive_row(&status, lg, t))
+                col.child(
+                    div()
+                        .w_full()
+                        .text_size(px(fs_meta()))
+                        .text_color(tier4(t))
+                        .child("第三方仓库只读：拉取与检测之外不提供任何写操作。"),
+                )
             })
             // **语言构成并进这张卡**（原型：`.sync-row` → `.card-split` →
             // `.mini-head` → `.lang-bar` → `.legend`，全在同一张 `.card` 里）。
@@ -502,9 +603,46 @@ pub(crate) fn sync_readout(s: &RepoStatus, b: Bucket, lg: &LogState) -> (String,
     (sentence, None)
 }
 
-/// 「推送」键的占位宽度。第三方那一格要留住它，
-/// 否则「检测」会跑到第二个位置，而 `1·2·3` 是按位置对位的
-const PUSH_KEY_W: f32 = 76.0;
+/// 第三方那一屏要**并进状态句**的补充段：`(标签, 值)`，标签为空串就是不用标签的短语。
+///
+/// 2026-10-08 用户挑的方案 A。原来这四样是独占一行的四列 `DescriptionList`，
+/// 量出来两处硬伤：① `label_width(64)` 装不住四个 13px 汉字（字面 52 + 组件自己的
+/// 内边距），四格**全部折成两行**、每格高 31；② 那四块 label 底实测 #E5EAEE，
+/// 比设计板的 `card-sunken`（#F4F7F8）深 15/255——theme.json 没配 `DescriptionList`
+/// 读的那个键，落到基座兜底值了（D60 那一族的第二次）。⇒ 整块撤掉，并成一句话。
+///
+/// ⚠️ **判据是「只补主句没说的」**，不是"把四样都搬过来"：
+/// 主句在 `Behind` / `Forked` 时已经报了落后数，这里就**不再说"没有落后"**；
+/// 主句在 `Synced` 时自带「· 上次同步 X」，这里也**不再补**。
+/// 两处各说一遍就是这一路一直在消的那个毛病，而**同一句话里说两遍**更糟——
+/// 它一眼看去像"有两个上次同步"。所以这条判据由单测钉住，不靠注释。
+///
+/// ⚠️ **「当前分支」不进这一句**：头卡仓库名右边那颗 `main` 分支胶囊已经在说它
+/// （`branch_badge`），这里再说一遍就是重复。**去掉的那一样由别处承担，不是丢信息**。
+pub(crate) fn third_bits(
+    s: &RepoStatus,
+    b: Bucket,
+    lg: &LogState,
+    synced: &str,
+) -> Vec<(&'static str, String)> {
+    // 正在跑的时候主句是「正在拉取…」，后面跟一串静态档案读起来像"边跑边改档案"
+    if lg.running {
+        return Vec::new();
+    }
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    // 只有 `Ahead` 这一档主句没提落后（`Behind` / `Forked` 都提了，`Synced` 不必提）
+    if b == Bucket::Ahead {
+        out.push(("", "没有落后".into()));
+    }
+    if s.has_upstream && !s.upstream.is_empty() {
+        out.push(("跟踪", s.upstream.clone()));
+    }
+    // `Synced` 那一档主句自己带「· 上次同步 X」，这里再给就是同一句里说两遍
+    if b != Bucket::Synced {
+        out.push(("上次同步", synced.to_string()));
+    }
+    out
+}
 
 impl Shell {
     /// 分支徽章：Surface 底 + 分支图标
@@ -526,6 +664,30 @@ impl Shell {
 // 徽标的文案。阶段 31.4 补五把那几个读数收进头卡那四格 `head_metrics`，
 // 徽标整个删掉，这句话也就没有读者了。**不留 `#[allow(dead_code)]`**：
 // 留着的话下一轮会有人以为它还有用，跑去改它的措辞）
+
+/// 活跃度那一句结论（头卡页签行右边那句，原型「近 30 天 11 天有提交 · 共 61 次」）。
+///
+/// **抽成纯函数有三个理由**，都指向同一个毛病：
+/// ① 这句话原来在 `repo_head::activity_chip` 里就地拼，而那一枚徽标本轮被撤
+///    （它的两样东西——柱子与这句话——搬到了页签行）⇒ 不留这一份，
+///    下一轮会有人在两处各拼一遍措辞，一处改字另一处跟着漂；
+/// ② 它现在**两类仓库都要显示**，写死在"第三方独有"的那段里就接不上；
+/// ③ 句式是单测唯一能钉住的东西——抽出来之前它只能靠抓帧看，
+///    而抓帧只能证明"渲染成那样了"（AGENTS「凡是要靠 `&self` 才能调的显示判据，
+///    抽成纯函数再单测」那条的同款落法）。
+///
+/// ⚠️ **"没扫过"与"扫过、真的是零"是两件事**（本项目那条老教训的第四种触发）：
+/// 还在扫且一个数都没有 ⇒ 说「统计中…」；扫完 0 次 ⇒ 说「近 30 天没有提交」。
+/// 把"没数"写成"没有提交"就是谎报干净那一族的镜像——谎报"没干活"。
+pub(crate) fn activity_note(days: usize, commits: u32, scanning: bool) -> String {
+    if scanning && commits == 0 && days == 0 {
+        "近 30 天统计中…".to_string()
+    } else if commits == 0 {
+        "近 30 天没有提交".to_string()
+    } else {
+        format!("近 30 天 {days} 天有提交 · 共 {commits} 次")
+    }
+}
 
 impl Shell {
     /// 活跃度迷你柱图：最近 8 个有提交的日子的提交数。
@@ -675,64 +837,114 @@ fn lang_ink(lang: &str, ix: usize, t: &Theme) -> Hsla {
         })
 }
 
-impl Shell {
-    /// 第三方同步卡**第三行**那一行只读档案明细（官方 `DescriptionList`）。
+// （这里原来挂着 `impl Shell { fn third_archive_row(..) }`——第三方那一行四列
+// `DescriptionList` 的只读档案。2026-10-08 用户挑的方案 A 把那四样并进状态句，
+// 整块连同它的 `label_width(64)` 折行与基座兜底灰底一起删除，**不留转发层**。
+// 唯一的例外是那句「第三方仓库只读」，它还在，见 `sync_card` 里的 `.when(third, ..)`）
+
+#[cfg(test)]
+mod tests {
+    use super::{activity_note, third_bits, Bucket, LogState, RepoStatus};
+
+    /// 造一份状态。`upstream` 传空串就是"没有上游"
+    fn st(ahead: u32, behind: u32, upstream: &str) -> RepoStatus {
+        RepoStatus {
+            is_repo: true,
+            branch: "main".into(),
+            ahead,
+            behind,
+            dirty: false,
+            has_upstream: !upstream.is_empty(),
+            upstream: upstream.into(),
+            remote_url: String::new(),
+        }
+    }
+
+    /// 把段拼成人读的一行，断言时直接看句子本身而不是看元组
+    fn line(bits: Vec<(&'static str, String)>) -> String {
+        bits.iter()
+            .map(|(k, v)| {
+                if k.is_empty() {
+                    v.clone()
+                } else {
+                    format!("{k} {v}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
+    /// 方案 A 的判据：**只补主句没说的**。
     ///
-    /// **五项都是只读，不给任何一把键。** 第三方不是我的项目，这一行回答的是
-    /// 「我看到的这份副本处在什么位置」，不是「下一步该做什么」——该做什么是上面
-    /// 拉取 / 检测两把键的事。摆一排只读格子的另一个理由是替代被裁掉的那把
-    /// 「提交并推送…」：少一把键总得少一份信息量，换个地方给回去
+    /// 这一条是整块改动的全部风险所在——档案行并进状态句之后，
+    /// 同一句话里出现两遍「上次同步」或「落后」，读起来就像有两个时钟、
+    /// 两个落后数，而**它一眼看去完全正常**：`cargo check` 零错、抓帧也只是
+    /// "这句话长了一点"。⇒ 逐档钉死，一档一个断言。
+    #[test]
+    fn third_bits_fills_only_what_the_main_sentence_does_not_say() {
+        // `Ahead`：主句是「本地有 N 个提交待推送」，没提落后、也没提上次同步 ⇒ 三样都补
+        assert_eq!(
+            line(third_bits(&st(33, 0, "origin/main"), Bucket::Ahead, &LogState::default(), "还没有记录")),
+            "没有落后 · 跟踪 origin/main · 上次同步 还没有记录"
+        );
+        // `Synced`：主句自带「· 上次同步 X」⇒ 这里**绝不**再给一次，只剩跟踪
+        assert_eq!(
+            line(third_bits(&st(0, 0, "origin/main"), Bucket::Synced, &LogState::default(), "3 天前")),
+            "跟踪 origin/main"
+        );
+        // `Behind`：主句已经报了落后数 ⇒ "没有落后"是**谎话**，不能给
+        assert_eq!(
+            line(third_bits(&st(0, 4, "origin/main"), Bucket::Behind, &LogState::default(), "昨天")),
+            "跟踪 origin/main · 上次同步 昨天"
+        );
+        // `Forked`：同上，两个数主句都说了
+        assert_eq!(
+            line(third_bits(&st(2, 4, "origin/main"), Bucket::Forked, &LogState::default(), "5 小时前")),
+            "跟踪 origin/main · 上次同步 5 小时前"
+        );
+        // 没有上游：主句走「未配置上游分支」那一档 ⇒ 不给"跟踪"（值本来就没有）
+        assert_eq!(
+            line(third_bits(&st(1, 0, ""), Bucket::Ahead, &LogState::default(), "还没有记录")),
+            "没有落后 · 上次同步 还没有记录"
+        );
+    }
+
+    /// **正在跑的时候一段都不给。**
+    /// 主句那时是「正在拉取云端更新…」，后面跟一串静态档案会读成
+    /// "边跑边把结果写进档案"，而那几个数其实还是上一次的了
+    #[test]
+    fn third_bits_says_nothing_while_an_op_is_running() {
+        let lg = LogState {
+            running: true,
+            ..Default::default()
+        };
+        assert!(third_bits(&st(33, 0, "origin/main"), Bucket::Ahead, &lg, "3 天前").is_empty());
+    }
+
+    /// 头卡页签行右边那句活跃度结论。
     ///
-    /// **独占一行**而不是挤进第二行的按钮里——见调用处的注释（四列
-    /// `DescriptionList` 会把右端两颗顶出画面）
-    fn third_archive_row(&self, status: &RepoStatus, lg: &LogState, t: &Theme) -> Div {
-        let branch = if status.branch.is_empty() || status.branch == "HEAD" {
-            "游离 HEAD".to_string()
-        } else {
-            status.branch.clone()
-        };
-        let behind = match status.behind {
-            0 => "没有落后".to_string(),
-            n => format!("落后 {n} 个提交"),
-        };
-        // 「上次同步」这一格：**标签问的是跨会话，值就得答跨会话。**
-        // 原来只有本会话的 `lg.ts` 可用，所以退成「本会话还没有同步过」——
-        // 标签写着"上次"、值却说"本会话"，**一个格子自己跟自己打架**。
-        // 阶段 16 落了 `op_history` 之后这格答得出来了
-        let synced = if lg.ts != 0 {
-            rel_time(lg.ts)
-        } else {
-            match self.selected.as_deref().and_then(|p| self.op_log_when(p)) {
-                Some(when) => when,
-                None => "还没有同步记录".to_string(),
-            }
-        };
-        v_flex()
-            .w_full()
-            .child(
-                DescriptionList::new()
-                    .columns(4)
-                    .label_width(px(64.0))
-                    .with_size(Size::Small)
-                    .item("当前分支", branch, 1)
-                    .item(
-                        "跟踪分支",
-                        if status.upstream.is_empty() {
-                            "没有上游".to_string()
-                        } else {
-                            status.upstream.clone()
-                        },
-                        1,
-                    )
-                    .item("是否落后", behind, 1)
-                    .item("上次同步", synced, 1),
-            )
-            .child(
-                div()
-                    .pt(px(GAP_TIGHT))
-                    .text_size(px(fs_meta()))
-                    .text_color(tier4(t))
-                    .child("第三方仓库只读：拉取与检测之外不提供任何写操作。"),
-            )
+    /// 钉三件事，每件都对应本项目为它交过学费的地方：
+    /// ① **句式**——「近 30 天 N 天有提交 · 共 M 次」是原型那句，
+    ///    不钉住就会被下一次"顺手改个措辞"漂走（AGENTS：改了文案要回头搜
+    ///    认旧措辞的判据，同理句式进了单测才算有主）；
+    /// ② **"还没扫"不说成"没有提交"**——那是"没扫过不许写成已同步"那一族的镜像；
+    /// ③ **有数据就不许还说统计中**——阶段 16 抓出来的老账（库里那份已上屏时
+    ///    界面仍报"统计中…"）。
+    #[test]
+    fn activity_note_says_the_window_and_the_two_counts() {
+        assert_eq!(activity_note(11, 61, false), "近 30 天 11 天有提交 · 共 61 次");
+    }
+
+    #[test]
+    fn activity_note_does_not_claim_no_commits_while_still_scanning() {
+        // 一个数都还没回来：说"统计中"，不能说"没有提交"（谎报"这项目没干活"）
+        assert_eq!(activity_note(0, 0, true), "近 30 天统计中…");
+    }
+
+    #[test]
+    fn activity_note_reports_a_quiet_repo_only_after_the_scan_lands() {
+        assert_eq!(activity_note(0, 0, false), "近 30 天没有提交");
+        // 扫完了、有提交：哪怕还在扫下一轮，也不许退回"统计中"
+        assert_eq!(activity_note(3, 7, true), "近 30 天 3 天有提交 · 共 7 次");
     }
 }

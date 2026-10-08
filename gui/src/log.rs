@@ -32,7 +32,7 @@ use crate::os;
 use crate::keys::{OpenTerminal, StopOp};
 use crate::state::*;
 use crate::widgets::{
-    card, ghost_variant, meta_text, progress_readout, progress_text, CardHeader,
+    card, ghost_variant, meta_text, progress_readout, progress_text, sunken_box, CardHeader,
 };
 use crate::tokens::*;
 
@@ -308,25 +308,30 @@ pub(crate) fn output_stream(
     empty_title: Option<&str>,
     empty_hint: &str,
 ) -> impl IntoElement {
-    let mut area = v_flex()
-        .id(id)
-        .w_full()
-        .flex_1()
-        .min_h(px(120.0))
-        .min_h_0()
-        .overflow_y_scroll()
-        // ⚠️ **必须有 `track_scroll` 才滚得动**（阶段 21-1）：`overflow_y_scroll`
-        // 只给这个元素一个滚动条，滚动状态本身存在 `ScrollHandle` 里，
-        // 没有句柄就没有任何外部代码能读出"现在滚到哪了"、也没法命令它滚
-        .track_scroll(scroll)
-        .p(px(GAP))
-        .gap(px(GAP_TIGHT))
-        .rounded(px(R_MD))
-        // 浅色底 + 细边，跟白卡片之间靠这一层边界分开，不靠阴影堆层次
-        .bg(t.colors.muted)
-        .border_1()
-        .border_color(t.colors.border)
-        .font_family(t.mono_font_family.clone());
+    // 等宽输出流盒 = `sunken_box`（v4 §3.1：卡内盒的圆角是 `R_LG` 那一档，
+    // `R_MD` 只给键帽与图标小底；边是 `line_soft`，`line` 归主描边与分隔线）。
+    // 原来这里是 `R_MD + muted + t.colors.border`，而 `dialogs/clone.rs` 与
+    // `history_tab.rs` 的 patch 框各有第二份、第三份同款拷贝
+    let mut area = sunken_box(
+        v_flex()
+            .w_full()
+            .flex_1()
+            // ⚠️ 这里原来还写着一行 `.min_h(px(120.0))`：它被紧跟其后的
+            // `min_h_0()` **整个覆盖掉**（同一个属性后写的那次生效），
+            // 也就是说"至少 120 高"从来没有成立过。删掉死的那行、保留现状行为；
+            // 真要下限得连 `flex_1` 一起想，那是改布局不是改样式
+            .min_h_0()
+            .p(px(GAP))
+            .gap(px(GAP_TIGHT))
+            .font_family(t.mono_font_family.clone()),
+        t,
+    )
+    .id(id)
+    // ⚠️ **必须有 `track_scroll` 才滚得动**（阶段 21-1）：`overflow_y_scroll`
+    // 只给这个元素一个滚动条，滚动状态本身存在 `ScrollHandle` 里，
+    // 没有句柄就没有任何外部代码能读出"现在滚到哪了"、也没法命令它滚
+    .overflow_y_scroll()
+    .track_scroll(scroll);
 
     if lg.lines.is_empty() {
         // 空态**不画里框**：那圈 1px 边 + 浅灰底在有内容时干的是"把等宽输出与

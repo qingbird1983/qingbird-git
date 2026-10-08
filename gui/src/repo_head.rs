@@ -5,13 +5,18 @@
 //! 分成两个头，就会有两处各自漂移的地址格式、两份取色——而用户在两个页面
 //! 之间来回切时，那种"看着一样、点下去不一样"的差异是最伤信任的。
 //!
-//! ## 地址区（2026-10-04 改版）
+//! ## 地址区（2026-10-08 收成一行两段）
 //!
-//! 原来是「路径 + 最后提交」一行、一个只读 `Input` 胶囊框、页签上方一根分隔线。
-//! 现在收成**「本地地址 / 云端地址」两行**（用户要求）：
-//! 地址本体可点（本地 → 文件管理器，云端 → 浏览器），
-//! 悬停才现一颗复制键，点完换成对号两秒。
-//! 胶囊框与那根分隔线一并删掉——它们与两行地址叠在一起，仓库头横线太多。
+//! 原来是「路径 + 最后提交」一行、一个只读 `Input` 胶囊框、页签上方一根分隔线；
+//! 中间一版拆成**「本地地址 / 云端地址」两行**；现在是**一行两段**
+//! （`本地 路径 · 云端 地址`，原型 `.l2` 那个形态，实测整行 18 高）。
+//! 收成一行不是为了照抄原型，是**为日志让高**：两行加行间距白吃约 24px，
+//! 而头卡下面每一段都在跟它抢（用户第⑤条自己把动机说了：
+//! 「为什么要做到一行，是为了压缩首卡片的高度。把最大化空间留给日志页面」）。
+//! 地址本体仍可点（本地 → 文件管理器，云端 → 浏览器），
+//! 悬停才现一颗复制键，点完换成对号两秒——**按段悬停**，
+//! 停在哪一段只露那一段的键。
+//! 胶囊框与那根多余的分隔线一并删掉——它们与地址叠在一起，仓库头横线太多。
 //!
 //! 四个跳转动作与侧栏右键菜单共用 `os::` 那几个函数，动词与结果三处一致。
 
@@ -21,13 +26,14 @@
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{Disableable as _, Sizable, Size, Theme, WindowExt};
+use gpui_kit::component::{Disableable as _, Icon, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, AnyElement, ClipboardItem, Context, Div, FontWeight, InteractiveElement as _,
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled,
 };
 use qingbird_core::net;
+use qingbird_core::run_cmd::Slot;
 use qingbird_core::space;
 use qingbird_core::types::RepoStatus;
 
@@ -37,7 +43,7 @@ use crate::panels::sync_readout;
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::ghost_variant;
-use crate::widgets::{meta_text, pill, warn_dot};
+use crate::widgets::{pill, warn_dot};
 
 /// 复制成功后那颗对号停留多久（秒）。
 ///
@@ -118,11 +124,11 @@ impl Shell {
                     .when(!status.branch.is_empty(), |row| {
                         row.child(self.branch_badge(&status.branch, t))
                     })
-                    // 活跃度**只给第三方**：概览页三段版面是两边共用的，
-                    // 而"这个项目最近还活着吗"是评估一个别人项目时最该先看的一句，
-                    // 塞进共用版面就得为它单开一段。它属于**概要位**——
-                    // 与那四格读数同一类问题（这东西怎么样），所以挂在同一行
-                    .when(third, |row| row.child(self.activity_chip(t)))
+                    // ⚠️ **第三方那枚「近 30 天」活跃度徽标已撤**（2026-10-08 第⑦条）。
+                    // 它身上那两样东西各有更好的落点：柱子与那句结论一起搬进
+                    // **头卡页签行的右边**（原型 `.tabs-row` 的 `.sp` 之后就是那句），
+                    // 而页签行是两类仓库共用的一块——留在名字行就只有第三方看得见，
+                    // 同一屏两处说同一件活跃度，还各说一种措辞（那是 D73/D78 那一族）
                     // ⚠️ **磁盘摘要不再以一句话挂在名字后面**（阶段 31.4 补五）。
                     // 原来这里是 `space_badge(..)`——一颗写着「占用 1.2 MB · 没有可清理的
                     // 构建缓存」的幽灵键。原型把这类读数收进下面那四格 `metrics`，
@@ -140,8 +146,8 @@ impl Shell {
                         row.child(self.inspector_reopen(t, cx))
                     }),
             )
-            // 地址区：本地 + 云端两行，各自可点跳转、各带一颗悬停才现的复制键
-            .child(self.addr_rows(path, &status, copied, t, cx))
+            // 地址区：**一行**（本地 · 云端），压缩头卡高度把空间让给日志
+            .child(self.addr_line(path, &status, copied, t, cx))
     }
 
     /// 头卡右侧那**四格读数**（原型 `.metrics`：磁盘占用 / 可清理 / 待推送 / 未提交）。
@@ -176,10 +182,13 @@ impl Shell {
         h_flex()
             .flex_shrink_0()
             .items_stretch()
+            // ⚠️ **第一格 `sep=false`**：原型 `.m + .m{border-left}` 说的是
+            // "格与格之间"才有线，第一格左边那条是悬空的（探针实测四格三条线）
             .child(crate::widgets::metric_cell(
                 disk.as_ref().map(|d| d.0.clone()).unwrap_or_else(|| "—".into()),
                 disk.as_ref().and_then(|d| d.1.clone()),
                 "磁盘占用",
+                false,
                 false,
                 t,
             ))
@@ -190,6 +199,7 @@ impl Shell {
                 // 只有"真扫出来有东西可清"才升到 warn 色——没扫过时它是 `—`，
                 // 给个橙色等于催用户去清一个还不知道多大的东西
                 cache > 0,
+                true,
                 t,
             ))
             .child(crate::widgets::metric_cell(
@@ -197,6 +207,7 @@ impl Shell {
                 None,
                 "待推送",
                 false,
+                true,
                 t,
             ))
             .child(crate::widgets::metric_cell(
@@ -204,43 +215,9 @@ impl Shell {
                 None,
                 "未提交",
                 false,
+                true,
                 t,
             ))
-    }
-
-    /// 第三方仓库名后面那枚「近 30 天」活跃度徽标（迷你柱图 + 一句结论）。
-    ///
-    /// **只读、不可点**——所以不用官方 `Button`（它自带命中区与悬停面，
-    /// 给一个不响应点击的东西挂上那是骗人）。但**不能光摆一根柱子**：
-    /// 用户看不懂"8 根柱里有 3 根是满的"是在说什么，所以配一句结论文字。
-    ///
-    /// 数据来自 `panels::activity_chart`（读 `ProfileState.activity`）。
-    /// 它是**第三方独有**的：`scan_profile` 只给第三方跑 `commit_activity`
-    /// （扫 30 天 log），所以这一枚也只在第三方那颗「第三方」徽标之后出现。
-    fn activity_chip(&self, t: &Theme) -> Div {
-        let days = self
-            .profile
-            .activity
-            .iter()
-            .filter(|d| d.count > 0)
-            .count();
-        let commits: u32 = self.profile.activity.iter().map(|d| d.count).sum();
-        let note = if self.profile.scanning && self.profile.activity.is_empty() {
-            // ⚠️ 与 `panels::space_summary_line` 同一处修正（阶段 16）：
-            // **有数据就别再报"统计中"**。库里那份已经上屏时还说统计中，
-            // 图表上明明画着柱子了
-            "统计中…".to_string()
-        } else if commits == 0 {
-            "近 30 天没有提交".to_string()
-        } else {
-            format!("近 30 天 {days} 天 · {commits} 次提交")
-        };
-        h_flex()
-            .flex_shrink_0()
-            .items_center()
-            .gap(px(GAP_TIGHT))
-            .child(self.activity_chart(t))
-            .child(meta_text(note, t))
     }
 
     /// 仓库头右侧的常用命令组：**「常用命令」+ 一颗展开键**。
@@ -279,6 +256,13 @@ impl Shell {
             group = group.child(
                 Button::new(SharedString::from(format!("head-cmd-{}", slot.key())))
                     .label(label)
+                    // ⚠️ **两颗键各带一颗图标**（原型 `.head-acts button > svg` 13×13，
+                    // 2026-10-08 用户第④条点名"这两个原型设计是有带图标的，实际未做"）。
+                    // 图标不是装饰：这两颗并排时**只差两个字**，扫一眼分不清哪个是跑
+                    // 哪个是构建，而跑错一个是白等一遍。尺寸不给——官方 Button 会按
+                    // 按钮档自己定（`button.rs:756` 无条件 `with_size(icon_size)`），
+                    // 这里传 `icon_sm` 的 14 也会被换成档内值，给了反而是句谎话
+                    .icon(slot_icon(slot))
                     .custom(ghost_variant(cx))
                     .with_size(Size::XSmall)
                     .loading(busy)
@@ -371,19 +355,18 @@ impl Shell {
             .into_any_element()
     }
 
-    /// 地址区两行：**本地地址 / 云端地址**（用户要求）。
+    /// 地址区：**一行**（原型 `.l2{display:flex;gap:7px}`，实测整行 18 高）。
     ///
-    /// 每行的结构都一样：一个固定宽的标签 + 一段可点的地址 + 一颗复制键。
-    /// 两行共用 `addr_row` 那个函数——差别只在"点地址做什么"和"复制什么"，
-    /// 写法分开的话两处样式会各自漂移（这正是要消掉的那类重复）。
+    /// 2026-10-08 用户第⑤条原话：「本地加网址 小圆点 云端加网址 在一行，真实的
+    /// 排版 文字 都没去做适配，**为什么要做到一行，是为了压缩首卡片的高度。
+    /// 把最大化空间留给日志页面**」——他把动机一起说了，所以这不是"照抄原型"，
+    /// 是**为日志让高**：原来两行 + 行间 gap 白吃 ~24px，而头卡下面每一段都要跟它抢。
     ///
-    /// **地址本体可点**：本地 → 在文件管理器打开；云端 → 浏览器打开仓库主页。
-    /// 这两件事原先是右上角四颗图标键里的两颗，现在直接做进地址里——
-    /// 地址本身就是那个目的地，指一遍比再点一颗不相干的图标短。
-    ///
-    /// **复制键平时藏着，鼠标移上这一行才出现**（用户要求）。不用气泡通知做反馈，
-    /// 点完按钮自己换成对号再翻回去（`Shell::copied` / `copied_until`）。
-    fn addr_rows(
+    /// 一行装两段的排法：**本地那段 `flex_1 + min_w_0`**（磁盘路径是最长的那种，
+    /// 让它先截），云端那段只 `min_w_0`（能缩，但不抢余量）。
+    /// 复制键仍按段悬停（`Shell::addr_hover` 的两个键不变），
+    /// 停在哪一段只露那一段的键——一行两段共用一个 hover 标志会两颗一起冒出来
+    pub(crate) fn addr_line(
         &self,
         path: &str,
         status: &RepoStatus,
@@ -399,20 +382,30 @@ impl Shell {
         let cloud_text = cloud
             .clone()
             .unwrap_or_else(|| "该仓库还没有配置远端".into());
-        v_flex()
+        h_flex()
             .w_full()
             .flex_shrink_0()
-            .gap(px(GAP_DENSE))
-            .child(self.addr_row(
-                "本地地址",
+            .items_center()
+            .gap(px(GAP_TIGHT))
+            .child(self.addr_seg(
+                "本地",
                 path,
                 AddrKind::Local(path.to_string()),
                 copied == Some("local"),
                 t,
                 cx,
             ))
-            .child(self.addr_row(
-                "云端地址",
+            // 两段之间那个小圆点：它是**正文里的一个字符**，不是一颗图标，
+            // 所以不算"文字冒充图标"（令牌闸那条 R5 管的是拿 ✓/✗ 当状态图标）
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(fs_meta()))
+                    .text_color(tier4(t))
+                    .child("·"),
+            )
+            .child(self.addr_seg(
+                "云端",
                 &cloud_text,
                 AddrKind::Cloud(cloud),
                 copied == Some("remote"),
@@ -422,13 +415,18 @@ impl Shell {
             .into_any_element()
     }
 
-    /// 一行地址：标签 / 可点地址 / 悬停才现的复制键
+    /// 一行里的**一段**地址：标签 / 可点地址 / 悬停才现的复制键
     ///
     /// ⚠️ 悬停状态是**记在 `Shell` 上的**，不是 gpui 的 `:hover`——gpui 没有
     /// CSS 那样的伪类，悬停只能靠 `on_hover` 回调把状态写回来（`div.rs:675`）。
     /// 而 `on_hover` 的闭包是 `'static`，捕不了 `&self`，
     /// 所以复制键的显隐由 `Shell::addr_hover` 决定（`["local"|"remote"|None]`）。
-    fn addr_row(
+    ///
+    /// `grows` = 这一段要不要吃掉行里的余量。**只有本地那段给 `true`**：
+    /// 磁盘路径是这一屏最长的那种文本，让它先占位、先截断；
+    /// 云端那段能缩（`min_w_0`）但不抢余量，否则两段各一半，
+    /// 「该仓库还没有配置远端」这种短句右边会空出一大片
+    fn addr_seg(
         &self,
         label: &'static str,
         text: &str,
@@ -438,12 +436,12 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = kind.key();
-        // ⚠️ 判据是「**这一行**被悬停」，不是「有任意一行被悬停」——
-        // 只判 `is_some()` 的话指针停在哪一行、**两行的复制键一起冒出来**
+        // ⚠️ 判据是「**这一段**被悬停」，不是「有任意一段被悬停」——
+        // 只判 `is_some()` 的话指针停在哪一段、**两段的复制键一起冒出来**
         // （2026-10-05 抓帧）。两个键就是 `local` / `remote`，直接比同一个键
         let hovered = self.addr_hover == Some(key);
         let disabled = text.starts_with("该仓库");
-        // 可点性是**状态**：没有远端时那一行给的是占位句，不是地址
+        // 可点性是**状态**：没有远端时那一段给的是占位句，不是地址
         let clickable =
             matches!(kind, AddrKind::Cloud(Some(_))) || matches!(kind, AddrKind::Local(_));
 
@@ -453,8 +451,13 @@ impl Shell {
             } else {
                 "addr-remote"
             })
-            .w_full()
-            .gap(px(GAP_TIGHT))
+            // ⚠️ **既不 `w_full` 也不 `flex_1`**：`w_full` 两段各占 100% 父宽、
+            // 第二段被挤出卡外；`flex_1` 会把本地那段撑满余量，于是
+            // 「· 云端 …」被推到**行最右端**，中间一大片空（改后第一版抓帧就是这样，
+            // 与原型"三段紧挨着排"完全相反）。原型 `.l2{display:flex;gap:7px}`
+            // 就是按内容左排。截断靠 `min_w_0` + 默认的 shrink，不靠撑满
+            .min_w_0()
+            .gap(px(GAP))
             .items_center()
             // ⚠️ `.id(..)` 之后这行是 `Stateful<Div>`，`on_hover` / `on_click`
             // 才有——裸 `Div` 上没有这两个方法（E0599）
@@ -467,7 +470,6 @@ impl Shell {
             .child(
                 div()
                     .flex_shrink_0()
-                    .w(px(56.0))
                     .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child(label),
@@ -505,6 +507,23 @@ impl Shell {
                                 tier3(t)
                             } else {
                                 tier4(t)
+                            })
+                            // ⚠️ **那颗"下沉小块"只给真地址，不给占位句**：原型
+                            // `.l2 code{background:var(--card-sunken);
+                            // border:1px solid var(--line-soft);padding:1px 7px;
+                            // border-radius:7px}` 包的是路径，而"该仓库还没有配置远端"
+                            // 是一个**裸的 faint `<span>`**（原型 HTML 里就写着内联色）。
+                            // 给占位句也画上底+边，等于用容器说"这里有个能点的东西"
+                            // 而它什么都不能点——那是假 affordance
+                            //
+                            // `--card-sunken` 与 theme 的 `muted.background` 是同一个值
+                            // （亮 #F4F7F8 / 暗 #101E22 两边都精确对上）⇒ **读 token 不写色值**
+                            .when(clickable && !disabled, |addr| {
+                                addr.bg(t.colors.muted)
+                                    .border_1()
+                                    .border_color(track(t))
+                                    .rounded(px(R_MD))
+                                    .px(px(GAP))
                             })
                             .when(clickable, |addr| {
                                 // 只把**跳转目标**搬进闭包，不搬 `kind` 本身：
@@ -659,6 +678,23 @@ impl Shell {
 ///   并进了地址行（可点地址 + 复制键），「终端」并进了日志工具行。
 ///   四颗并排是旧布局的遗留，键的总数一屏里已经偏多。
 */
+
+/// 两颗快捷命令键各自那颗图标（原型 `.head-acts button > svg`）。
+///
+/// **映射写在 GUI 不写进 core**：`Slot` 是 `qingbird_core::run_cmd` 的类型，
+/// 它不认识 gpui 的图标枚举，为它加一个返回图标名的方法等于让 core 认识界面。
+///
+/// 为什么值得给图标而不是靠字：这两颗并排时标签只差两个字（开发运行 / 编译构建），
+/// 扫一眼分不出来，而点错一颗是白等一遍构建。
+fn slot_icon(slot: Slot) -> Icon {
+    icon_sm(match slot {
+        Slot::Dev => AssetIcon::Play,
+        Slot::Build => AssetIcon::Hammer,
+        Slot::Test => AssetIcon::FlaskConical,
+        Slot::Install => AssetIcon::PackagePlus,
+        Slot::Pinned(_) => AssetIcon::Play,
+    })
+}
 
 /// 一行地址的种类。
 ///

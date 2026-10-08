@@ -19,6 +19,7 @@ use qingbird_core::run_cmd::{self};
 
 use crate::state::*;
 use crate::tokens::*;
+use crate::widgets::list_box;
 
 /// 常见构建产物 / 依赖目录默认勾上（进 `enter_init` 时预勾），用户可改。
 pub(crate) fn init_body(
@@ -32,17 +33,20 @@ pub(crate) fn init_body(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| init.path.clone());
 
-    let mut list = v_flex()
-        .id("init-excludes")
-        .w_full()
-        .max_h(px(180.0))
-        .overflow_y_scroll()
-        .gap(px(GAP_DENSE))
-        .p(px(GAP))
-        .rounded(px(r_lg(t)))
-        .bg(t.colors.background)
-        .border_1()
-        .border_color(t.colors.border);
+    // 装可勾选行的盒子 → `list_box`（`r_lg` + 1px `track` 边，**不给底**）。
+    // 原来这里是 `.bg(t.colors.background)` + `.border_color(t.colors.border)`：
+    // 前者是**画布**档（浅 #E8EDF0），于是白卡里挖出一块比桌面还灰的洞；
+    // 后者比卡边重一档。同一屏 `dialogs/purge.rs` 是这两样的第二份拷贝
+    let mut list = list_box(
+        v_flex()
+            .w_full()
+            .max_h(px(180.0))
+            .gap(px(GAP_DENSE))
+            .p(px(GAP)),
+        t,
+    )
+    .id("init-excludes")
+    .overflow_y_scroll();
     if init.items.is_empty() {
         list = list.child(
             div()
