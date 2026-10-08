@@ -10,8 +10,7 @@ use gpui_kit::component::Disableable as _;
 use gpui_kit::component::{Sizable, Size, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, AnyElement, Context, Div, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
-    Styled,
+    div, px, Context, Div, FontWeight, Hsla, ParentElement, SharedString, Styled,
 };
 use qingbird_core::types::RepoStatus;
 
@@ -249,24 +248,11 @@ impl Shell {
         let busy = lg.running;
         let third = self.entry(path).map(|e| e.is_third_party).unwrap_or(false);
         let b = bucket_of(&status);
-        // 状态句与告警**由同一个函数一起出**——判据只有一份（见 `sync_readout`）。
-        // 这里只取主句；`alert` 为 `Some` 时主句降到中性灰，详情交给头卡那颗感叹号
-        let (sentence, alert) = sync_readout(&status, b, lg);
-        // 「上次同步」的值**跨会话**答：本会话没跑过就去那台仓库的历史里翻最后一次。
-        // ⚠️ 读的是**这一屏的 `path`**，不是 `self.selected`——原来那一格拿的是
-        // `selected`，两个不一致时（切了组没换选中、或反过来）会答成**另一台仓库**的记录。
-        // 判据与 D78 同一条：**能被参数化的就别从"当前那个"里捞**
-        let synced = match lg.ts {
-            0 => self.op_log_when(path).unwrap_or_else(|| "还没有记录".into()),
-            ts => rel_time(ts),
-        };
-        // 第三方那几段补充读数（方案 A，2026-10-08 用户点）：**并进状态句那一行**，
-        // 不再独占一行四列。判据"只补主句没说的"写在 `third_bits` 里，由单测钉着
-        let bits: Vec<(&'static str, String)> = if third {
-            third_bits(&status, b, lg, &synced)
-        } else {
-            Vec::new()
-        };
+        // 原来这里还算好「状态句」「告警句」「上次同步」与第三方那几段补充读数，
+        // 一起喂给下面那两行。两行按用户 2026-10-08 的指令整行取消之后，
+        // 这几样**没有任何读者**了 ⇒ 一并删掉（不留 `let _ =` 占位）。
+        // 还在用这份数据的只剩三键的 primary 态（下面 `pull_hot` / `push_hot`，读 `b`）
+        // 与头卡名字后面那颗感叹号（`repo_head.rs` 直接调 `sync_alert`）。
 
         // ⚠️ **「一屏只留一颗主按钮」——原型 `.sync-row` 上面那段注释就是这条**：
         // 「真正要用户做的是什么，primary 就给什么，其余一律降级」。
@@ -454,85 +440,16 @@ impl Shell {
                             })),
                     ),
             )
-            // 第二行（**只在"有话说"时才有**）：状态句 + 第三方的补充读数。
-            //
-            // 判据是 `!bits.is_empty() || alert.is_some() || b != Bucket::Synced`。
-            // 比原来多一项 `bits`：第三方即使已经同步，那句里还有「跟踪 origin/main」
-            // 要说——档案行撤掉之后，**这一行就是它唯一的落点**，
-            // 再让"同步了就不出现"把整行藏掉，等于把那份信息静默丢了（D73 那一族）。
-            //
-            // ⚠️ 主句原来挂 `.flex_1().truncate()`：那是"这一行只有主句"时的写法。
-            // 现在后面要跟几段读数，`flex_1` 会把它们**整排推到最右边**，
-            // 读起来成"右边那一堆跟这句话没关系"。⇒ 主句按内容宽排，
-            // 整行 `flex_wrap()`：窗口窄到放不下时折第二行，而不是裁掉尾巴
-            .when(!bits.is_empty() || alert.is_some() || b != Bucket::Synced, |col| {
-                col.child(
-                    h_flex()
-                        .w_full()
-                        .flex_shrink_0()
-                        .gap(px(GAP_TIGHT))
-                        .flex_wrap()
-                        .items_center()
-                        .child(
-                            div()
-                                .text_size(px(fs_sec()))
-                                .font_weight(FontWeight::MEDIUM)
-                                // ⚠️ 有告警时主句**降到中性灰**（`tier3`）：详情已经进
-                                // 头卡那颗感叹号的气泡了，这里再穿前景色 + 占最主位的字，
-                                // 就是"一条提示压过这一屏的操作"——用户不要的那个形态
-                                .text_color(if alert.is_some() {
-                                    tier3(t)
-                                } else {
-                                    body(t)
-                                })
-                                .child(sentence),
-                        )
-                        // 补充段：` · 标签 值`，标签为空的段（"没有落后"）只有值。
-                        // **标签走 `tier4`、值走 `body`** —— 与这一屏其它"键 + 值"
-                        // 的分工同一套（淡的是脚手架，墨的才是内容）
-                        .children({
-                            let mut segs: Vec<AnyElement> = Vec::new();
-                            for (label, value) in bits.iter() {
-                                segs.push(
-                                    div()
-                                        .text_size(px(fs_sec()))
-                                        .text_color(tier4(t))
-                                        .child("·")
-                                        .into_any_element(),
-                                );
-                                if !label.is_empty() {
-                                    segs.push(
-                                        div()
-                                            .text_size(px(fs_sec()))
-                                            .text_color(tier4(t))
-                                            .child(label.to_string())
-                                            .into_any_element(),
-                                    );
-                                }
-                                segs.push(
-                                    div()
-                                        .text_size(px(fs_sec()))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(body(t))
-                                        .child(value.clone())
-                                        .into_any_element(),
-                                );
-                            }
-                            segs
-                        }),
-                )
-            })
-            // 只读声明（**只有第三方有**）：撤掉档案行之后这一句留下，
-            // 它是"这一类仓库不给写"的规则说明，不是读数，没有别处说它
-            .when(third, |col| {
-                col.child(
-                    div()
-                        .w_full()
-                        .text_size(px(fs_meta()))
-                        .text_color(tier4(t))
-                        .child("第三方仓库只读：拉取与检测之外不提供任何写操作。"),
-                )
-            })
+            // （这里原来挂着**第二行：状态句 + 第三方的补充读数**，与
+            // **第三行：「第三方仓库只读」那句声明**。2026-10-08 用户逐屏挑细节时
+            // 两屏各点一条，合起来就是这两行整行取消：
+            //   「我的仓库」——「把 拉取下面那个 待扫描 字样去除」
+            //   「第三方仓库」——「把 拉取线的 与云端已同步那行 和 下面的
+            //     第三方仓库只读 那行 全部取消」，并要「卡片高度缩小、日志卡跟着向上扩大」。
+            // ⇒ 判据一起下线（`sync_readout` 退成只出告警的 `sync_alert`、
+            // `third_bits` 删除），**不留死代码**：留着就是下一轮有人以为它还在屏上。
+            // 那两行说过的信息去哪了，逐条记在路线表 31.4 补十六——
+            // 其中「跟踪哪个分支 / 上次同步」这两样**现在没有落点**，已如实登记等他定）
             // **语言构成并进这张卡**（原型：`.sync-row` → `.card-split` →
             // `.mini-head` → `.lang-bar` → `.legend`，全在同一张 `.card` 里）。
             // 可见性由调用方把 `MOD_SEC_LANG` 的判定结果传进来，**不在这里读 store**：
@@ -545,104 +462,50 @@ impl Shell {
 }
 
 
-/// 同步卡上那句话。同一个分档在环与这句里说的是同一件事，
-/// 别让两处各写一套文案
-/// 同步卡上那句**状态话**，外加一条**该不该到头卡那颗感叹号里去说**的告警。
+/// 仓库名后面那颗**感叹号该不该出现、气泡里说什么**。
 ///
-/// ⚠️ **一个函数同时出两样，是刻意的**：状态句与告警句必须来自**同一份判据**。
-/// 拆成两个函数各 `if` 一遍，迟早会漂成"卡里说与云端已同步、头卡上挂着
-/// 未配置上游的感叹号"——**界面自己打自己的脸**，而编译器与单测都不报（D78 那一族）。
+/// 2026-10-08 之前它是 `sync_readout`，**同时**出"同步卡上那句状态话"和这条告警，
+/// 为的是让两处不会各写一套判据（屏上会同时出现「与云端已同步」与一颗
+/// "未配置上游"的感叹号 = 界面自己打自己的脸，D78 那一族）。用户逐屏挑细节时
+/// 把那一行整行取消了（两屏各点一条）⇒ 状态句**没有读者了**，一并删掉不留死代码，
+/// 函数退成只出告警，`b` / `lg` 两个参数也跟着退掉（剩下的判据只用 `RepoStatus` 两格）。
 ///
-/// 阶段 31.4 之前，`!is_repo` / `!has_upstream` 这两条是**直接当主句摆在同步卡第一行**的
-/// （"没有配置上游分支，同步操作会失败"）。用户 2026-10-06 明确不要那种形态：
-/// 一条提示不该占住这一屏最主位的字。⇒ 现在主句只**中性陈述**（降到 `tier3` 灰），
-/// 详情进头卡仓库名后面那颗 `warn_dot` 的气泡里。
-pub(crate) fn sync_readout(s: &RepoStatus, b: Bucket, lg: &LogState) -> (String, Option<String>) {
+/// ⚠️ **那条"两处出自同一份判据"的顾虑并没有消失，只是现在只剩一处**。
+/// 以后谁要往同步卡加回一句状态话，**先回头读这段**：那时"两处"又回来了，
+/// 必须让那一句和这颗感叹号从同一个函数一起出。
+///
+/// ⚠️ **`read` 是必填参数**：它答的是"这台仓库的 git 状态问过没有"，而
+/// `RepoStatus` 自己答不出来（没读过与"读出来不是仓库"是同一个值，见
+/// `RepoView::has_status`）。没读过 ⇒ **不给告警**：那时连"这是不是仓库"都还不知道，
+/// 点一颗感叹号说"这个文件夹里没有 .git"等于凭空定罪。做成必填而不是默认值，
+/// 判据与 D78 同一条——**让"忘"没有选项**，漏传编译不过
+pub(crate) fn sync_alert(s: &RepoStatus, read: bool) -> Option<String> {
+    // ⚠️ **这一臂必须排在 `!s.is_repo` 前面**（顺序错了就永远走不到，
+    // 而 `cargo check` 与单测都不报）。触发场景是实的：刚添加的仓库、
+    // 撤销移除之后那份空 `view`、切仓库后刷新在途的那几百毫秒
+    if !read {
+        return None;
+    }
     if !s.is_repo {
-        return (
-            "未识别为 Git 仓库".into(),
-            Some("这个文件夹里没有 .git，同步三键都不会有结果。".into()),
-        );
+        return Some("这个文件夹里没有 .git，同步三键都不会有结果。".into());
     }
     if !s.has_upstream {
-        return (
-            "未配置上游分支".into(),
-            Some(
-                "当前分支没有上游，拉取会失败。可以先设置远端，\
-                 或直接用「推送」把本地分支推上去建立 origin/分支名。"
-                    .into(),
-            ),
+        return Some(
+            "当前分支没有上游，拉取会失败。可以先设置远端，\
+             或直接用「推送」把本地分支推上去建立 origin/分支名。"
+                .into(),
         );
     }
-    let sentence = if lg.running {
-        match lg.op {
-            Some(Op::Pull) => "正在拉取云端更新…".into(),
-            Some(Op::Push) => "正在推送本地提交…".into(),
-            Some(Op::Check) => "正在检查云端更新…".into(),
-            Some(Op::Commit) => "正在提交并推送…".into(),
-            _ => "正在同步…".into(),
-        }
-    } else {
-        match b {
-            Bucket::Behind => format!("云端有 {} 个新提交，可以拉取", s.behind),
-            Bucket::Ahead => format!("本地有 {} 个提交待推送", s.ahead),
-            Bucket::Forked => format!(
-                "本地 {} 个未推送 · 云端 {} 个新提交，需要变基",
-                s.ahead, s.behind
-            ),
-            Bucket::Dirty => "改动都在本地，提交后即可推送".to_string(),
-            _ => {
-                if lg.ts == 0 {
-                    "与云端已同步".to_string()
-                } else {
-                    format!("与云端已同步 · 上次同步 {}", rel_time(lg.ts))
-                }
-            }
-        }
-    };
-    (sentence, None)
+    None
 }
 
-/// 第三方那一屏要**并进状态句**的补充段：`(标签, 值)`，标签为空串就是不用标签的短语。
-///
-/// 2026-10-08 用户挑的方案 A。原来这四样是独占一行的四列 `DescriptionList`，
-/// 量出来两处硬伤：① `label_width(64)` 装不住四个 13px 汉字（字面 52 + 组件自己的
-/// 内边距），四格**全部折成两行**、每格高 31；② 那四块 label 底实测 #E5EAEE，
-/// 比设计板的 `card-sunken`（#F4F7F8）深 15/255——theme.json 没配 `DescriptionList`
-/// 读的那个键，落到基座兜底值了（D60 那一族的第二次）。⇒ 整块撤掉，并成一句话。
-///
-/// ⚠️ **判据是「只补主句没说的」**，不是"把四样都搬过来"：
-/// 主句在 `Behind` / `Forked` 时已经报了落后数，这里就**不再说"没有落后"**；
-/// 主句在 `Synced` 时自带「· 上次同步 X」，这里也**不再补**。
-/// 两处各说一遍就是这一路一直在消的那个毛病，而**同一句话里说两遍**更糟——
-/// 它一眼看去像"有两个上次同步"。所以这条判据由单测钉住，不靠注释。
-///
-/// ⚠️ **「当前分支」不进这一句**：头卡仓库名右边那颗 `main` 分支胶囊已经在说它
-/// （`branch_badge`），这里再说一遍就是重复。**去掉的那一样由别处承担，不是丢信息**。
-pub(crate) fn third_bits(
-    s: &RepoStatus,
-    b: Bucket,
-    lg: &LogState,
-    synced: &str,
-) -> Vec<(&'static str, String)> {
-    // 正在跑的时候主句是「正在拉取…」，后面跟一串静态档案读起来像"边跑边改档案"
-    if lg.running {
-        return Vec::new();
-    }
-    let mut out: Vec<(&'static str, String)> = Vec::new();
-    // 只有 `Ahead` 这一档主句没提落后（`Behind` / `Forked` 都提了，`Synced` 不必提）
-    if b == Bucket::Ahead {
-        out.push(("", "没有落后".into()));
-    }
-    if s.has_upstream && !s.upstream.is_empty() {
-        out.push(("跟踪", s.upstream.clone()));
-    }
-    // `Synced` 那一档主句自己带「· 上次同步 X」，这里再给就是同一句里说两遍
-    if b != Bucket::Synced {
-        out.push(("上次同步", synced.to_string()));
-    }
-    out
-}
+// （这里原来挂着 `third_bits(..)`——第三方那一屏并进状态句的补充段
+// 「没有落后 / 跟踪 origin/main / 上次同步 X」。2026-10-08 用户点「把 拉取线的
+// 与云端已同步那行 和 下面的 第三方仓库只读 那行 全部取消」⇒ 那一行整行下线，
+// 它是那一行唯一的读数来源，跟着删，**不留 `#[allow(dead_code)]`**。
+// ⚠️ 连带后果如实登记在路线表 31.4 补十六：**「跟踪哪个分支」与「上次同步」
+// 这两样现在屏上没有任何落点**（「当前分支」仍有——头卡名字右边那颗 `main` 胶囊）。
+// 要不要给它们换个地方，等他定；他这一轮的口径是先要卡片矮下去、把高度还给日志）
 
 impl Shell {
     /// 分支徽章：Surface 底 + 分支图标
@@ -844,7 +707,7 @@ fn lang_ink(lang: &str, ix: usize, t: &Theme) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use super::{activity_note, third_bits, Bucket, LogState, RepoStatus};
+    use super::{activity_note, bucket_word, sync_alert, Bucket, RepoStatus};
 
     /// 造一份状态。`upstream` 传空串就是"没有上游"
     fn st(ahead: u32, behind: u32, upstream: &str) -> RepoStatus {
@@ -860,65 +723,54 @@ mod tests {
         }
     }
 
-    /// 把段拼成人读的一行，断言时直接看句子本身而不是看元组
-    fn line(bits: Vec<(&'static str, String)>) -> String {
-        bits.iter()
-            .map(|(k, v)| {
-                if k.is_empty() {
-                    v.clone()
-                } else {
-                    format!("{k} {v}")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" · ")
-    }
-
-    /// 方案 A 的判据：**只补主句没说的**。
+    /// 「还没问过 git」与「问过、结论是不是仓库」必须分开说（2026-10-08 台账第二条）。
     ///
-    /// 这一条是整块改动的全部风险所在——档案行并进状态句之后，
-    /// 同一句话里出现两遍「上次同步」或「落后」，读起来就像有两个时钟、
-    /// 两个落后数，而**它一眼看去完全正常**：`cargo check` 零错、抓帧也只是
-    /// "这句话长了一点"。⇒ 逐档钉死，一档一个断言。
+    /// 这两件事在 `RepoStatus` 里**是同一个值**（两条都 `is_repo: false`、
+    /// `remote_url` 空、ahead/behind 全 0），所以分开说的唯一依据是
+    /// `RepoView::has_status` 那一格。少了它，界面只能把"不知道"讲成
+    /// 「这个文件夹里没有 .git」——那句不是"少一句"，是**会改变用户行为的假话**：
+    /// 他会去查文件夹为什么没有 `.git`，而不是点一下检测。
+    /// 触发路径是实的：刚添加的仓库、撤销移除后那份空 `view`、切仓库后
+    /// 刷新在途的那几百毫秒。
+    ///
+    /// ⚠️ 这一轮它的形态从"两句假话挑一句"退成**"没读过就不点感叹号"**：
+    /// 同步卡那一行整行取消了（用户 2026-10-08 指令），"没读过"在屏上的可见落点
+    /// 只剩头卡「云端」那一格写的「待扫描」（`repo_head.rs::addr_line` 读的是
+    /// **同一个** `Shell::status_read`）。⇒ 这两条单测钉的是"不许凭空定罪"
     #[test]
-    fn third_bits_fills_only_what_the_main_sentence_does_not_say() {
-        // `Ahead`：主句是「本地有 N 个提交待推送」，没提落后、也没提上次同步 ⇒ 三样都补
-        assert_eq!(
-            line(third_bits(&st(33, 0, "origin/main"), Bucket::Ahead, &LogState::default(), "还没有记录")),
-            "没有落后 · 跟踪 origin/main · 上次同步 还没有记录"
-        );
-        // `Synced`：主句自带「· 上次同步 X」⇒ 这里**绝不**再给一次，只剩跟踪
-        assert_eq!(
-            line(third_bits(&st(0, 0, "origin/main"), Bucket::Synced, &LogState::default(), "3 天前")),
-            "跟踪 origin/main"
-        );
-        // `Behind`：主句已经报了落后数 ⇒ "没有落后"是**谎话**，不能给
-        assert_eq!(
-            line(third_bits(&st(0, 4, "origin/main"), Bucket::Behind, &LogState::default(), "昨天")),
-            "跟踪 origin/main · 上次同步 昨天"
-        );
-        // `Forked`：同上，两个数主句都说了
-        assert_eq!(
-            line(third_bits(&st(2, 4, "origin/main"), Bucket::Forked, &LogState::default(), "5 小时前")),
-            "跟踪 origin/main · 上次同步 5 小时前"
-        );
-        // 没有上游：主句走「未配置上游分支」那一档 ⇒ 不给"跟踪"（值本来就没有）
-        assert_eq!(
-            line(third_bits(&st(1, 0, ""), Bucket::Ahead, &LogState::default(), "还没有记录")),
-            "没有落后 · 上次同步 还没有记录"
-        );
+    fn a_state_that_was_never_read_raises_no_alert() {
+        assert_eq!(sync_alert(&RepoStatus::default(), false), None);
     }
 
-    /// **正在跑的时候一段都不给。**
-    /// 主句那时是「正在拉取云端更新…」，后面跟一串静态档案会读成
-    /// "边跑边把结果写进档案"，而那几个数其实还是上一次的了
+    /// 反过来：真读过、结论就是"这不是仓库"，那颗感叹号与那句解释都该在
     #[test]
-    fn third_bits_says_nothing_while_an_op_is_running() {
-        let lg = LogState {
-            running: true,
-            ..Default::default()
-        };
-        assert!(third_bits(&st(33, 0, "origin/main"), Bucket::Ahead, &lg, "3 天前").is_empty());
+    fn a_repo_that_was_read_and_is_not_a_repo_says_so() {
+        let alert = sync_alert(&RepoStatus::default(), true).expect("真不是仓库要点感叹号");
+        assert!(alert.contains(".git"), "要说清缺的是哪一样，实际是：{alert}");
+    }
+
+    /// **落后 / 待推送不是告警**。它们是"该做什么"，由三键里那颗 primary 与侧栏
+    /// 徽标说；感叹号只留给"这条路根本走不通"（没有 .git、没有上游）。
+    /// 混在一起的话，每次有更新要拉都点一颗红感叹号，那颗键就废了
+    #[test]
+    fn behind_and_ahead_are_not_alerts() {
+        assert_eq!(sync_alert(&st(0, 4, "origin/main"), true), None);
+        assert_eq!(sync_alert(&st(3, 0, "origin/main"), true), None);
+    }
+
+    /// ⚠️ **「没扫过」这一档全站只许有一个说法**：⌘K、总览「状态」列、
+    /// 头卡「云端」那一格读的都是 `bucket_word`。
+    ///
+    /// 这条钉的不是值对不对，是**出处是不是一个**——各自都写得对、
+    /// 只有摆在一起才看得出漂（"这里说待扫描、那里说未扫描"读起来像两件事）。
+    /// 上一轮为这一类交过四次学费，而编译器看不见，所以判据落在单测里
+    #[test]
+    fn the_pending_word_has_exactly_one_source() {
+        assert_eq!(
+            bucket_word(Bucket::Unknown),
+            crate::overview::ov_status_text(Bucket::Unknown, 0, false),
+            "总览「状态」列与全站那句口径漂了"
+        );
     }
 
     /// 头卡页签行右边那句活跃度结论。

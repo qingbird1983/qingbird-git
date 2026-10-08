@@ -353,8 +353,17 @@ pub(crate) fn card_split(t: &Theme) -> Div {
         .mx(px(-GAP_XL))
         .px(px(GAP_XL))
         .mt(px(GAP_LG))
-        .border_t_1()
-        .border_color(track(t))
+        // ⛔ **这条线必须是一个 1px 高的实体，不能用 `border_t_1`**
+        // （2026-10-08 帧上实测：同步卡里「语言技术栈」上面这条线**一像素都没出**，
+        // 而同一颗 `card_split` 在头卡页签那一排（有 child、有高度）画得好好的
+        // ——y=158 整行 (232,238,240)。差别就是**零内容高的裸 div 上 gpui 不画边框**）。
+        // 症状是"少了一条线"而不是报错，`cargo check` 与单测都不报，
+        // 只有逐行打色量得出来（与「`.min_h(120)` 被后面的 `.min_h_0()` 覆盖」同一族：
+        // **基座里"按 CSS 直觉该有 1px"的东西，帧上没有就是不画**）。
+        //
+        // 横向仍然顶到卡边：父层 `mx(-GAP_XL)` 把盒子撑宽 32、`px(GAP_XL)` 收回 16，
+        // 这个 child 拿到的正好是**卡的边框盒内宽**——与原来那条 border 同宽
+        .child(div().h(px(1.0)).w_full().flex_shrink_0().bg(track(t)))
 }
 
 /// 行内告警点：**一颗 `warn` 色的告警图标 + 官方 tooltip 气泡**（v4 §7「告警」行）。

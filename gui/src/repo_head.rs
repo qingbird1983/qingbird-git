@@ -39,7 +39,7 @@ use qingbird_core::types::RepoStatus;
 
 use crate::os;
 use crate::log::QUICK_SLOTS;
-use crate::panels::sync_readout;
+use crate::panels::sync_alert;
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::ghost_variant;
@@ -65,11 +65,11 @@ impl Shell {
         let third = self.entry(path).map(|e| e.is_third_party).unwrap_or(false);
         // 复制按钮刚点过的那一条：短暂换对号（用户要求：复制反馈不再用气泡）
         let copied = self.copied;
-        // 名字后面那颗感叹号的告警句。**与同步卡那句状态话出自同一个纯函数**
-        // （`panels::sync_readout`）——在这里再 `if !status.has_upstream` 一遍
-        // 就是两份真源，漂了的后果是"卡里说与云端已同步、名字后面挂着感叹号"，
-        // 而界面自己打自己的脸（D78 那一族）
-        let alert = sync_readout(&status, bucket_of(&status), self.log()).1;
+        // 名字后面那颗感叹号的告警句。**与同步卡那句状态话曾经出自同一个纯函数**
+        // （`panels::sync_alert`，原名 `sync_readout`）——那一行 2026-10-08 被用户
+        // 整行取消之后只剩这一处读者。⚠️ **要往同步卡加回状态话，先回去和它合成一个函数**
+        // （两处各 `if` 一遍迟早漂成"卡里说已同步、名字后面挂着未配置上游的感叹号"）
+        let alert = sync_alert(&status, self.status_read(path));
 
         v_flex()
             .w_full()
@@ -374,14 +374,46 @@ impl Shell {
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // 「云端主页」的门槛是**真的能打开一个网页**，不是"有远端就显示"：
-        // 一个没有 upstream 的仓库点开是空白页，比不显示更糟
-        let cloud = net::browse_url_from_remote(&status.remote_url).filter(|_| status.has_upstream);
-        // 显示用的文案**先算出来再移动**：`cloud` 下面要整个交给 `AddrKind`，
+        // 「云端」这一格答的是**这台仓库记没记一个云端地址**，
+        // **不是**「那个地址能不能翻成浏览器打开的网页」。
+        //
+        // 原来这里写的是 `browse_url_from_remote(&status.remote_url)
+        // .filter(|_| status.has_upstream)` —— 拿"翻不翻得出网页"当"有没有远端"的答案，
+        // 于是 `file://` 这类本地远端、自定义 ssh 别名的远端会被说成
+        // 「该仓库还没有配置远端」，而**同一屏下面那句状态话又说「跟踪 origin/main」**，
+        // 两处直接矛盾（2026-10-08 抓帧登记，本轮修）。
+        // 他真实那 17 台都是 GitHub / Gitee，翻得出来 ⇒ 平时看不见这句错话。
+        //
+        // 现在拆成三问，各答各的，**一个都不许替另一个回答**：
+        //   问过没有 ← `status_read`（没问过就承认不知道，别替它答"没配"）
+        //   有没有   ← `remote_url` 非空
+        //   点得开吗 ← `browse_url_from_remote` 得得出网址，**只决定可点性**
+        //
+        // ⚠️ 那个 `.filter(has_upstream)` 一并去掉：`browse_url_from_remote` 只做
+        // 字符串换算、给出的又是**仓库主页**（`net.rs:284`，不碰分支），
+        // 当前分支有没有上游都不会让它变成空白页。"上游"那件事由同步卡主句与
+        // 名字后面那颗感叹号说，不该由这一格兼职——它兼职的代价就是上面那句矛盾。
+        let web = net::browse_url_from_remote(&status.remote_url);
+        // 显示用的文案**先算出来再移动**：`web` 下面要整个交给 `AddrKind`，
         // 而 `as_deref()` 借的是它——同一个值既借又移，编译器会拦（E0505）
-        let cloud_text = cloud
-            .clone()
-            .unwrap_or_else(|| "该仓库还没有配置远端".into());
+        //
+        // ⚠️ **显示的那一句 = 点它要去的那一句 = 复制键给的那一句**，三者必须同一个值
+        // （`AddrKind::Cloud(Some(u))` 里那个 `u` 同时是跳转目标和复制内容）。
+        // 所以翻得出网页时这里显示的是**主页地址**而不是 `remote_url` 原文：
+        // 显示 `git@github.com:x/y.git`、点进去却是 `https://github.com/x/y`，
+        // 用户复制到的和他刚点开的就是两个东西（他这一路一直在消的"两处各说一遍"）。
+        // 而翻不出网页时没有"要去的那一句"可对齐，就把**原地址本身**写出来——
+        // 它点不了，可它是真的
+        let cloud_text = if !self.status_read(path) {
+            // 与总览「状态」列、⌘K、同步卡主句**同一个词**，不另立第三种说法
+            bucket_word(Bucket::Unknown).to_string()
+        } else if let Some(url) = web.clone() {
+            url
+        } else if status.remote_url.trim().is_empty() {
+            "该仓库还没有配置远端".into()
+        } else {
+            status.remote_url.clone()
+        };
         h_flex()
             .w_full()
             .flex_shrink_0()
@@ -407,7 +439,7 @@ impl Shell {
             .child(self.addr_seg(
                 "云端",
                 &cloud_text,
-                AddrKind::Cloud(cloud),
+                AddrKind::Cloud(web),
                 copied == Some("remote"),
                 t,
                 cx,
@@ -440,8 +472,13 @@ impl Shell {
         // 只判 `is_some()` 的话指针停在哪一段、**两段的复制键一起冒出来**
         // （2026-10-05 抓帧）。两个键就是 `local` / `remote`，直接比同一个键
         let hovered = self.addr_hover == Some(key);
-        let disabled = text.starts_with("该仓库");
-        // 可点性是**状态**：没有远端时那一段给的是占位句，不是地址
+        // 可点性**只由 `AddrKind` 判这一次**（文件末尾那条注释就是这个意思）。
+        // ⚠️ 这里原来还挂着第二条判据 `text.starts_with("该仓库")`——**拿文案字符串
+        // 当状态**：改一个字就静默失效。而「云端」这一格现在有三种值
+        // （待扫描 / 能打开的主页 / 有地址但翻不出网页），前缀判据连第三种都判不出来。
+        // 逐一核过：`clickable` 为真时 `text` 必然是真地址（`Cloud(Some(u))` 的 `u`
+        // 就是显示的那一句），所以 `!disabled` 恒成立 ⇒ **查过不生效就删**，
+        // 不留一句会骗人的话
         let clickable =
             matches!(kind, AddrKind::Cloud(Some(_))) || matches!(kind, AddrKind::Local(_));
 
@@ -503,22 +540,24 @@ impl Shell {
                             .text_size(px(fs_meta()))
                             // 可点 = 三级灰，不可点 = 四级灰。**颜色本身就是"能不能点"的提示**，
                             // 不必再画一个禁用态出来
-                            .text_color(if clickable && !disabled {
+                            .text_color(if clickable {
                                 tier3(t)
                             } else {
                                 tier4(t)
                             })
-                            // ⚠️ **那颗"下沉小块"只给真地址，不给占位句**：原型
+                            // ⚠️ **那颗"下沉小块"只给点得开的那一段**：原型
                             // `.l2 code{background:var(--card-sunken);
                             // border:1px solid var(--line-soft);padding:1px 7px;
                             // border-radius:7px}` 包的是路径，而"该仓库还没有配置远端"
                             // 是一个**裸的 faint `<span>`**（原型 HTML 里就写着内联色）。
-                            // 给占位句也画上底+边，等于用容器说"这里有个能点的东西"
-                            // 而它什么都不能点——那是假 affordance
+                            // 给点不了的那一段也画上底+边，等于用容器说"这里有个能点的东西"
+                            // 而它什么都不能点——那是假 affordance。
+                            // 「有地址但翻不出网页」现在也走这一臂（不给底），
+                            // 它和占位句在"点了没反应"上确实同类，区别由文本自己说
                             //
                             // `--card-sunken` 与 theme 的 `muted.background` 是同一个值
                             // （亮 #F4F7F8 / 暗 #101E22 两边都精确对上）⇒ **读 token 不写色值**
-                            .when(clickable && !disabled, |addr| {
+                            .when(clickable, |addr| {
                                 addr.bg(t.colors.muted)
                                     .border_1()
                                     .border_color(track(t))
@@ -698,14 +737,18 @@ fn slot_icon(slot: Slot) -> Icon {
 
 /// 一行地址的种类。
 ///
-/// `Cloud(None)`（有仓库但没有能打开的远端）**不是可点状态**：
-/// `addr_row` 用它把那一行画成占位句 + 四级灰，不给一个点了没反应的手型光标。
-/// 这个"有没有得跳"的分界只在这里判一次，别在别处重新判一遍。
+/// `Cloud(None)` = **这一格点不开**，不是"这台仓库没有云端"。
+/// 它有两种来路：压根没配远端（文本是占位句），以及**有远端但翻不出网页**
+/// （`file://`、自定义 ssh 别名那类，文本就是那条真地址）。
+/// `addr_seg` 用它把那一段画成四级灰、不给底、不给手型光标，复制键也跟着禁用。
+/// ⚠️ 别拿它当"没有远端"用——2026-10-08 台账第一条就是这个混法
+/// （拿"能不能翻成网页"回答"有没有配置"，于是同一屏下面那句还能说「跟踪 origin/main」）。
+/// "有没有得跳"的分界只在这里判一次，别在别处重新判一遍。
 #[derive(Clone, Debug)]
 enum AddrKind {
     /// 本地磁盘路径。恒可点（打开文件管理器）
     Local(String),
-    /// 云端仓库主页地址。`None` = 没有能打开的远端
+    /// 云端**主页**地址。`None` = 这一格点不开（≠ 没有远端）
     Cloud(Option<String>),
 }
 

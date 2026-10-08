@@ -10,13 +10,21 @@
     python scripts/check_design_tokens.py            # 全扫，有问题退出码 1
     python scripts/check_design_tokens.py -v         # 连"白名单命中"一起打
 
-六条规则（编号会出现在报错里）：
+七条规则（编号会出现在报错里）：
     R1  字面色值（`rgb(0x…)` / `"#RRGGBB"`）—— 只有档位定义处允许
     R2  裸间距 / 圆角 / 字号：`.gap(3)` `.rounded(px(7.0))` `.text_size(px(13.0))` `.p(5)`
     R3  裸时长 `Duration::from_millis(数字)`（轮询节奏除外，见 POLL_OK）
     R4  `.bg(` 后面跟字面色
     R5  文字里混进 emoji / 假图标字符（`✓ ● ↑ ↓ ⓘ`）
     R6  同一个 `ElementId` 字符串在一个文件里出现两次（debug 构建会 panic）
+    R7  直写 `t.colors.border` —— v4 的 `line` 档只许从 `tokens::edge(t)` 取
+
+R7 为什么单独一条：它抓的**不是错值**，是"同一个属性两个名字"。`edge(t)` 就是
+`t.colors.border`，值完全一样，所以显示不会漂、`cargo check` 也不会报——
+但读代码的人看不出这两拨东西是不是一个用途，于是"把这一档调深一点"时
+改了一处、漏了一处（2026-10-08 台账第三条）。**档位名与 v4 一字对齐、
+每档只有一个取值入口**才是这条闸要的形态（`line-soft` 那一档早就是 24:0，
+`line` 这一档以前是 5:6，现在归一）。
 
 白名单只放**定义处**：`tokens.rs`（档位）、`theme.rs`（应用主题）、
 `tray.rs` / `build.rs`（图标像素判据里必须写字面色）。
@@ -54,6 +62,9 @@ RULES = [
     ("R2", re.compile(r"\.(gap|p|px|py|rounded|text_size)\(\s*(?:px\()?\s*-?[0-9]+(?:\.[0-9]+)?\s*\)?\s*\)")),
     ("R3", re.compile(r"Duration::from_millis\(\s*[0-9]")),
     ("R4", re.compile(r"\.bg\(\s*(?:rgb|hsla?|rgba?)\s*\(")),
+    # R7：v4 的 `line` 档只许从 `tokens::edge(t)` 取。直写 `t.colors.border`
+    # 不是错值（两者同一个色），是**第二个出处**——调这一档时会漏改它
+    ("R7", re.compile(r"\bcolors\.border\b")),
 ]
 
 # R6 单独走：它判的是"**同文件内**同一个 id 出现两次"，逐行判看不出来
@@ -82,6 +93,10 @@ def scan():
                     if code == "R2" and R2_ZERO_OK.search(line):
                         continue
                     if code in ("R1", "R2", "R4") and is_def:
+                        continue
+                    # R7 的白名单**只有档位定义处**：IMAGING（tray/build 画像素）
+                    # 不该出现在这里，把它们一起放进来等于给这条闸开后门
+                    if code == "R7" and fn in DEFINITIONS:
                         continue
                     if code == "R3" and fn in POLL_OK:
                         continue

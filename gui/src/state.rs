@@ -31,6 +31,20 @@ use crate::tokens::*;
 /// 一个仓库在界面上要显示的东西
 pub(crate) struct RepoView {
     pub(crate) status: RepoStatus,
+    /// 这一份 `status` **是真读出来的，还是空的**。
+    ///
+    /// ⚠️ 加这一格是因为 `RepoStatus::default()` 与"读过、结论是这个文件夹
+    /// 不是 Git 仓库"**在结构体里长得一模一样**（两条都是 `is_repo: false`、
+    /// `remote_url: ""`、ahead/behind 全 0）。于是界面上"我还没问过 git"这句
+    /// 真话没有任何一格可以说，只能说成那两句假话之一。
+    /// 与 D73（进度信息断在字段声明里）、D78（归属断在参数里）同族，
+    /// 也正是 `SpaceState::scanned_at` / `ProfileState::scanned_at` 早就解决过
+    /// 的那件事——**这两路有时间戳，状态这一路一直没有**。
+    ///
+    /// 写的地方只有三处：扫描回填、缓存灌入（都置 `true`）、`blank()`（`false`）。
+    /// 读的地方是 `Shell::status_read`——同步卡主句与头卡「云端」那一格共用它，
+    /// **不许在别处重新判一遍**（判两遍迟早漂成"卡里说待扫描、头卡说没配远端"）。
+    pub(crate) has_status: bool,
     /// 未提交文件数（仓库头的「未提交 N 文件」）
     pub(crate) changed: u32,
     /// 未提交的**条目**（提交对话框的变更摘要、检视抽屉的「变更」页签）。
@@ -49,6 +63,8 @@ impl RepoView {
     pub(crate) fn blank() -> Self {
         Self {
             status: RepoStatus::default(),
+            // 一份都没读过。这一格是 `false` 才让"待扫描"那句有得可说
+            has_status: false,
             changed: 0,
             changes: Vec::new(),
             last_commit_ts: 0,
@@ -1329,6 +1345,7 @@ pub(crate) fn bucket_of(s: &RepoStatus) -> Bucket {
 /// | 待推送 | 蓝 `accent` | 与上一档同语义，不另开色 |
 /// | 落后 | 橙 `chart_3` | 拉一下就好 |
 /// | 已分叉 | 红 `danger` | 唯一"不能一键解决"的档，值得最重的色 |
+/// | 待扫描 | `line` 档（`edge(t)`） | **没数据的那档不给行动色**：蓝/橙/红都在说"有件事要做"，而这里什么都不知道 |
 ///
 /// ⚠️ 「已同步」刻意**不占强调色**：它是占比最高的一档，而它恰恰是
 /// 不需要动手的一档，给它蓝色会让绝大多数干净的仓库在侧栏和总览里一片蓝。
@@ -1342,7 +1359,10 @@ pub(crate) fn dot_color(b: Bucket, t: &Theme) -> Hsla {
         Bucket::Ahead => t.colors.accent,
         Bucket::Behind => orange(t),
         Bucket::Forked => t.colors.danger,
-        Bucket::Unknown => t.colors.border,
+        // 「待扫描」借 `line` 那一档灰。这里原来直写 `t.colors.border`——
+        // 与 `edge(t)` 是**同一个值的两个名字**（2026-10-08 台账第三条），
+        // 归到唯一入口是为了"将来调这一档不会漏改这里"
+        Bucket::Unknown => edge(t),
     }
 }
 
@@ -1432,6 +1452,9 @@ pub(crate) static EMPTY_VIEW: RepoView = RepoView {
         remote_url: String::new(),
     },
     changed: 0,
+    // 「没读过」——总览那一行兜底用的就是这一格，所以它显示「待扫描」而不是
+    // 「已同步」或「未识别为 Git 仓库」。`has_status` 的注释记着为什么这三档分得开
+    has_status: false,
     changes: Vec::new(),
     detected: run_cmd::CmdDetect {
         test_cmd: String::new(),

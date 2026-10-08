@@ -356,6 +356,7 @@ PNG **不能**喂给 `gpui_kit::component::Icon`——它只会 `svg().data(..)`
 | 卡外壳 | `widgets::card(t)` | 手搓 `bg + border + rounded + p` | 闸：扫 `.rounded(px(R_XL))` 附近必须同现 `card(` |
 | 卡内分段标题 | `widgets::mini_head` | 各页自己 `h_flex + text_size` | 闸：`fs_sec` + 700 的组合只允许出现在此构件 |
 | 卡内分隔线 | `widgets::card_split(t)` | 自拼 `border_t_1 + 负 margin` | 同上 |
+| 两档灰（`line` / `line-soft`） | `tokens::edge(t)` 与 `tokens::track(t)`——**一档一个入口** | 直写 `t.colors.border` / `t.colors.table_row_border` | 闸 **R7**：`colors.border` 只许出现在 `tokens.rs` 定义处。⚠️ **给"档"起名字时别把用途写死**：`edge()` 的注释以前写着"次按钮描边"，于是分隔线、中性状态点以为不归它管、各自直写，同一个值长了两个名字（补十五实测：改前 5 别名 / 6 直写，改后 11 : 0，零视觉变化） |
 | 选中面 | `tokens::wash(t)` | 各页自挑一个灰 | 闸：`bg(` 后跟字面色值的，白名单外一律报 |
 | 悬停面 | `tokens::hover_face(t)`（**待落地**：gpui 裸 `Div` 没有 `.hover()` 入口，要靠 `on_hover` 记状态 ⇒ 阶段 31.4） | 有的用 `secondary_hover` 有的自己挑灰 | 收敛后闸：全站 `wash_soft` 只出现在此函数 |
 | 图标底块 | `widgets::glyph(...)`，一档 40/12/20 | 42 / 46 / 圆角混用 | 闸：只允许一组常量 |

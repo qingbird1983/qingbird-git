@@ -50,6 +50,17 @@ pub struct RepoCache {
     /// git 状态：分支 / 领先落后 / 是否脏 / 上游
     #[serde(default)]
     pub status: RepoStatus,
+    /// **库里这一份 `status` 是不是真读出来的**。
+    ///
+    /// ⚠️ 不能用 `status.is_repo` 代替它：`RepoStatus::default()` 和
+    /// 「读过了、这个文件夹不是仓库」是同一个值，两者在这一层分不开。
+    /// 而这条记录会被「只写体积」那一路（`persist_space_cache`）先建起来，
+    /// 那时 `status` 还是空的——把它当成"读过的状态"灌进界面，
+    /// 界面就会指着一份空读数说「这个文件夹不是 Git 仓库」。
+    /// 老配置里没有这个字段 → 读成 `false` → 界面说「待扫描」：
+    /// **少说一句已知，不多编一句未知**，这是故意的方向
+    #[serde(default)]
+    pub status_read: bool,
     /// 未提交文件数
     #[serde(default)]
     pub changed: u32,

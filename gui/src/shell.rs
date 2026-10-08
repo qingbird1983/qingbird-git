@@ -1419,6 +1419,18 @@ impl Shell {
     pub(crate) fn view(&self, path: &str) -> Option<&RepoView> {
         self.views.get(path)
     }
+
+    /// 这一台仓库的 git 状态**问过没有**。
+    ///
+    /// 这是「我还没问过 git」与「我问过了、这个文件夹不是仓库」唯一的分界，
+    /// 而 `RepoStatus` 自己答不出来（两条都是 `is_repo: false`）——
+    /// 判据见 `RepoView::has_status`。**同步卡主句与头卡「云端」那一格都读它**，
+    /// 别在那两处各写一遍 `view(path).map(..)`：判两遍迟早漂。
+    pub(crate) fn status_read(&self, path: &str) -> bool {
+        self.view(path)
+            .map(|v| v.has_status)
+            .unwrap_or(false)
+    }
 }
 
 impl Shell {
@@ -1569,6 +1581,12 @@ impl Shell {
                 for (path, status, changes, last_commit) in scan {
                     let v = this.views.entry(path.clone()).or_insert_with(RepoView::blank);
                     v.status = status;
+                    // 问过 git 了，答案就在这上面 ⇒ 「待扫描」那一档到此结束。
+                    // ⚠️ 这一格**不判成败**：`read_status` 不返回 `Result`，跑完就有
+                    // 一份读数，读不出仓库的那个文件夹在 core 侧就是 `is_repo: false`——
+                    // 那种情况下界面说「未识别为 Git 仓库」是真话。
+                    // 它答的只是"有没有一份真实读数"，与读数内容好不好无关
+                    v.has_status = true;
                     v.changed = changes.len() as u32;
                     v.changes = changes;
                     v.last_commit_ts = last_commit;

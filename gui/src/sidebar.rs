@@ -153,14 +153,14 @@ impl Shell {
                 .child(self.group_header(0, t, window, cx))
                 .child(self.sidebar_header(t, cx))
                 .child(no_repos(self.side_focus, other_has_repos, t))
-                .child(Separator::horizontal().color(t.colors.border))
+                .child(Separator::horizontal().color(edge(t)))
                 .child(self.sidebar_footer(t, cx));
         }
 
         side_shell(t)
             .child(self.sidebar_header(t, cx))
             .child(tree)
-            .child(Separator::horizontal().color(t.colors.border))
+            .child(Separator::horizontal().color(edge(t)))
             .child(self.sidebar_footer(t, cx))
     }
 

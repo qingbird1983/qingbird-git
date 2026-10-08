@@ -55,6 +55,12 @@ impl Shell {
             .entry(path.to_string())
             .or_insert_with(crate::state::RepoView::blank);
         v.status = c.status.clone();
+        // 「问过 git 没有」这件事**库里存着**，不是从 `status` 猜出来的。
+        // ⚠️ 这一行漏了，重启后头一句就成「待扫描」——那是**把有说成没有**，
+        // 与它要修的那条（把没有说成有）同样是假话。
+        // ⚠️ 反过来，光看「有没有这条缓存」也不行：只写体积那一路会先建一条
+        // `status` 全空的记录，那时真就是没读过。判据写在 `RepoCache::status_read`
+        v.has_status = c.status_read;
         v.changed = c.changed;
         v.last_commit_ts = c.last_commit_ts;
         if c.last_commit_ts > 0 {
@@ -130,6 +136,9 @@ impl Shell {
         // 从零构造一份会把它们抹掉
         let mut c = scan_cache::load_cache(path).unwrap_or_default();
         c.status = v.status.clone();
+        // 存了 status 就得同时存"这份 status 是读出来的"，否则下次启动读回来
+        // 只剩一份分不清来源的读数（`status_read` 的注释写了为什么不能靠内容猜）
+        c.status_read = true;
         c.changed = v.changed;
         c.last_commit_ts = v.last_commit_ts;
         if v.last_commit_ts > 0 {
@@ -256,14 +265,12 @@ impl Shell {
         op_line(o.ok, &o.op, &o.detail, &rel_time(o.ts))
     }
 
-    /// 上一次操作**距今多久**（`"2 分钟前"`），没记过就 `None`。
-    ///
-    /// 给那些只想报时间、不想连操作名一起说的位置用（第三方那行的
-    /// 「上次同步」格子）。**别拿它当判据用**——它不区分成没成，
-    /// 要那句话的是 `op_log_line`
-    pub(crate) fn op_log_when(&self, path: &str) -> Option<String> {
-        self.op_logs.get(path).map(|o| rel_time(o.ts))
-    }
+    // （这里原来挂着 `op_log_when(..)`——只报"距今多久"、不带操作名的那一个口子，
+    // 唯一的读者是第三方那一屏的「上次同步」格子。2026-10-08 用户点「把 与云端已同步
+    // 那行 和 第三方仓库只读那行 全部取消」⇒ 那一格没了、它也没有读者了，
+    // **删掉、不留 `#[allow(dead_code)]`**（AGENTS 那条：留着就是让下一轮的人
+    // 以为屏上还有这句话）。以后要把「上次同步」放回别处（头卡那四格、检视抽屉），
+    // 照上面 `op_log_line` 那两行从 `self.op_logs` 读 `ts` 再走 `rel_time` 就够）
 }
 
 /// 落盘那条记录要显示成的那句话。**抽成纯函数才单测得掉**——

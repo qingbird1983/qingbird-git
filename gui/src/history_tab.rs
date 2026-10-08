@@ -549,7 +549,7 @@ fn sheet_body(
                         .w(px(1.0))
                         .h_full()
                         .flex_shrink_0()
-                        .bg(t.colors.border),
+                        .bg(edge(t)),
                 )
                 .child(patch_pane(t, st)),
         )

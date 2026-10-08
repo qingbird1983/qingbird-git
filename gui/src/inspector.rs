@@ -106,7 +106,7 @@ impl Shell {
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx))),
                     ),
             )
-            .child(Separator::horizontal().color(t.colors.border))
+            .child(Separator::horizontal().color(edge(t)))
             .child(self.inspector_placeholder(t))
     }
 

@@ -238,7 +238,7 @@ fn key_cap(t: &Theme, raw: Option<&str>, recording: bool, hovered: bool) -> Div 
             d.bg(wash(t)).border_1().border_color(if recording {
                 t.colors.accent
             } else {
-                t.colors.border
+                edge(t)
             })
         });
     if recording {
