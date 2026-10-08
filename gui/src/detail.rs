@@ -127,11 +127,6 @@ impl Shell {
             .collect()
     }
 
-    /// 某个页签在当前仓库这一类下能不能打开
-    pub(crate) fn detail_tab_shown(&self, tab: DetailTab) -> bool {
-        self.module_on(self.selected_is_third(), tab.module_key())
-    }
-
     /// 当前选中的是不是第三方仓库
     pub(crate) fn selected_is_third(&self) -> bool {
         self.selected
@@ -222,6 +217,15 @@ impl Shell {
             .child(
                 crate::widgets::card(t)
                     .gap(px(GAP_TIGHT))
+                    // ⚠️ **底部内边距归 0**（原型 `.repo-head{padding:15px 18px 0}`）。
+                    // 这张卡的最后一格是页签行，而页签行用 `card_split` 的负边距
+                    // **撑到了卡的左右边**——它下面再留 16px 白，读起来就是
+                    // "页签浮在卡里的一块岛上"，而原型那条下划线是压在卡底那条边上的
+                    // （`.tab{margin-bottom:-1px}` 靠的就是"底下没有 padding"这件事）。
+                    // 原型左右给 18、上给 15，与 `card()` 的 16 差 2/1 px——
+                    // **不为这两像素再开一处 padding 出处**（v4 §3.2），只把"底部为 0"
+                    // 这一条结构差异落下来
+                    .pb_0()
                     .child(self.repo_head(path, t, cx))
                     .child(
                         // 页签间距走**官方的 `Size` 档**，不自己加 `gap()`：
@@ -391,11 +395,19 @@ impl Shell {
             // 出来的就是用户报的那种"看着就是不齐"而根因不是数值（D90）。
             .gap(px(GAP_LG))
             .when(on(store::MOD_SEC_FORK), |b| b.children(self.fork_card(t, cx)))
-            .when(on(store::MOD_SEC_SYNC), |b| b.child(self.sync_card(path, t, cx)))
+            .when(on(store::MOD_SEC_SYNC), |b| {
+                b.child(self.sync_card(path, t, cx, on(store::MOD_SEC_LANG)))
+            })
             .when(on(store::MOD_SEC_LOG), |b| {
                 b.child(self.log_panel(t, cx).min_h(px(LOG_MIN_H)))
             })
-            .when(on(store::MOD_SEC_LANG), |b| b.child(self.lang_section(t)))
+            // ⚠️ **语言段正常情况下不是卡，是同步卡里的一段**（原型就这么长）。
+            // 这里只处理一种退路：用户把「同步」这一段关掉了，那么它的宿主没了，
+            // 语言段不能跟着凭空消失 ⇒ 自己套一张卡。
+            // 两条路共用同一个 `lang_section(..)`，卡外壳也只认 `widgets::card` 一处
+            .when(on(store::MOD_SEC_LANG) && !on(store::MOD_SEC_SYNC), |b| {
+                b.child(crate::widgets::card(t).child(self.lang_section(t)))
+            })
             // **全藏了要说清楚为什么空**，不能留一页白。
             // 这不是防御性代码：勾选区就在设置里摆着，全勾掉是用户做得到的
             .when(!any, |b| {

@@ -13,7 +13,6 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, Context, Div, FontWeight, Hsla, ParentElement, SharedString, Styled,
 };
-use qingbird_core::space;
 use qingbird_core::types::RepoStatus;
 
 use crate::detail::DetailTab;
@@ -236,7 +235,13 @@ impl Shell {
     /// **按归属裁剪**：第三方不是我的项目，推送会改别人的仓库，
     /// 所以那把键在它身上不出现（设计文档 3.5 的硬边界）。位置仍然对齐——
     /// 第三方那把空出来的格子补一个不可点的占位，让「拉取」永远在第一个
-    pub(crate) fn sync_card(&self, path: &str, t: &Theme, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn sync_card(
+        &self,
+        path: &str,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        lang_on: bool,
+    ) -> Div {
         let view = self.view(path);
         let status = view.map(|v| v.status.clone()).unwrap_or_default();
         let changed = view.map(|v| v.changed).unwrap_or(0);
@@ -427,6 +432,14 @@ impl Shell {
             .when(third, |col| {
                 col.child(self.third_archive_row(&status, lg, t))
             })
+            // **语言构成并进这张卡**（原型：`.sync-row` → `.card-split` →
+            // `.mini-head` → `.lang-bar` → `.legend`，全在同一张 `.card` 里）。
+            // 可见性由调用方把 `MOD_SEC_LANG` 的判定结果传进来，**不在这里读 store**：
+            // "这一屏显示哪几段"的判据只有 `overview_body` 那一处，两处各读一次迟早漂
+            .when(lang_on, |col| {
+                col.child(crate::widgets::card_split(t))
+                    .child(self.lang_section(t))
+            })
     }
 }
 
@@ -501,63 +514,18 @@ impl Shell {
         } else {
             branch.to_string()
         };
-        h_flex()
-            // 阶段 28：这颗**就是一个胶囊**（圆角 + 灰底 + 图标 + 字），
-            // 高度该跟 `pill_h()` 同一源，而不是自己写死 22。
-            // 写死时中档 14px 的字上下只剩 4px，贴边
-            .h(px(pill_h()))
-            .px(px(GAP))
-            .rounded(px(R_MD))
-            .bg(t.colors.muted)
-            .items_center()
-            .gap(px(GAP_TIGHT))
-            .text_color(tier3(t))
-            .child(icon_md(AssetIcon::GitBranch))
-            .child(div().text_size(px(fs_sec())).child(text))
+        // **走全站唯一那份胶囊实现**（`widgets::pill_out`）。这里原来自己手搓了
+        // 第四种写法：`R_MD` 方角 + `muted` 实底 + `fs_sec` 字 + `icon_md` 图标——
+        // 既不在 `pill_h()` 那一档也不在全圆角那一档，与它左边那枚「我的」并排时
+        // 一眼就是两种东西。分支该读成"身份"而不是"状态" ⇒ 描边那一档
+        crate::widgets::pill_out(Some(AssetIcon::GitBranch), &text, t)
     }
 }
 
-impl Shell {
-    /// 磁盘摘要**一句话**（仓库头那枚徽标用）。
-    ///
-    /// 原来是概览页底排一张「磁盘占用」卡：一行结论 + 「查看」+ 重新扫描。
-    /// 用户要求把统计**搬到仓库名后面**，所以卡整个撤了，只留这句话。
-    ///
-    /// **判据一个字没动**，只是从"卡的正文"变成"徽标的文案"——
-    /// 扫不扫 / 扫出什么 / 有没有可清的，全在这一个函数里判。
-    /// 完整数据（总占用 / Top 10 大文件 / 逐项清理 / `.gitignore` 建议 /
-    /// 重新扫描 / 上一轮清理的结论）都在「空间」页签里，徽标点过去就是它。
-    pub(crate) fn space_summary_line(&self) -> String {
-        let rep = self.space.report.as_ref();
-        let cache = rep
-            .map(|r| r.dirs.iter().filter(|d| d.is_cache).map(|d| d.size).sum())
-            .unwrap_or(0u64);
-
-        // ⚠️ 判据是 `scanning && 还没有数`，**不是光看 `scanning`**（阶段 16）。
-        // 后台刷新时库里那份已经在屏幕上了，这时候报"扫描中…"等于
-        // 刚闪出来的数字立刻缩回去——缓存做的那点秒开全白费。
-        if self.space.scanning && rep.is_none() {
-            "扫描中…".to_string()
-        } else if let Some(e) = &self.space.error {
-            e.clone()
-        } else if let Some(r) = rep {
-            // 用 `human_bytes` 不用 `human_size`：清完缓存的小仓库会落到几十 KB，
-            // `human_size` 一律折成 MB，那会儿标题上写的是「占用 0 MB」——
-            // 一个还有源码的仓库显示成 0，读起来像"空仓库"
-            if cache > 0 {
-                format!(
-                    "占用 {} · 可清理 {}",
-                    space::human_bytes(r.total),
-                    space::human_bytes(cache)
-                )
-            } else {
-                format!("占用 {} · 没有可清理的构建缓存", space::human_bytes(r.total))
-            }
-        } else {
-            "尚未扫描".to_string()
-        }
-    }
-}
+// （这里原来挂着 `impl Shell { fn space_summary_line(..) }`——仓库头那枚磁盘摘要
+// 徽标的文案。阶段 31.4 补五把那几个读数收进头卡那四格 `head_metrics`，
+// 徽标整个删掉，这句话也就没有读者了。**不留 `#[allow(dead_code)]`**：
+// 留着的话下一轮会有人以为它还有用，跑去改它的措辞）
 
 impl Shell {
     /// 活跃度迷你柱图：最近 8 个有提交的日子的提交数。
@@ -661,16 +629,20 @@ impl Shell {
             );
         }
 
-        crate::widgets::card(t)
+        // ⚠️ **这一段没有卡外壳**：它现在是**同步卡里的一段**（原型 `.card` 内
+        // `card-split` + `mini-head` + `lang-bar` + `legend`），不是第三张卡。
+        // 原来它自己 `card(t)` 一份 ⇒ 一屏三张卡，而它只有两行内容，
+        // 却要多付一次「卡间距 + 上下内边距 + 表头」的垂直开销——
+        // 抓帧实锤的后果是日志卡 `flex_1` 把剩余高度全吃掉、这张被压到屏底只露一条
+        v_flex()
+            .w_full()
             .flex_shrink_0()
             .gap(px(GAP_TIGHT))
-            .child(
-                div()
-                    .text_size(px(fs_body()))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(t.colors.foreground)
-                    .child("语言技术栈"),
-            )
+            .child(crate::widgets::mini_head(
+                "语言技术栈",
+                Some("按文件字节数"),
+                t,
+            ))
             .child(self.lang_bar(t))
             .when(langs.is_empty(), |col| {
                 // 扫描中就说扫描中。摆一根空条加一个 0%，用户会以为这仓库没有代码

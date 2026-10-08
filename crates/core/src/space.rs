@@ -70,6 +70,23 @@ pub struct SpaceReport {
     pub ignorable: Vec<IgnoreSuggestion>,
 }
 
+impl SpaceReport {
+    /// **可清理的字节数——全站唯一一处算式。**
+    ///
+    /// 这一格以前有三处各写一遍（仓库头那句摘要、空间页图例、头卡那四格读数），
+    /// 而两处写的是 `is_cache`、一处写的是 `is_cache && size > 0`。
+    /// 今天求和结果一样（0 不贡献），**但"哪些目录算可清理"这条规则已经有两个版本**——
+    /// 下一轮只要有人给空目录加一句"也要列出来"，三处就会给出三个数。
+    /// ⇒ 收成这一个方法，判据取**更严格那一版**（`size > 0`）
+    pub fn cache_bytes(&self) -> u64 {
+        self.dirs
+            .iter()
+            .filter(|d| d.is_cache && d.size > 0)
+            .map(|d| d.size)
+            .sum()
+    }
+}
+
 /// 仓库内跑一条只读 git 命令（不涉及网络，用直连即可）
 fn git_ok(repo: &str, args: &[&str]) -> bool {
     git::run_git(repo, args, None, LOCAL_TIMEOUT).success
@@ -517,19 +534,32 @@ pub fn human_size(bytes: u64) -> String {
 /// 满屏都是几 KB 的源码文件，全是 "0 MB" 等于没给信息。两档并存：
 /// 大数字用 `human_size`（粒度粗一点更好读），清单用这个
 pub fn human_bytes(bytes: u64) -> String {
+    let (num, unit) = human_parts(bytes);
+    format!("{num} {unit}")
+}
+
+/// 同一份换算，但**数值与单位分开给**。
+///
+/// 为什么要拆成两个函数而不是让调用方去 `split_once(' ')`：
+/// 头卡那四格读数要把单位排成小号字（`118.0` 大字 + `GB` 小字），
+/// 而字符串里再截一次就等于**把"哪一档用几位小数"这条规则抄第二遍**——
+/// 今天两处都是 B/KB/MB/GB，将来加一档 TiB，改了这一处忘了那一处，
+/// 界面上就会出现「占用 1.2 MB」与「1.2 TiB」并排。
+/// ⇒ `human_bytes` 现在只是它的一层薄壳，**规则只有一份**
+pub fn human_parts(bytes: u64) -> (String, &'static str) {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * KB;
     let b = bytes as f64;
     if b < KB {
-        return format!("{bytes} B");
+        return (format!("{bytes}"), "B");
     }
     if b < MB {
-        return format!("{:.0} KB", b / KB);
+        return (format!("{:.0}", b / KB), "KB");
     }
     if b < MB * 1024.0 {
-        return format!("{:.1} MB", b / MB);
+        return (format!("{:.1}", b / MB), "MB");
     }
-    format!("{:.1} GB", b / (MB * 1024.0))
+    (format!("{:.1}", b / (MB * 1024.0)), "GB")
 }
 
 #[cfg(test)]
@@ -944,6 +974,21 @@ mod tests {
         assert_eq!(human_bytes(1536 * 1024 * 1024), "1.5 GB");
         // 同一批数走粗粒度那档：小文件全是 0 MB —— 这就是为什么要有两档
         assert_eq!(human_size(4 * 1024), "0 MB");
+    }
+
+    /// 拆开的数值与单位**必须拼回原来那句话**。
+    ///
+    /// 这条断言钉的是"两档只有一个出处"：头卡那四格读数吃 `human_parts`，
+    /// 其余地方吃 `human_bytes`，两者一旦各写一套换算规则，
+    /// 同一份磁盘数据会在同一屏上说出两个数（本项目为这类缺陷交过四次学费）
+    #[test]
+    fn human_parts_reassembles_into_human_bytes_at_every_tier() {
+        for n in [0u64, 1, 1023, 1024, 1536, 4 * 1024, 1024 * 1024, 1536 * 1024 * 1024] {
+            let (num, unit) = human_parts(n);
+            assert_eq!(format!("{num} {unit}"), human_bytes(n), "{n} 两档对不上");
+        }
+        assert_eq!(human_parts(118 * 1024 * 1024 * 1024), ("118.0".into(), "GB"));
+        assert_eq!(human_parts(4 * 1024), ("4".into(), "KB"));
     }
 
     /// 清理缓存：只认白名单，且真的把目录删掉、报出释放量

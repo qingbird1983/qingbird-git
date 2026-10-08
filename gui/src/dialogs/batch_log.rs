@@ -124,6 +124,10 @@ fn batch_log_body(scroll: &Rc<ScrollHandle>, t: &Theme, lg: &LogState) -> Div {
                             &scroll,
             t,
             lg,
+            // `None`：这里没有"还没有操作记录"那一档主句与那枚色块——
+            // 这个对话框只在跑完一批之后打开，空的时候要说的是"这一批没记录"，
+            // 不是"去点键"
+            None,
             "这一批没有留下逐仓库的记录",
         ))}
 

@@ -240,7 +240,7 @@ pub(crate) fn stat_card(
 /// 闭包里想办法弄到主题（侧栏的 `suffix` 闭包就拿不到）。
 /// 颜色由调用方算好传进来，那边有主题。
 pub(crate) fn pill(text: &str, fg: Hsla, bg: Hsla) -> Div {
-    pill_with(None, text, fg, bg)
+    pill_with(None, text, fg, bg, None)
 }
 
 /// 带一枚前置图标的胶囊。**与 `pill` 共用同一份实现**——
@@ -251,7 +251,26 @@ pub(crate) fn pill_icon(
     fg: Hsla,
     bg: Hsla,
 ) -> Div {
-    pill_with(Some(icon), text, fg, bg)
+    pill_with(Some(icon), text, fg, bg, None)
+}
+
+/// **描边胶囊**：透明底 + 一圈 `line` 描边 + muted 字（原型 `.pill.out`）。
+///
+/// 它和实底胶囊不是一种装饰偏好，是**两种语义重量**：
+///   · 实底（`pill` / `pill_icon`）= 这格在**报一个状态**（未提交 / 待推送 / 已同步），
+///     底色就是那个状态的 wash，扫一眼就能挑出来；
+///   · 描边（这一个）= 这格只是**标一个身份**（当前分支叫什么、仓库归属哪边），
+///     没有"好坏"要报，所以不许占底色——一屏里全是实底胶囊时，
+///     真需要看的那三个状态反而被淹掉。
+///
+/// 原来分支那一枚是 `panels::branch_badge` 自己手搓的第四种胶囊写法
+/// （`R_MD` 方角 + `muted` 实底 + `fs_sec` 字），既不在 `pill_h()` 那一档、
+/// 也不在全圆角那一档 ⇒ 收回来走同一个 `pill_with`，**只换底与描边这两样**。
+///
+/// ⚠️ 底给的是 `card_face(t)`（卡白），不是真透明 ⇒ **它只能坐在白卡上**。
+/// 目前唯一的用法就在头卡里；要挪到灰底（侧栏、画布）上得先改成吃父底
+pub(crate) fn pill_out(icon: Option<gpui_kit::assets::IconName>, text: &str, t: &Theme) -> Div {
+    pill_with(icon, text, tier3(t), card_face(t), Some(edge(t)))
 }
 
 fn pill_with(
@@ -259,6 +278,7 @@ fn pill_with(
     text: &str,
     fg: Hsla,
     bg: Hsla,
+    border: Option<Hsla>,
 ) -> Div {
     // ⚠️ **必须是 `h_flex`，不能是裸 `div()`**。原来这里写的是 `div()`——
     // 裸 Div 是**列方向**，那么 `.items_center()` 管的就是**水平**居中，
@@ -270,6 +290,7 @@ fn pill_with(
         .px(px(GAP))
         .rounded_full()
         .bg(bg)
+        .when_some(border, |p, b| p.border_1().border_color(b))
         .items_center()
         .justify_center()
         .gap(px(GAP_DENSE))
@@ -546,6 +567,100 @@ pub(crate) fn card(t: &Theme) -> Div {
         // 肉眼就是"有的卡边重有的轻"）。`line` 归"主描边／分隔线"那一格，不是卡
         .border_color(track(t))
         .shadow(sh_2(t))
+}
+
+/// 卡内**段标题**：一行「标题 + 附注」，比 `CardHeader` 低一档。
+///
+/// **为什么它和 `CardHeader` 是两个构件、不是一个的两档**（v4 §3.2 允许两个
+/// 的前提是"两种关系"，不是"两个数"）：
+///   · `CardHeader` 管**一张卡的头**——它下面整张卡都在讲这件事，所以占一行、
+///     带右侧操作位、字号走 `fs_body()`；
+///   · `mini_head` 管**卡里切出来的一段**——上面已经有一个卡头了，这里再给一档
+///     就是一屏两个头（阶段 13 那条"段标题挂到它管的那一段的表头右上"说的
+///     就是别浮在外面）。所以它没有右侧操作位，字号退一档到 `fs_sec()`、
+///     字重反而升到 BOLD（原型 `.mini-head .ttl` 是 13.5 / 700）。
+///
+/// 用法固定成 `card_split(t)` + `mini_head(..)` 一对：先一条撑到卡边的分隔，
+/// 再一句段标题——顺序反过来读起来就是"标题下面那条线属于上一段"
+pub(crate) fn mini_head(title: &str, note: Option<&str>, t: &Theme) -> Div {
+    h_flex()
+        .w_full()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(GAP))
+        .child(
+            div()
+                .text_size(px(fs_sec()))
+                .font_weight(FontWeight::BOLD)
+                .text_color(t.colors.foreground)
+                .child(title.to_string()),
+        )
+        .when_some(note, |h, n| {
+            h.child(
+                div()
+                    .text_size(px(fs_meta()))
+                    .text_color(tier4(t))
+                    .child(n.to_string()),
+            )
+        })
+}
+
+/// 头卡那一排读数中的**一格**：数值在上、标签在下，左边一条分隔线。
+///
+/// 原型 `.metrics .m` / `.mv` / `.ml`。它在原型里的身份是一句注释写明的：
+/// 「原来这一大片是空的。填进去的是四个真读数：它们此前分散在磁盘卡、
+/// 侧栏徽章、同步卡三处，收上来之后下面那些段可以更薄」
+/// ⇒ **这四格是"收拢"不是"新增"**：接进来时那三处的重复读数要一起撤，
+/// 否则同一屏里"可清理"会出现两次（两次数字还未必一样，
+/// 因为分散那几处各自的刷新时机不同——那是 D73 那一族的反面）。
+///
+/// `hot` 那一档给 warn 色：原型 `.m.hot` 专给"可清理"，因为它是这一屏里
+/// 唯一"该动手"的读数，其余三格是陈述
+pub(crate) fn metric_cell(
+    value: String,
+    unit: Option<String>,
+    label: &str,
+    hot: bool,
+    t: &Theme,
+) -> Div {
+    v_flex()
+        .flex_shrink_0()
+        .items_start()
+        .justify_center()
+        .px(px(GAP_XL))
+        .border_l_1()
+        .border_color(track(t))
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(GAP_DENSE))
+                .child(
+                    div()
+                        .text_size(px(fs_sec()))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(if hot { orange_text(t) } else { body(t) })
+                        .child(value),
+                )
+                .when_some(unit, |r, u| {
+                    r.child(
+                        div()
+                            // 单位比数值低一档、颜色退一档——原型 `.mv u` 是
+                            // 10.5px / 600 / muted，这里落 `fs_meta` + tier3
+                            .text_size(px(fs_meta()))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(tier3(t))
+                            .child(u),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .mt(px(GAP_DENSE))
+                .text_size(px(fs_meta()))
+                .text_color(tier3(t))
+                .whitespace_nowrap()
+                .child(label.to_string()),
+        )
 }
 
 /// 卡内表头：左标题（+ 可选图标位与附注），右操作组，中间一个 `flex_1` 顶开。

@@ -28,9 +28,9 @@ use gpui_kit::{
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled,
 };
 use qingbird_core::net;
+use qingbird_core::space;
 use qingbird_core::types::RepoStatus;
 
-use crate::detail::DetailTab;
 use crate::os;
 use crate::log::QUICK_SLOTS;
 use crate::panels::sync_readout;
@@ -118,24 +118,19 @@ impl Shell {
                     .when(!status.branch.is_empty(), |row| {
                         row.child(self.branch_badge(&status.branch, t))
                     })
-                    // 磁盘摘要跟在名字这一行的元信息簇末尾（用户要求搬到仓库名后面）。
-                    // 位置选在分支徽标**之后**而不是紧贴名字：名字 + 归属 + 分支
-                    // 说的是"这是谁"，磁盘说的是"它多大"，插进去会把那一簇拆开
-                    // ⚠️ **跟着「空间」页签一起隐**（阶段 19）。它是那颗键
-                    // 唯一的用途就是 `open_detail_tab(Space)`，而那个页签
-                    // 藏了（第三方基线里就藏着，用户勾选还能再藏）之后，
-                    // 留着这颗键就是"点了跳到别的地方"——用户看到的是
-                    // 自己点了个磁盘图标、画面换了个页，**不会有人去猜
-                    // 那一页是被配置关掉的**
-                    .when(self.detail_tab_shown(DetailTab::Space), |row| {
-                        row.child(self.space_badge(t, cx))
-                    })
                     // 活跃度**只给第三方**：概览页三段版面是两边共用的，
                     // 而"这个项目最近还活着吗"是评估一个别人项目时最该先看的一句，
                     // 塞进共用版面就得为它单开一段。它属于**概要位**——
-                    // 与磁盘摘要同一类问题（这东西怎么样），所以挂在同一行
+                    // 与那四格读数同一类问题（这东西怎么样），所以挂在同一行
                     .when(third, |row| row.child(self.activity_chip(t)))
+                    // ⚠️ **磁盘摘要不再以一句话挂在名字后面**（阶段 31.4 补五）。
+                    // 原来这里是 `space_badge(..)`——一颗写着「占用 1.2 MB · 没有可清理的
+                    // 构建缓存」的幽灵键。原型把这类读数收进下面那四格 `metrics`，
+                    // 并在注释里明写「它们此前分散在磁盘卡、侧栏徽章、同步卡三处」。
+                    // **接四格必须同时撤这一处**：留着就是同一屏两个地方说同一件事，
+                    // 而两处的刷新时机不同，早晚给出两个数（D73 那一族的反面）
                     .child(div().flex_1())
+                    .child(self.head_metrics(&status, view.map(|v| v.changed).unwrap_or(0), t))
                     // 常用命令组（2026-10-05 用户反馈：「常用命令没有入口了」）
                     .child(self.quick_cmds(t, cx))
                     // 右侧只留「展开检视」——原来那四颗（打开文件夹 / 终端 /
@@ -147,6 +142,70 @@ impl Shell {
             )
             // 地址区：本地 + 云端两行，各自可点跳转、各带一颗悬停才现的复制键
             .child(self.addr_rows(path, &status, copied, t, cx))
+    }
+
+    /// 头卡右侧那**四格读数**（原型 `.metrics`：磁盘占用 / 可清理 / 待推送 / 未提交）。
+    ///
+    /// **它们是"收拢"进来的，不是新加的**——这四个数此前分散在三处：磁盘那句挂在
+    /// 名字后面（`space_badge`，本轮撤掉）、可清理在空间页、待推送与未提交在侧栏徽章
+    /// 与同步卡。原型那句注释说的就是这件事。⇒ **接它必须同时撤旧位**，
+    /// 否则同一屏两处说同一件事，而两处刷新时机不同、迟早给出两个数。
+    ///
+    /// ⚠️ **「没扫过」与「扫过、确实是 0」是两件事**（阶段 16 那条老教训的第三种触发）：
+    /// 磁盘两格吃的是后台空间扫描的结果，没扫过时 `report` 是 `None` ⇒ 给 **`—`**；
+    /// 扫过而缓存为 0 ⇒ 给 **`0`**。把"没数"写成"0"就是谎报干净。
+    /// 待推送与未提交吃的是 `read_status`，选中这个仓库就会扫，所以 0 是真的 0。
+    fn head_metrics(&self, status: &RepoStatus, changed: u32, t: &Theme) -> Div {
+        let rep = self.space.report.as_ref();
+        // 算式在 core 的 `SpaceReport::cache_bytes`，**不在这里 filter 一遍**
+        let cache: u64 = rep.map(|r| r.cache_bytes()).unwrap_or(0);
+        // `None` = 还没扫过。单位一律跟着数值走（原型 `118.0` + 小号 `GB`）
+        let disk = rep.map(|r| {
+            let (n, u) = space::human_parts(r.total);
+            (n, Some(u.to_string()))
+        });
+        let clean = rep.map(|_| {
+            if cache > 0 {
+                let (n, u) = space::human_parts(cache);
+                (n, Some(u.to_string()))
+            } else {
+                ("0".to_string(), None)
+            }
+        });
+
+        h_flex()
+            .flex_shrink_0()
+            .items_stretch()
+            .child(crate::widgets::metric_cell(
+                disk.as_ref().map(|d| d.0.clone()).unwrap_or_else(|| "—".into()),
+                disk.as_ref().and_then(|d| d.1.clone()),
+                "磁盘占用",
+                false,
+                t,
+            ))
+            .child(crate::widgets::metric_cell(
+                clean.as_ref().map(|d| d.0.clone()).unwrap_or_else(|| "—".into()),
+                clean.as_ref().and_then(|d| d.1.clone()),
+                "可清理",
+                // 只有"真扫出来有东西可清"才升到 warn 色——没扫过时它是 `—`，
+                // 给个橙色等于催用户去清一个还不知道多大的东西
+                cache > 0,
+                t,
+            ))
+            .child(crate::widgets::metric_cell(
+                format!("{}", status.ahead),
+                None,
+                "待推送",
+                false,
+                t,
+            ))
+            .child(crate::widgets::metric_cell(
+                format!("{changed}"),
+                None,
+                "未提交",
+                false,
+                t,
+            ))
     }
 
     /// 第三方仓库名后面那枚「近 30 天」活跃度徽标（迷你柱图 + 一句结论）。
@@ -309,28 +368,6 @@ impl Shell {
             .tooltip(format!("停止{what}"))
             .accessibility_label(format!("停止{what}"))
             .on_click(cx.listener(|this, _, window, cx| this.stop_current(window, cx)))
-            .into_any_element()
-    }
-
-    /// 仓库名后面那枚磁盘摘要徽标（用户要求把磁盘统计从底排那张卡搬上来）。
-    ///
-    /// **为什么用官方 `Button` 而不是现成的 `pill()`**：`pill()` 是个纯 `Div`，
-    /// 既没有命中区也没有悬停面，而这枚要能点（跳「空间」页签）。`Button` 的
-    /// ghost + XSmall 档自带命中区、悬停面与焦点环，只是观感比实底胶囊轻——
-    /// 而这正是"概要位"该有的重量：提醒有这回事，不是宣称这是一个状态。
-    ///
-    /// 文案与判据全在 `Shell::space_summary_line`（`panels.rs`）里，
-    /// 这里只管摆位与跳转，不把"扫没扫 / 有没有可清的"重写一遍。
-    fn space_badge(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let line = self.space_summary_line();
-        Button::new("head-space")
-            .icon(icon_sm(AssetIcon::HardDrive).text_color(tier4(t)))
-            .label(line.clone())
-            .custom(ghost_variant(cx))
-            .with_size(Size::XSmall)
-            .tooltip("查看磁盘占用详情")
-            .accessibility_label(line)
-            .on_click(cx.listener(|this, _, _, cx| this.open_detail_tab(DetailTab::Space, cx)))
             .into_any_element()
     }
 

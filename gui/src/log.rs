@@ -16,6 +16,7 @@
 // 图标只认这一套：assets 里是完整 lucide，外加品牌 Bird。
 // 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
 // 混在同一屏里一眼就能看出不一致。
+use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
@@ -69,17 +70,30 @@ impl Shell {
         // 否则观感上就是"慢一帧才滚"。
         let stick = self.log_follow_bottom();
 
+        // ⚠️ **状态行在"真的什么都没有"时整行不画**（原型 `.log-card` 里
+        // 那条 `bar` 只在有输出时长）。它第三档回落去问落盘历史，问不到就写
+        // 「还没有操作记录」——而这句话**空态块的第一行已经在说了**，
+        // 于是同一张卡左上角一句、正中间一句，两句一模一样的话隔着 300px 对视。
+        // 修法是让"没信息"这件事只由空态那一处说，不是一句都不说
+        let has_record = lg.running || lg.ts > 0 || !self.op_log_line(path.as_str()).is_empty();
+
         let panel = card(t)
             .flex_1()
             .min_h_0()
             .child(self.log_header(path.as_str(), lg, t, cx))
-            .child(self.log_status_row(path.as_str(), t, lg, cx))
+            .when(has_record, |col| {
+                col.child(self.log_status_row(path.as_str(), t, lg, cx))
+            })
             .when(lg.running, |col| col.child(progress_bar(t, lg)))
             .child(output_stream(
                 "log-stream",
                 &self.log_scroll,
                 t,
                 lg,
+                // 空态照原型：一枚 wash 色块 + 主句 + 一句更淡的说明。
+                // **主句说"没有"，说明句说"怎么才会有"**——两句是一套，
+                // 拆开摆就变成上面那个对视的样子
+                Some("还没有操作记录"),
                 "点同步三键或命令行的按钮，输出会实时回显在这里",
             ))
             .child(self.log_verdict_row(t, lg));
@@ -289,6 +303,9 @@ pub(crate) fn output_stream(
     scroll: &ScrollHandle,
     t: &Theme,
     lg: &LogState,
+    // `empty_title`：空态主句（"还没有操作记录"那一句）。`None` = 只画说明句——
+    // 批量结果对话框那份 `LogState` 一定有内容，它不需要这一档
+    empty_title: Option<&str>,
     empty_hint: &str,
 ) -> impl IntoElement {
     let mut area = v_flex()
@@ -314,23 +331,52 @@ pub(crate) fn output_stream(
     if lg.lines.is_empty() {
         // 空态**不画里框**：那圈 1px 边 + 浅灰底在有内容时干的是"把等宽输出与
         // 白卡分开"，空的时候它只剩一个套在白卡里的空盒子，白卡上凭空多出一层。
-        // 这里只留一句居中的提示语，底就是卡底。
         // ⚠️ 也**不继承等宽字体**：`area` 上挂的是 `mono_font_family`，
         // 而 Windows 默认等宽是 Consolas、不含汉字，提示语一落进去就掉字重
         // （读起来像换了一款字）
-        return v_flex()
+        //
+        // **两档文案是一套**：主句说"没有"，说明句说"怎么才会有"。
+        // 主句 `fs_sec` + tier3、说明 `fs_meta` + tier4 ⇒ **差一档字号 + 差一档颜色**，
+        // 这是 v4 那条"层级靠字号档差与颜色退档叠出来"的用法（gpui 没有字距）
+        let mut empty = v_flex()
             .flex_1()
             .min_h(px(120.0))
             .min_h_0()
             .items_center()
             .justify_center()
-            .child(
+            .gap(px(GAP_LG));
+        if let Some(title) = empty_title {
+            empty = empty
+                // 那枚 wash 色块就是原型 `.log-empty .glyph`。尺寸**不新开一档**：
+                // 原型给 46×46 / r15，而全站图标色块只有 `glyph()` 一处（42 / r13），
+                // 为这一处再长一档就是把统一又拆回去
+                .child(crate::widgets::glyph(t, AssetIcon::Terminal, tier3(t)))
+                .child(
+                    v_flex()
+                        .items_center()
+                        .gap(px(GAP_TIGHT))
+                        .child(
+                            div()
+                                .text_size(px(fs_sec()))
+                                .text_color(tier3(t))
+                                .child(title.to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(fs_meta()))
+                                .text_color(tier4(t))
+                                .child(empty_hint.to_string()),
+                        ),
+                );
+        } else {
+            empty = empty.child(
                 div()
                     .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child(empty_hint.to_string()),
-            )
-            .into_any_element();
+            );
+        }
+        return empty.into_any_element();
     }
     for line in &lg.lines {
         // 前缀单独占一列：只给**标记**上色，文字仍用正文色。

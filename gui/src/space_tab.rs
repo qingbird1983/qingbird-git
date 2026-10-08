@@ -80,12 +80,10 @@ impl Shell {
                 .into_any_element();
         };
 
-        let cache_total: u64 = rep
-            .dirs
-            .iter()
-            .filter(|d| d.is_cache && d.size > 0)
-            .map(|d| d.size)
-            .sum();
+        // 算式在 core 的 `SpaceReport::cache_bytes`——**全站只有那一处**
+        // （原来这里与仓库头那句摘要各写一遍，一处判 `is_cache`、一处判
+        // `is_cache && size > 0`，今天结果一样，规则已经是两个版本了）
+        let cache_total: u64 = rep.cache_bytes();
         let ignorable: Vec<&space::IgnoreSuggestion> = rep.ignorable.iter().collect();
 
         // 局部变量别叫 body：同文件里有个取色函数就叫 body(t)
