@@ -85,23 +85,57 @@ impl Shell {
                     .flex_1()
                     .min_h_0()
                     .child(
-                        CardHeader::new(format!("最近 {} 次提交", h.commits.len()))
-                            .right(
-                                Button::new("history-rescan")
-                                    .icon(icon_sm(AssetIcon::RefreshCw).text_color(tier4(t)))
-                                    .custom(ghost_variant(cx))
-                                    .with_size(Size::XSmall)
-                                    .loading(h.scanning)
-                                    .tooltip("重新读取提交历史")
-                                    .accessibility_label("重新读取提交历史")
-                                    .on_click(cx.listener(|this, _, _, cx| this.rescan_history(cx)))
-                                    .into_any_element(),
-                            )
-                            .build(t),
+                        // 表头左缘与下面的提交行同一档（36）——从前它停在卡的 16，
+                        // 于是"最近 8 次提交"比它下面的第一行靠左 20，
+                        // 正是用户第 1 条里"同一页两档"的那一处。推导见 `widgets::tab_head`
+                        crate::widgets::tab_head(
+                            CardHeader::new(format!("最近 {} 次提交", h.commits.len()))
+                                .right(
+                                    Button::new("history-rescan")
+                                        .icon(icon_sm(AssetIcon::RefreshCw).text_color(tier4(t)))
+                                        .custom(ghost_variant(cx))
+                                        .with_size(Size::XSmall)
+                                        .loading(h.scanning)
+                                        .tooltip("重新读取提交历史")
+                                        .accessibility_label("重新读取提交历史")
+                                        .on_click(cx.listener(|this, _, _, cx| this.rescan_history(cx)))
+                                        .into_any_element(),
+                                ),
+                            t,
+                        ),
                     )
                     // 官方 List 自己管虚拟滚动与选中态。行高必须一致——
-                    // 它的测量逻辑假设所有行一样高
-                    .child(List::new(&self.history_table).flex_1().min_h_0()),
+                    // 它的测量逻辑假设所有行一样高。
+                    //
+                    // **左右留白与滑块落位与说明页同一档**（用户 2026-10-09 第 1 条）。
+                    // 左右内距挂在 `List` 自己身上：官方把 `padding` 转交给内层滚动 Div
+                    // （`list.rs:778-780`「Take paddings … and clear them from style」），
+                    // 而滑块那根条按**滚动盒自己边框盒的右缘**画 ⇒ 内距只推内容、不推条。
+                    // ⚠️ **但"向右探出"这一格不能也挂在 `List` 上**：`List` 自己 `render`
+                    // 时不认外面的 margin，探出直接为 0，条就比另外两页偏左 5px
+                    // （2026-10-09 实测 1332..1337 vs 说明 1337..1342）。
+                    // ⇒ 探出挂在**外面这颗裸 Div** 上，`List` 在里面铺满它。
+                    // 三张表与系数都在 `tokens::SCROLL_BLEED`
+                    .child(
+                        scroll_cell(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .child(
+                                    List::new(&self.history_table)
+                                        .w_full()
+                                        .h_full()
+                                        // ⚠️ **补差而不是给满 20**：行本身是官方 `ListItem`，
+                                        // 它自己带 `px(GAP_LG)`(12) 那一档内距 ⇒ 这一格只补
+                                        // `20 − 12`，墨迹才正好落在"距卡白面 36"那一档。
+                                        // 给满 20 的实测结果是 48（16 + 20 + 12 叠了三层），
+                                        // 比说明页宽 12——**同一屏两个页签错开 12px**，
+                                        // 与第 1 条要修的正是同一件事
+                                        .pl(px(TAB_PAD - GAP_LG))
+                                        .pr(px(TAB_PAD_RIGHT - GAP_LG)),
+                                ),
+                        ),
+                    ),
             )
             .into_any_element()
     }

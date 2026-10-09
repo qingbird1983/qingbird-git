@@ -359,7 +359,7 @@ fn clone_body(this: &Entity<Shell>, gv: ButtonCustomVariant, t: &Theme, st: &Clo
                     .gap(px(GAP_TIGHT))
                     .items_center()
                     .child(Input::new(&e).small().flex_1())
-                    .child(folder_pick_button(this, gv)),
+                    .child(folder_pick_button(this, gv, FolderPick::Clone)),
             ))
         })
         .child(hint(t))
@@ -391,7 +391,15 @@ fn clone_body(this: &Entity<Shell>, gv: ButtonCustomVariant, t: &Theme, st: &Clo
 /// 所以走**一次性标记**（`Shell::pending_folder`）：这里只置位，
 /// 由 `Render::render` 下一帧兑现——那一帧里 `&mut self` 与 `window` 都在手边。
 /// 与 `pending_reveal` / `pending_head_copy` 同一个套路。
-fn folder_pick_button(this: &Entity<Shell>, gv: ButtonCustomVariant) -> AnyElement {
+///
+/// ⚠️ `target` 是"这一颗键属于哪个弹窗"。添加仓库那个框也要选目录，
+/// 而回填的是两份不同的 `InputState` ⇒ 这个信息**做成参数**，
+/// 不留给兑现处去猜当前开着的是哪个框（D78）
+pub(crate) fn folder_pick_button(
+    this: &Entity<Shell>,
+    gv: ButtonCustomVariant,
+    target: FolderPick,
+) -> AnyElement {
     Button::new("clone-browse")
         .label("浏览…")
         .custom(gv)
@@ -403,7 +411,7 @@ fn folder_pick_button(this: &Entity<Shell>, gv: ButtonCustomVariant) -> AnyEleme
             move |_, _, cx| {
                 // 不在这里 notify：标记会在 render 那一帧兑现并自行 notify
                 this.update(cx, |this, _| {
-                    this.pending_folder = true;
+                    this.pending_folder = Some(target);
                 });
             }
         })

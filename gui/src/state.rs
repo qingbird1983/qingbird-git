@@ -669,6 +669,15 @@ pub(crate) struct Shell {
     pub(crate) group_open: [bool; 2],
     /// 仓库树的滚动句柄。定位某一行时用 `bounds_for_item` 把它滚进视野
     pub(crate) tree_scroll: ScrollHandle,
+    /// 空间页**整页**那一列的滚动句柄（2026-10-09 第 1 条）。
+    ///
+    /// 为什么只有它需要单独一个句柄：这一页的滚动盒在**卡的外面**（一张页里
+    /// 叠着五张段卡，滚的是整页），别的三页滚的是卡内那一格。
+    /// 基座对"卡内格"有现成的落位办法（`tokens::scroll_cell` 把格子探出去），
+    /// 这一页探不出去——探出去就顶到窗口右缘了。⇒ 这一页的滚动条要**自己摆一层
+    /// 覆盖层**（`widgets` 里那一颗），而覆盖层要拿到滚动盒的句柄才知道
+    /// 视口多大、滚到哪儿了
+    pub(crate) space_scroll: ScrollHandle,
     // ---------- 「日志」区 ----------
     //
     /// 输出流的滚动句柄（阶段 21-1）。**它要解决的是"日志不自己往下走"**：
@@ -735,7 +744,13 @@ pub(crate) struct Shell {
     ///
     /// 与 `pending_reveal` 同一个套路：**置位 → `Render::render` 兑现**，
     /// 那一帧里 `&mut self` 与 `window` 都在手边。
-    pub(crate) pending_folder: bool,
+    ///
+    /// ⚠️ **标记里必须写清"是哪一个弹窗要选目录"**（2026-10-09）。原来它是 `bool`，
+    /// 而"选完回填到哪一格"是两个弹窗各自的 `InputState`：`bool` 只能表达"有人要过一次"，
+    /// 加第二个使用者时要么回填错格子、要么在兑现处再猜一遍当前弹窗——
+    /// 正是 D78 那一类（**必填信息没进签名 ⇒ 每条调用路径都得自己记得补，其中一条一定漏**）。
+    /// 现在做成 `Option<FolderPick>`：新加一个使用者**不写变体就编译不过**。
+    pub(crate) pending_folder: Option<FolderPick>,
     /// 点关闭键时怎么办（阶段 22）。**从配置读一次缓存在这里**，
     /// 不是每次关窗去 `store::load()` 读一遍文件
     pub(crate) close_action: CloseAction,
@@ -922,6 +937,16 @@ pub(crate) struct CmdDialog {
     /// 长度与 `CMD_FIELDS` 一致
     pub(crate) inputs: Vec<Entity<InputState>>,
     pub(crate) error: Option<String>,
+    /// 前四个槽位**已经存着的**命令（下标同 `SLOTS`）。
+    /// 那一行右侧的状态词（「未保存 / 已自定义 / 自动识别：x」）要拿**输入框当前值**
+    /// 与它比，所以这份必须在打开时留一份快照，不能事后从 `entry` 现读——
+    /// 现读会读到刚刚保存完的新值，「未保存」那一档就永远不出现了
+    pub(crate) saved: Vec<String>,
+    /// 前四个槽位**自动识别到的**命令（下标同 `SLOTS`）。
+    /// 「自动」那颗键回填的就是这里，状态词里「自动识别：x」那一档读的也是它。
+    /// ⚠️ **不许在打开时把它写进 `saved`**：识别结果不落盘是这一屏的约定
+    /// （副标题明写"不点保存不会写进配置"），混成一格就变成"打开即改动配置"
+    pub(crate) detected: Vec<String>,
 }
 
 /// 命令编辑对话框的字段表。**下标即 `CmdDialog::inputs` 的下标**，
@@ -1172,6 +1197,17 @@ impl Shell {
     pub(crate) fn drop_target(&self) -> Option<Group> {
         drop_target(self.page, self.side_focus)
     }
+}
+
+/// 「浏览…」这颗按钮是**哪一个弹窗**按下的。回填的是两份不同的 `InputState`，
+/// 所以这个信息必须随标记一起走（见 `Shell::pending_folder` 的注释）。
+/// `Copy` 是给按钮的 `on_click` 闭包用的——那个闭包是 `Fn`，不能吞掉捕获值
+#[derive(Clone, Copy)]
+pub(crate) enum FolderPick {
+    /// 克隆弹窗的「克隆到」目标目录
+    Clone,
+    /// 添加仓库弹窗的「路径」
+    AddRepo,
 }
 
 /// 添加 / 编辑仓库弹窗的状态。

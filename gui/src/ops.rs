@@ -53,6 +53,18 @@ impl Shell {
         let Some(path) = self.selected.clone() else {
             return;
         };
+        self.run_slot_at(&path, slot, cx);
+    }
+
+    /// `run_slot` 的那条链路，但**目标仓库由调用方给**。
+    ///
+    /// 为什么要多开这一个口（2026-10-09）：命令编辑弹窗的「启动」不能走
+    /// `run_slot`——它跑的是**弹窗自己那条仓库**，而弹窗开着的时候选中项是可以被
+    /// 切走的（侧栏点另一条不会关弹窗）。拿 `self.selected` 当目标就会变成
+    /// 「保存了 A 的命令、起跑的是 B」。与 D78 同一条：**该由调用方给的东西
+    /// 不要在函数里猜**
+    pub(crate) fn run_slot_at(&mut self, path: &str, slot: Slot, cx: &mut Context<Self>) {
+        let path = path.to_string();
         let cmd = self.effective_cmd(&path, slot);
         if cmd.is_empty() {
             let lg = self.log_of(&path);

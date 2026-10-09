@@ -33,6 +33,20 @@ use crate::widgets::*;
 
 // ================= 侧栏骨架 =================
 
+/// 悬浮卡那一列**朝向中间那一列**的那条边在哪一侧。
+///
+/// 为什么要这个参数而不是让调用方自己补 `ml` / `mr`：气口那一档（`GAP_TIGHT`）
+/// 在两列里必须是**同一个出处**。各自补一遍就是同一个属性两个名字，
+/// 而"把卡间气口调紧一档"这种事迟早只改到一列（AGENTS 里那条数出处的纪律，
+/// 本项目为它交过四次学费）
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Facing {
+    /// 这一列在中间列的左边（左栏）⇒ 气口开在它的**右**侧
+    Left,
+    /// 这一列在中间列的右边（检视列）⇒ 气口开在它的**左**侧
+    Right,
+}
+
 /// 侧栏那一列的外壳：**就是 `widgets::card` 那一张卡**，这里只覆盖内距与外边距。
 ///
 /// 2026-10-08 之前它不是卡：`.bg(t.colors.background).border_r_1()` —— 一根与画布
@@ -43,13 +57,18 @@ use crate::widgets::*;
 /// `r-card` 圆角 + `sh-2`）⇒ 归位成卡。
 ///
 /// ⚠️ **外壳不重写一份**：底色 / 圆角 / 描边 / 阴影全部来自 `card(t)`，
-/// 这里只覆盖 `p` / `gap` 并加 `mt` / `mb` / `mr`。内距与主区不同是**两种关系**
+/// 这里只覆盖 `p` / `gap` 并加 `mt` / 朝向气口。内距与主区不同是**两种关系**
 /// （这里放的是一列行，行自己带水平内距），不是同一种关系写了两个值。
 ///
 /// `mt(GAP)` 与主区那一列的 `pt(GAP)`（`detail.rs`）**同源**：两张卡的顶边必须在
-/// 同一条线上；`mr(GAP_TIGHT)` 就是"卡与卡之间"那一档（代码 4，帧上量 6，
+/// 同一条线上；朝向中间列那条 `GAP_TIGHT` 就是"卡与卡之间"那一档（代码 4，帧上量 6，
 /// 因为相邻两张卡各有一条 1px 边）。
-fn side_shell(t: &Theme) -> Div {
+///
+/// ⚠️ **`inspector.rs` 那一列共用这一颗**（用户 2026-10-09 的令：「右栏做成与左栏
+/// 一样的圆角悬浮卡片」）。**它不是"像左栏"，它就是左栏那一颗**——将来改圆角、
+/// 改内距、改顶边距，两列一起跟上。往右栏里再手搓一份 `card(t).flex_1()....`
+/// 就是开第二个出处，那是本项目最贵的一类错
+pub(crate) fn side_shell(t: &Theme, facing: Facing) -> Div {
     crate::widgets::card(t)
         .flex_none()
         // ⚠️ **不是 `h_full()`**：`h_full` 是"100% 父高"，加上 `mt`/`mb` 之后
@@ -69,7 +88,8 @@ fn side_shell(t: &Theme) -> Div {
         // 结果**侧栏卡底 782、日志卡底 790**——两列下边差 8px，他一眼看出来
         // "日志的卡片跟侧栏下边不平行"。两条诉求要同时成立，
         // 只能让侧栏也跟着贴到状态条上沿
-        .mr(px(GAP_TIGHT))
+        .when(facing == Facing::Left, |d| d.mr(px(GAP_TIGHT)))
+        .when(facing == Facing::Right, |d| d.ml(px(GAP_TIGHT)))
 }
 
 impl Shell {
@@ -144,7 +164,7 @@ impl Shell {
                 .repos
                 .iter()
                 .any(|r| r.is_third_party == self.side_focus.is_third());
-            return side_shell(t)
+            return side_shell(t, Facing::Left)
                 // ⚠️ **空态也画分组标题**（阶段 21-5 的连带）。
                 // 侧栏头那一行删掉之后，「这一组叫什么」就没有别的落脚点了——
                 // 空态只剩一句「我的仓库里还没有仓库」，**筛选键也跟着消失**
@@ -157,7 +177,7 @@ impl Shell {
                 .child(self.sidebar_footer(t, cx));
         }
 
-        side_shell(t)
+        side_shell(t, Facing::Left)
             .child(self.sidebar_header(t, cx))
             .child(tree)
             .child(Separator::horizontal().color(edge(t)))

@@ -7,6 +7,7 @@
 // 混在同一屏里一眼就能看出不一致。
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::base::Scrollbar;
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyHeader, EmptyTitle};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::progress::Progress;
@@ -632,6 +633,47 @@ pub(crate) fn card(t: &Theme) -> Div {
     )
 }
 
+/// 空间页那一列：**滚动盒 + 自己摆的一根滚动条**。
+///
+/// ## 为什么只有这一页要自己摆
+///
+/// 另外三页（说明 / 历史 / 变更）滚的是**卡里那一格**，把那一格向右探出
+/// `SCROLL_BLEED` 就能让滑块落在右留白的正中（`tokens::scroll_cell`）。
+/// 空间页滚的是**整页**——一张页里叠着五张段卡，滚动盒在卡的外面，
+/// 它的右缘就是卡的右缘，再探出去就顶到窗口了。
+/// 而这一层如果只用 `overflow_y_scroll`，**帧上根本没有滚动条**
+/// （本轮实测：滚得动、六个页面一个条都量不到，静止帧右侧全是纯白 255）
+/// ⇒ 用户看得见"下面还有"这件事，只能自己摆一层覆盖层。
+///
+/// ## 落法
+///
+/// 覆盖层 `absolute().top_0().bottom_0().right(SCROLL_BAR_RIGHT)`，
+/// 里面放官方 `Scrollbar::vertical(&handle).viewport_from_layout()`——
+/// 视口（滑块长短与位置）从滚动盒的布局取，**横向由这一层说了算**，
+/// 于是"离右缘多远"这一格终于可由我们定。
+/// 这是库内现成的写法（`gpui-component/src/table/state.rs:2370-2385` 用它避开表头）。
+///
+/// ⚠️ 这一条 16 宽的带**会吃掉它自己的鼠标事件**：光标停在条上时滚轮不往
+/// 滚动盒走。它落在卡的右内距那一格里（正文右缘在 36，条中心在 17.5，
+/// 与另外三页同一档——`SCROLL_BAR_RIGHT` 那个 12 就是对着帧校出来的），
+/// 那一条带上没有任何可点的东西 ⇒ 现在成立，**以后往卡右缘加控件要回来看不看这条**
+pub(crate) fn space_pane(pane: impl IntoElement, handle: &gpui_kit::ScrollHandle) -> Div {
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .relative()
+        .child(pane)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right(px(SCROLL_BAR_RIGHT))
+                .w(Scrollbar::width())
+                .child(Scrollbar::vertical(handle).viewport_from_layout()),
+        )
+}
+
 /// 卡内**段标题**：一行「标题 + 附注」，比 `CardHeader` 低一档。
 ///
 /// **为什么它和 `CardHeader` 是两个构件、不是一个的两档**（v4 §3.2 允许两个
@@ -834,6 +876,20 @@ impl CardHeader {
 /// 表头里那条 1px 竖细线：把右侧操作分成两组
 pub(crate) fn vdivider(t: &Theme) -> Div {
     div().w(px(1.0)).h(px(16.0)).flex_shrink_0().bg(track(t))
+}
+
+/// **页签页那张卡的表头**：把 `CardHeader` 落到"与正文同一档"的左缘上。
+///
+/// 用户 2026-10-09 第 1 条要的是"四页留白统一到说明那一档"。从前只有说明页的
+/// 表头跟着正文一起进来（那一页整块内容被包在 `pl(TAB_PAD)` 里 ⇒ 表头与正文都在
+/// 距卡白面 35），另外三页的表头停在卡的 16 ⇒ **同一张卡里表头比正文靠左 20**，
+/// 一眼就是"没对齐"。这一颗把那三页补上，说明页不用它（它本来就对）。
+///
+/// ⚠️ **只给 `pl`，不给 `pr`**：表头右侧那排键的右缘要停在卡的右内距上
+/// （说明页实测 1336 = 距卡白面 21，四页本来就一致）。跟着一起进来会变成 45，
+/// 那是把一件已经对的事改错
+pub(crate) fn tab_head(hdr: CardHeader, t: &Theme) -> Div {
+    div().pl(px(TAB_PAD)).child(hdr.build(t))
 }
 
 /// 进度行左侧那行字：`阶段（路径） · 已传输 1.21 MiB · 56.00 KiB/s`

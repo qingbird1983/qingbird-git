@@ -18,8 +18,8 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Disableable as _, Sizable, Size, Theme};
 use gpui_kit::{
-    div, px, AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement, IntoElement,
-    ParentElement, Role, SharedString, StatefulInteractiveElement, Styled,
+    div, px, AnyElement, Context, DefiniteLength, Div, FontWeight, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use qingbird_core::space;
@@ -30,7 +30,7 @@ use crate::widgets::{ghost_variant, meta_text, skeleton_bar, CardHeader};
 
 /// 构成条里最多单列几段，其余并成「其他」
 const SEG_KEEP: usize = 4;
-/// 行高
+/// 一行的**最低**高度（单行那一段的实际外框；两行那两段自己长高，见 `row()`）
 const ROW_H: f32 = 30.0;
 
 impl Shell {
@@ -91,6 +91,10 @@ impl Shell {
             .flex_1()
             .min_h_0()
             .id("space-scroll")
+            // `track_scroll` 是给**上面那根覆盖层里的滚动条**看的：
+            // 只写 `overflow_y_scroll` 的话这一页滚得动却**看不见条**
+            // （2026-10-09 用户第 1 条「滚动条离边远近不一」，这一页是"压根没有"那一档）
+            .track_scroll(&self.space_scroll)
             .overflow_y_scroll()
             // 页级留白归主区外层（`detail_page`），这一层不再套一圈 `p`；
             // 段卡之间 = 卡间那一档（4，帧上视觉 6）
@@ -193,7 +197,7 @@ impl Shell {
                     .children(caches.iter().map(|d| {
                         let name = d.name.clone();
                         row(
-                            v_flex()
+                            two_line_block()
                                 .flex_1()
                                 .min_w_0()
                                 .gap(px(GAP_TIGHT))
@@ -242,7 +246,7 @@ impl Shell {
                     .children(ignorable.iter().map(|i| {
                         let name = i.name.clone();
                         row(
-                            v_flex()
+                            two_line_block()
                                 .flex_1()
                                 .min_w_0()
                                 .gap(px(GAP_TIGHT))
@@ -280,7 +284,11 @@ impl Shell {
         });
 
         // 「重新扫描」已经挪到「磁盘占用」那一段的表头上了
-        list.into_any_element()
+        //
+        // 外面再套一层 `relative` 并在右留白正中摆一根滚动条——
+        // 这一页的滚动盒是**整页**（在卡外面），探不出去，只能自己摆
+        // （理由与推导见 `widgets::space_pane` 与 `tokens::SCROLL_BAR_RIGHT`）
+        crate::widgets::space_pane(list, &self.space_scroll).into_any_element()
     }
 }
 
@@ -443,6 +451,14 @@ impl Shell {
                 .max_h(px(TREE_MAX_H))
                 .id("space-tree-scroll")
                 .overflow_y_scroll()
+                // **左右留白与另外三页同一档**（用户 2026-10-09 第 1 条）。
+                // 这一档在这一页是**两层凑出来的**：容器补 `20 − 12`，行自己补 12
+                // ⇒ 墨迹落在"距卡白面 36"，而行的**悬停底**落在 24——与历史页
+                // 那张 `List` 完全同一配方（`ListItem` 自带 12，容器只补差）。
+                // 从前这里一层内距都没给，行只带 `GAP_TIGHT`(4) ⇒ 实测 20，
+                // 比说明页窄 16，正是他说的"四页不统一"里最明显的那一页
+                .pl(px(TAB_PAD - GAP_LG))
+                .pr(px(TAB_PAD - GAP_LG))
                 .gap(px(GAP_DENSE))
                 .children(rows.iter().map(|(n, d)| self.tree_row(n, *d, t, cx)))
                 .into_any_element()
@@ -493,7 +509,7 @@ impl Shell {
             .w_full()
             .h(px(TREE_ROW_H))
             .flex_shrink_0()
-            .px(px(GAP_TIGHT))
+            .px(px(GAP_LG))
             .rounded(px(R_SM))
             .items_center()
             .gap(px(GAP_TIGHT))
@@ -562,7 +578,10 @@ impl Shell {
 /// `CardHeader`）——原先这一页自己手搓了一份外壳（内边距 **16**，其余各页是
 /// 8），五个页签摆在一屏里内边距有两个值，一眼就不齐
 fn card_with(hdr: CardHeader, t: &Theme, body: Vec<AnyElement>) -> Div {
-    let mut card = crate::widgets::card(t).flex_shrink_0().child(hdr.build(t));
+    // 表头走 `tab_head`：左缘与下面正文同一档（36），推导见那颗的注释
+    let mut card = crate::widgets::card(t)
+        .flex_shrink_0()
+        .child(crate::widgets::tab_head(hdr, t));
     for e in body {
         card = card.child(e);
     }
@@ -575,21 +594,48 @@ fn section(title: &str, t: &Theme, body: Vec<AnyElement>) -> Div {
 }
 
 /// 一行：左边说明 + 右边控件。右边没有内容时传 `div()`
+///
+/// ⚠️ **外框给 `min_h` 不给 `h`**（2026-10-09 用户第 2 条：「构建缓存和 .gitignore
+/// 建议的二级小字跟一级字重叠」）。这一行的左半边**两种都有**：「最大的文件」
+/// 那一段是一行名字，「构建缓存」「`.gitignore` 建议」那两段是**名字 + 一句解释**
+/// 竖着叠两行。原来这里写死 `.h(px(ROW_H))` = 30，而两行文字的自然行盒是
+/// 23 + 4 + 21 ≈ **48**（gpui 给一行字 1.9 倍字号的行盒，实测账见 `LH_ROW`）
+/// ⇒ 内容比外框高 18，`items_center` 让上下各溢 9，而外层那一列**行与行之间没有
+/// `gap`**，于是上一行的解释小字与下一行的名字**在同一 9px 里叠在一起**。
+/// `cargo check` 零错、单测全绿、抓帧也只是"这几行挤成一坨"。
+/// ⇒ **外框高度不许比它装的内容小**：给了固定高就是假设内容永远不超，
+/// 而这一颗是三种内容共用的。改 `min_h` 后单行仍是 30（内容 23 撑不满），
+/// 两行自己长到 33（配 `LH_HEAD`），一个像素都不用再猜
 fn row<L: IntoElement, R: IntoElement>(left: L, right: R) -> Div {
     h_flex()
         .w_full()
-        .h(px(ROW_H))
+        .min_h(px(ROW_H))
         .flex_shrink_0()
         .items_center()
+        // **左右留白与说明页同一档**（用户 2026-10-09 第 1 条）：卡内距 16 + 这一档 20
+        // = 正文距卡边框 36。行尾那两颗按钮跟着一起进来，右缘同样停在 36 那一档
+        .px(px(TAB_PAD))
         .gap(px(GAP))
         .child(left)
         .child(div().flex_1())
         .child(right)
 }
 
+/// 一个块里竖着叠两行**纯文字**（名字 + 一句解释）时的行盒。
+///
+/// 系数用 `LH_HEAD`，理由与总览页头那一列完全同一条：这里没有控件，
+/// `LH_ROW`(1.7) 的余量会全变成空白，而两行都是自然行盒时（23+4+21）**撑破**
+/// `row()` 原来那 30 的外框。设在列上而不是逐行设——gpui 的 `.line_height()`
+/// 原文是 "of this element **and its children**"，逐段去挂就是同一属性两个出处
+fn two_line_block() -> Div {
+    v_flex().line_height(DefiniteLength::Fraction(LH_HEAD))
+}
+
 fn hint_line(text: &str, t: &Theme) -> AnyElement {
     div()
         .w_full()
+        // 与 `row()` 同一档左留白（20），否则同一张卡里说明行与数据行错开 20
+        .px(px(TAB_PAD))
         .text_size(px(fs_meta()))
         .text_color(tier4(t))
         .child(text.to_string())
@@ -599,6 +645,7 @@ fn hint_line(text: &str, t: &Theme) -> AnyElement {
 fn error_line(text: &str, t: &Theme) -> AnyElement {
     div()
         .w_full()
+        .px(px(TAB_PAD))
         .text_size(px(fs_sec()))
         .text_color(t.colors.danger)
         .child(text.to_string())

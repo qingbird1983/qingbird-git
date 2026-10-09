@@ -58,12 +58,15 @@ impl Render for Shell {
         // `cx.update_window` 会把整个闭包丢掉，点着没反应
         //
         // ⚠️ **先读再置 false，不要顺手写 `self.pending_folder.take()`**：
-        // 那是 `Option::take`，这个字段是 `bool`。`bool` 没有 `take`，
-        // 编译器会报「`bool` is not an iterator」——一个**看不出指向哪**
-        // 的错（它其实在说 `.take()` 收到了 `&mut bool` 而需要 Iterator）
-        if self.pending_folder {
-            self.pending_folder = false;
-            self.pick_clone_folder(window, cx);
+        // 那是 `Option::take`——2026-10-09 之前这个字段是 `bool`，`bool` 没有 `take`，
+        // 编译器会报「`bool` is not an iterator」，一个**看不出指向哪**的错。
+        // 现在它已经是 `Option<FolderPick>`（哪个弹窗要选目录必须随标记走），
+        // `take()` 才是对的，而 `match` 保证以后新增变体时这里不会漏一支
+        if let Some(target) = self.pending_folder.take() {
+            match target {
+                FolderPick::Clone => self.pick_clone_folder(window, cx),
+                FolderPick::AddRepo => self.pick_repo_path_folder(window, cx),
+            }
         }
         // 关窗询问面板（阶段 22）。同样在 render 里兑现：
         // `on_window_should_close` 的回调跑在 Win32 的 `WM_CLOSE` 处理过程中，
@@ -178,10 +181,22 @@ impl Render for Shell {
         // 补间期间仍然由弹簧说话：**不在非补间时写**——那时宽度归拖拽，
         // 每帧写会把用户刚拖出来的宽度一帧拽回去（阶段 25 那条「弹簧一下」）。
         if sidebar_mounted {
-            let side_w = px(self.sidebar_w);
+            // ⚠️ 挂载那一帧插的尺寸 = **弹簧此刻的值**，不是意图宽
+            // （2026-10-09 每帧打点量出来的，路线表 31.4 补二十七）。
+            //
+            // 原来这里写的是 `px(self.sidebar_w)`。静止时两者是同一个数，看不出差别；
+            // 而**展开途中**弹簧还在 0 附近，那一帧却把面板挂成整宽 ⇒ 画面是
+            // 「啪一下全宽 → 缩回弹簧位 → 再滑出来」，用户报的就是这一闪
+            // （他问「滑动和弹簧回弹是被删了还是接线断了」）。
+            // 打点实测：弹簧本身**一直在跑**，过冲 287.9 / 目标 263 = **+9.5%**，
+            // 正是 `tokens::spring_bounce()` 的 ζ=0.6 该有的量——坏的不是弹簧，
+            // 是挂载那一帧抢先把结果写死了。
+            //
+            // 这条改动**不影响补二十五那个修复**：那一修要的是"非补间时也要挂"，
+            // 而静止时 `anim_w == self.sidebar_w`，插进去的还是同一个数。
             self.split.update(cx, |s, cx| {
                 if s.sizes().len() < 2 {
-                    s.insert_panel(Some(side_w), Some(0), cx);
+                    s.insert_panel(Some(anim_w), Some(0), cx);
                 } else if animating {
                     s.resize_panel(0, anim_w, window, cx);
                 }
@@ -195,13 +210,17 @@ impl Render for Shell {
         });
 
         // 下限放开成 0 的两种情形：正在补间（滑进滑出都要经过 200px 以下），
-        // 或者目标就是 0。少了后一条，折叠停在仓库页时 min_w 会把面板按回 200px，
+        // 或者目标就是 0。少了后一条，折叠停在仓库页时 min_w 会把面板按回最小宽，
         // 凭空多出一条空槽——正好是这一步要消灭的东西。
         // 非折叠状态下下限照常夹住，拖宽才拖不到 0
+        //
+        // ⚠️ 下限**不是** `SIDEBAR_MIN_W` 那个 200：200 是"文字放得下"拍的数，
+        // 帧上量到侧栏拖到最小那一站，底部「克隆仓库」那颗按钮的盒子压过卡右缘 8px。
+        // 现在这一档由那两颗按钮的构成算，且**跟着字号档走**（推导见 `sidebar_min_w`）
         let min_w: Pixels = if animating || target_w <= px(0.5) {
             px(0.0)
         } else {
-            px(SIDEBAR_MIN_W)
+            px(sidebar_min_w(fs_sec()))
         };
 
         let mut group = h_resizable("body-split").with_state(&self.split);
@@ -332,12 +351,12 @@ impl Shell {
         // 检视抽屉只在仓库页有——总览页没有当前仓库，这一列里没有东西可看
         if inspector_mounted {
             // ⚠️ 与左栏**同一处修法**（AGENTS 那条"两处用了同一套写法必须一起改"）：
-            // 挂载那一帧按**意图宽**插入，不等基座去量实测——它量到的是
-            // "还没缩之前的整组宽"，随后被 `size_range` 夹住并**锁死**
-            // （左栏就是这么变成 360 的，见 `render_body` 里那一段）。
+            // 挂载那一帧插的尺寸 = **弹簧此刻的值**，理由与实测数字写在左栏
+            // `sidebar_mounted` 那一段（31.4 补二十七）——静止时两者同一个数，
+            // 补二十五那条"非补间也要挂"的修复不受影响。
             //
-            // 补间期间才由弹簧说话；非补间时不写，否则会把用户刚拖出来的宽度
-            // 一帧拽回去（阶段 25 那条「右栏拉大拉小会弹簧一下」的同一原因）。
+            // 早先这里写的是意图宽 `px(self.inspector_w)`，打点量到挂载帧
+            // `sizes=[931, 320]` 而弹簧那一刻在 309 ⇒ 抽屉也会先弹一下全宽。
             //
             // ⚠️ **下标是写死的 1，不是 `len() - 1`**（2026-10-05 实机闪退）。
             // 这一组里**主区永远占 0 号位**（`main_group` 先挂它，检视列第二个挂），
@@ -347,10 +366,9 @@ impl Shell {
             // 表现是**点导航轨第二颗按钮直接闪退**（事件日志 `ucrtbase.dll` +
             // 异常码 `0xc0000409`，即 `/GS` 栈保护命中——不是 Rust panic，
             // 所以 stderr 一个字都没有）
-            let insp_w = px(self.inspector_w);
             self.insp_split.update(cx, |s, cx| {
                 if s.sizes().len() < 2 {
-                    s.insert_panel(Some(insp_w), Some(1), cx);
+                    s.insert_panel(Some(insp_anim_w), Some(1), cx);
                 } else if insp_animating {
                     s.resize_panel(1, insp_anim_w, window, cx);
                 }
@@ -658,6 +676,11 @@ impl Shell {
                     }),
             )
             .on_double_click(|_, window, _| window.zoom_window())
+            // 右栏开关紧挨着主题键（用户 2026-10-09 的令）。与左栏那颗同一条件：
+            // 总览页没有右栏那一列，藏起来免得点了没反应
+            .when(self.page == Page::Repos, |bar| {
+                bar.child(self.inspector_toggle(t, cx))
+            })
             .child(self.theme_toggle(t, cx))
             .child(self.window_controls(supported, maximized, cx))
             .into_any_element()
@@ -742,6 +765,38 @@ impl Shell {
             .tooltip(label)
             .accessibility_label(label)
             .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
+            .into_any_element()
+    }
+
+    /// 右栏（检视列）展开 / 收起开关。**从抽屉自己的标题行搬上来**
+    /// （用户 2026-10-09：「右栏 展开收缩 按钮 移到顶栏那个 明暗主题 按钮的边上」）。
+    ///
+    /// 搬上来一次解决三件事：
+    /// ① 左栏那颗开关本来就在这排，两栏的开关并排 = 同一类操作同一个位置；
+    /// ② 抽屉里的标题行整行要撤（这一列改成与左栏同款的悬浮卡，卡里不再有一行"检视"），
+    ///    键留在里面就没有落脚处；
+    /// ③ 原来"收起后"的入口挂在仓库头右上角（`inspector_reopen`），
+    ///    那是**条件出现**的第二颗键——它和这颗键是同一个功能的两个出处，
+    ///    本项目为"同帧两颗同 id"付过一次 debug panic 的学费（见 AGENTS.md）。
+    ///    现在常驻一颗，`repo_head.rs` 那一颗随之删掉。
+    fn inspector_toggle(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let icon = if self.inspector_open {
+            AssetIcon::PanelRightClose
+        } else {
+            AssetIcon::PanelRightOpen
+        };
+        let label = if self.inspector_open {
+            "收起右栏"
+        } else {
+            "展开右栏"
+        };
+        Button::new("titlebar-inspector-toggle")
+            .icon(icon_sm(icon).text_color(tier3(t)))
+            .custom(ghost_variant(cx))
+            .with_size(Size::Small)
+            .tooltip_with_action(label, &ToggleInspector, None)
+            .accessibility_label(label)
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
             .into_any_element()
     }
 
@@ -860,7 +915,9 @@ impl Shell {
     /// 拖宽结束后把新宽度记下来。不记的话折叠再展开会弹回旧宽度，
     /// 用户会以为拖拽没生效
     fn commit_sidebar_width(&mut self, w: Pixels, cx: &mut Context<Self>) {
-        let w = qingbird_core::store::clamp_sidebar_w(w.as_f32());
+        // core 那一道管的是"落盘值别离谱"，GUI 这一道管的是"底部两键别被挤穿"
+        let w = qingbird_core::store::clamp_sidebar_w(w.as_f32())
+            .max(sidebar_min_w(fs_sec()));
         if (w - self.sidebar_w).abs() < f32::EPSILON {
             return;
         }
@@ -1279,7 +1336,10 @@ impl Shell {
             page: Page::Overview,
             side_focus: Group::Mine,
             sidebar_collapsed: saved.sidebar_collapsed,
-            sidebar_w: qingbird_core::store::clamp_sidebar_w(saved.sidebar_w),
+            sidebar_w: qingbird_core::store::clamp_sidebar_w(saved.sidebar_w)
+                // 老配置里可能存着旧下限 200（那一档底部两键会穿出去），
+                // 启动就按当前字号档抬到该在的位置，与 `commit_sidebar_width` 同一道夹
+                .max(sidebar_min_w(fs_sec())),
             // 启动这一屏是总览页，两栏都没挂 ⇒ 既没撑过窗口，也没有欠着的加宽目标
             shell_grown_w: 0.0,
             shell_grow_pending: 0.0,
@@ -1316,11 +1376,12 @@ impl Shell {
             // 真嫌挤可以自己点标题折起来
             group_open: [true, true],
             tree_scroll: ScrollHandle::new(),
+            space_scroll: ScrollHandle::new(),
             log_scroll: ScrollHandle::new(),
             batch_log_scroll: ScrollHandle::new(),
             reveal: None,
             pending_reveal: None,
-            pending_folder: false,
+            pending_folder: None,
             // 关窗那三档**只在构造期读一次**：`on_window_should_close` 的回调
             // 每次点 X 都会跑，而那个回调在消息处理里，多一次 `store::load()`
             // 就是一次同步读盘。改档的地方（面板 / 设置）会同步更新这个字段

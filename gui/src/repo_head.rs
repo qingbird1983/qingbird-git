@@ -139,13 +139,12 @@ impl Shell {
                     .child(div().flex_1())
                     .child(self.head_metrics(&status, view.map(|v| v.changed).unwrap_or(0), t))
                     // 常用命令组（2026-10-05 用户反馈：「常用命令没有入口了」）
-                    .child(self.quick_cmds(t, cx))
-                    // 右侧只留「展开检视」——原来那四颗（打开文件夹 / 终端 /
-                    // 云端 / 复制）里三颗已经进了下面的地址区（用户要求），
-                    // 剩下的「终端」并进了日志工具行
-                    .when(!self.inspector_open, |row| {
-                        row.child(self.inspector_reopen(t, cx))
-                    }),
+                    .child(self.quick_cmds(t, cx)),
+            //  这里**不再有**"收起时挂一颗展开右栏的键"——那颗键 2026-10-09
+            // 按用户的令搬进了顶栏（紧挨明暗主题键）。留着它就是同一个功能两个入口，
+            // 而且两处的出现条件互补，同屏永远只有一颗——正是 AGENTS.md 那条
+            // "凡是条件出现的入口，先确认一帧里只挂一次"要防的形状：
+            // 它当年以 `inspector_open` 两颗同 id 的形式 panic 过一次
             )
             // 地址区：**一行**（本地 · 云端），压缩头卡高度把空间让给日志
             .child(self.addr_line(path, &status, copied, t, cx))

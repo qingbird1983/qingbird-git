@@ -43,9 +43,6 @@ use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::{ghost_variant, skeleton_bar, vdivider, CardHeader};
 
-/// 排版区左右留白。README 的表格常常比正文宽，两边各留一档才不顶到边
-const README_PAD: f32 = 20.0;
-
 /// README 正文的样式覆盖：**只改行内代码那一格的颜色，其余全部交回主题**。
 ///
 /// ⛔ 成因（2026-10-09 用户报「文档里那些高亮字底色接近黑、字根本看不清」）：
@@ -249,22 +246,36 @@ impl Shell {
             .gap(px(GAP_TIGHT))
             .child(self.readme_header(path, t, cx))
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .p(px(README_PAD))
-                    // 用 `TextView::new(&state)` 而不是 `TextView::markdown(..)`：
-                    // 后者自己建一个藏起来的 state，而锚点跳转要在同一个 state
-                    // 上调 `reveal_range`
-                    .child(
-                        TextView::new(&self.readme_state)
-                            // 行内代码胶囊的底色/字色覆盖，理由全在 `readme_text_style`
-                            .style(readme_text_style(t))
-                            .w_full()
-                            .h_full()
-                            .selectable(true)
-                            .scrollable(true)
-                            .on_link_click({
+                // **右留白那一档是给滚动条留的位**（`tokens::TAB_PAD_RIGHT` 的推导）。
+                // 这一格的右缘要向右探出卡内距 5（负 margin），`TextView` 里那根滑块
+                // 才会正好落在「正文右缘—卡右缘」这条 36 的带子正中；
+                // 竖向与左侧的 20 仍旧由这一格给（`scroll_cell` 只管 `mr`）
+                scroll_cell(
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .pt(px(TAB_PAD))
+                        .pb(px(TAB_PAD))
+                        .pl(px(TAB_PAD))
+                )
+                // 用 `TextView::new(&state)` 而不是 `TextView::markdown(..)`：
+                // 后者自己建一个藏起来的 state，而锚点跳转要在同一个 state
+                // 上调 `reveal_range`
+                .child(
+                    TextView::new(&self.readme_state)
+                        // 行内代码胶囊的底色/字色覆盖，理由全在 `readme_text_style`
+                        .style(readme_text_style(t))
+                        .w_full()
+                        .h_full()
+                        // ⚠️ **右内距挂在 `TextView` 自己身上，不挂在外层那一格**：
+                        // 官方那个滑块的覆盖层是 `absolute().inset_0()`，包含块是
+                        // padding 盒（**不减 padding**）⇒ 这一句把正文推进 25，
+                        // 而滑块**不动**，正好停在留白带正中。反过来若把这 25 写到
+                        // 外层 `v_flex` 上，滑块会跟着正文一起被推走（改前就是这么坏的）
+                        .pr(px(TAB_PAD_RIGHT))
+                        .selectable(true)
+                        .scrollable(true)
+                        .on_link_click({
                                 // ⚠️ **不能写 `cx.listener(..)`**：
                                 // 官方这个钩子的签名是裸
                                 // `Fn(&SharedString, &ClickEvent, &mut Window, &mut App)`，

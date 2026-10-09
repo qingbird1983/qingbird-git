@@ -31,6 +31,7 @@ pub(crate) fn dlg_body(
     path_input: &Entity<InputState>,
     name_input: &Entity<InputState>,
     this: &Entity<Shell>,
+    gv: ButtonCustomVariant,
 ) -> Div {
     let field = |label: &str, input: &Entity<InputState>| -> Div {
         v_flex()
@@ -63,7 +64,35 @@ pub(crate) fn dlg_body(
                     .text_color(tier3(t))
                     .child(p.clone()),
             ),
-        None => field("路径", path_input),
+        None => v_flex()
+            .w_full()
+            .gap(px(GAP_TIGHT))
+            .child(
+                div()
+                    .text_size(px(fs_meta()))
+                    .text_color(tier4(t))
+                    .child("路径"),
+            )
+            // ⚠️ **「浏览…」这颗是补接回来的，不是新设计**（用户 2026-10-09：
+            // 「添加路径 原是可以点击进入本地资源管理器选择的 现在没有了 是没接线了吗」）。
+            // 查实：旧 Tauri 版真有——`src/store.ts` 的 `addRepoDialog` 调
+            // `open({ directory: true, title: "选择 git 仓库文件夹" })`；GPUI 重写时
+            // **从来没写过这颗键**（`git log --all -S "浏览" -- gui/src/dialogs/repo.rs` 零命中）。
+            // 能力本身一直在线：`os::pick_folder`（带 `CREATE_NO_WINDOW`）此前只有
+            // 克隆框在用 ⇒ 缺的只是这一格接线，不是缺功能。
+            // 输入框仍然留着：手打整条路径是唯一没有父目录可挑的场合
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap(px(GAP_TIGHT))
+                    .items_center()
+                    .child(Input::new(path_input).w_full().flex_1())
+                    .child(super::clone::folder_pick_button(
+                        this,
+                        gv,
+                        FolderPick::AddRepo,
+                    )),
+            ),
     };
 
     v_flex()
@@ -325,6 +354,10 @@ impl Shell {
                     let error = error.clone();
                     let init = init.clone();
                     let this = this.clone();
+                    // 幽灵按钮的悬停底色要从活的 `App` 上取，而 content 的 builder
+                    // 是**没有 `cx` 的自由闭包** ⇒ 在这里算好按值带进去
+                    // （`ButtonCustomVariant` 是 `Copy`）。与下面 `.footer(..)` 同一做法
+                    let gv = ghost_variant(cx);
                     move |c, _, _| match &init {
                         Some(i) => c.child(init_body(&t, i, &error, &this)),
                         None => c.child(dlg_body(
@@ -335,6 +368,7 @@ impl Shell {
                             &path_input,
                             &name_input,
                             &this,
+                            gv,
                         )),
                     }
                 })
@@ -354,6 +388,41 @@ impl Shell {
 }
 
 impl Shell {
+    /// 「浏览…」选完目录，回填到添加仓库框的「路径」格。
+    ///
+    /// 与 `clone.rs::pick_clone_folder` **同一套两拍**：按钮的 `on_click` 里
+    /// 既没有活的 `&mut Window`（那一刻窗口已被 take 走，调了会静默失败），
+    /// 回填用的 `set_value` 又必须要 window ⇒ 这里只置 `pending_folder`，
+    /// 由 `Render::render` 下一帧兑现。
+    ///
+    /// **取消不动原值**：`pick_folder` 把取消给成 `Ok(None)` 而不是 `Err`——
+    /// 用户按取消是一个正常决定，输入框里已经填好的路径原封不动
+    pub(crate) fn pick_repo_path_folder(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picked) = self
+            .dlg
+            .as_ref()
+            .map(|d| d.path_input.read(cx).value().to_string())
+        else {
+            // 弹窗已经关了（比如置位与兑现之间被别的东西关掉）——什么都不做
+            return;
+        };
+        match crate::os::pick_folder(&picked) {
+            Ok(Some(dir)) => {
+                if let Some(d) = self.dlg.as_ref() {
+                    let input = d.path_input.clone();
+                    input.update(cx, |st, cx| st.set_value(dir, window, cx));
+                }
+                cx.notify();
+            }
+            Ok(None) => {}
+            Err(e) => window.push_notification(e, cx),
+        }
+    }
+
     /// 保存弹窗：添加时校验路径与 .git，编辑时改名与改归属。
     /// 返回 true = 成功（调用方据此关弹窗），false = 留在原地看错误。
     pub(crate) fn commit_dlg(
