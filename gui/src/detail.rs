@@ -411,6 +411,10 @@ impl Shell {
             || on(store::MOD_SEC_SYNC)
             || on(store::MOD_SEC_LOG)
             || on(store::MOD_SEC_LANG);
+        // **操作进行中那根进度条的落点在哪一屏**：判据在下面的 `progress_slot_is_lang`，
+        // 抽成纯函数是为了四种开关组合能被单测钉住（这里只负责取值）
+        let progress_in_slot =
+            progress_slot_is_lang(on(store::MOD_SEC_SYNC), on(store::MOD_SEC_LANG));
 
         v_flex()
             .flex_1()
@@ -430,7 +434,10 @@ impl Shell {
                 b.child(self.sync_card(path, t, cx, on(store::MOD_SEC_LANG)))
             })
             .when(on(store::MOD_SEC_LOG), |b| {
-                b.child(self.log_panel(t, cx).min_h(px(LOG_MIN_H)))
+                b.child(
+                    self.log_panel(t, cx, !progress_in_slot)
+                        .min_h(px(LOG_MIN_H)),
+                )
             })
             // ⚠️ **语言段正常情况下不是卡，是同步卡里的一段**（原型就这么长）。
             // 这里只处理一种退路：用户把「同步」这一段关掉了，那么它的宿主没了，
@@ -492,5 +499,46 @@ impl Shell {
         // 现在两者都走 `overview_body`，分叉条是**四个模块之一**
         // （`sec.fork` 在第三方的基线里就是藏着的，于是这里什么都不用写）
         self.overview_body(path, t, cx, true)
+    }
+}
+
+/// **操作进行中那根进度块坐在哪一格**（2026-10-08 用户指令）。
+///
+/// 他要的是：「点拉取需要，那个语言技术栈的那块位置就会切换成进度条显示的位置，
+/// 完成后又切回语言技术栈。但是上面拉取检测哪些按钮不能跟着切换」⇒
+/// 落点是同步卡里「语言技术栈」那一格，进度块由 `panels::sync_card` 走
+/// `widgets::slot_cover` **盖**上去（不是二选一，理由写在那颗函数的注释里：
+/// 两块高度不同，二选一会让这张卡在操作开始与结束时各变一次高）。
+///
+/// 返回 `true` = 盖在语言段那一格；`false` = **退回日志卡**（`log_panel` 的
+/// `progress_here`）。两种"格位没了"合并成同一条判据：
+///  * 语言段被关掉 → 那一格压根不渲染
+///  * 同步段被关掉 → 语言段退成独立一张卡（`overview_body` 里那条
+///    `lang_on && !sync_on`），那张卡里没有格位
+///
+/// ⚠️ **为什么这是一个要单测的真值表，而不是一个 `&&`**：进度块有**两个落点**，
+/// 而判据写错的方向有两个，**两个都不报错**——两处都画 = 同一个操作两根进度条
+/// （两处的 `ElementId` 不同，连"同帧两颗同 id"那个 panic 都不会触发）；
+/// 两处都不画 = 进度彻底看不见（D73 那一族：末端看不见才是缺陷）。
+/// ⇒ 四种开关组合逐一钉住，"恰好有一个落点"由这条判据本身保证
+fn progress_slot_is_lang(sync_on: bool, lang_on: bool) -> bool {
+    sync_on && lang_on
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progress_slot_is_lang;
+
+    /// 进度块的落点：四种开关组合下**恰好有一个地方在画**
+    #[test]
+    fn the_progress_block_has_exactly_one_home_in_every_combination() {
+        // 两段都开 → 盖在同步卡的语言段那一格，日志卡让位
+        assert!(progress_slot_is_lang(true, true));
+        // 语言段关了 → 那一格不存在，进度回日志卡
+        assert!(!progress_slot_is_lang(true, false));
+        // 同步段关了 → 语言段退成独立一张卡，卡里没有格位，进度回日志卡
+        assert!(!progress_slot_is_lang(false, true));
+        // 两段都关 → 同上，回日志卡
+        assert!(!progress_slot_is_lang(false, false));
     }
 }

@@ -165,20 +165,34 @@ impl Render for Shell {
         let sidebar_mounted =
             (self.page == Page::Repos && !self.sidebar_collapsed) || anim_w > px(0.5);
 
-        if sidebar_mounted && animating {
+        // ⚠️ **挂载那一帧的插入要用「意图宽」，而且不能只在补间时跑**（2026-10-09 帧上量出来的成因）。
+        //
+        // 原来这一整支挂在 `animating` 里。从总览切回仓库页时弹簧本来就静止
+        // （`anim_w == target_w` ⇒ `animating` 是 false）⇒ **两个分支一条都不跑**，
+        // 面板于是由基座 `sync_panels_count` 补成占位值，再由 `update_panel_size`
+        // 量"还没缩之前的整组宽"写进去（实测 1232）⇒ 随后被 `size_range` 夹到上限
+        // `SIDEBAR_MAX_W` = **360** ⇒ 而那条写只在"还等于占位值"时才发生，**就此锁死**。
+        // 后果：左栏 360 / 中间 872，用户设的 `sidebar_w` = 263 **从来没生效过**，
+        // 而中间那 872 刚好压在他给的 870 上，所以这一条一直没被发现。
+        //
+        // 补间期间仍然由弹簧说话：**不在非补间时写**——那时宽度归拖拽，
+        // 每帧写会把用户刚拖出来的宽度一帧拽回去（阶段 25 那条「弹簧一下」）。
+        if sidebar_mounted {
+            let side_w = px(self.sidebar_w);
             self.split.update(cx, |s, cx| {
-                // 补间期间由 transition 说话。**不在非补间时写**：
-                // 那时宽度归拖拽，写进去会把用户刚拖出来的宽度一帧拽回去
                 if s.sizes().len() < 2 {
-                    // 面板这一帧才挂上。状态里还没有第 0 号面板，
-                    // `resize_panel` 是空操作，面板会退回 `initial_size`（= 全宽）
-                    // 闪一下再缩回去。直接按当前动画值插入，省掉那一帧
-                    s.insert_panel(Some(anim_w), Some(0), cx);
-                } else {
+                    s.insert_panel(Some(side_w), Some(0), cx);
+                } else if animating {
                     s.resize_panel(0, anim_w, window, cx);
                 }
             });
         }
+        // 每帧把"中间那一格"（挂侧栏时是下标 1，没挂就只有 0 号这一格）交回给 flex。
+        // 这一句才是"左栏抢宽"的根，理由与越界处理见 `keep_main_flexible`
+        self.split.update(cx, |s, cx| {
+            let flex_ix = if sidebar_mounted { 1 } else { 0 };
+            Self::keep_main_flexible(s, flex_ix, cx);
+        });
 
         // 下限放开成 0 的两种情形：正在补间（滑进滑出都要经过 200px 以下），
         // 或者目标就是 0。少了后一条，折叠停在仓库页时 min_w 会把面板按回 200px，
@@ -228,6 +242,18 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // 「中间那一列不足 870 就把窗口向右撑大」这条规则落在这里，
+        // **不在下面的构建链里**：那条链一路借着 `self`（`title_bar` / `nav_rail` /
+        // `status_bar` 都在借），而撑窗口要 `&mut self` 改那两个记账字段。
+        // 判据与三条守则是 `ensure_shell_width`，注释在那儿
+        //
+        // 两栏"开不开"用**目标态**判（折叠态 / 抽屉开关），不用 `*_mounted`：
+        // 后者在补间里会跟着弹簧值来回翻转，窗口就会一边开抽屉一边长一下缩一下
+        self.ensure_shell_width(
+            self.page == Page::Repos && !self.sidebar_collapsed,
+            self.page == Page::Repos && self.inspector_open && self.selected.is_some(),
+            window,
+        );
         // ⚠️ `items_stretch()` 不能省。`h_flex()` 装的是 `items_center()`（基座
         // `styled.rs` 的 `h_flex` 文档明写「centers its children on the cross axis」，
         // 而 `v_flex()` 不装任何交叉轴对齐 = stretch，**两者不对称**）。
@@ -245,6 +271,8 @@ impl Shell {
         // 检视列 `.flex_none()` 是必须的——官方面板默认 `flex_grow: 1`，
         // 不关掉它会把主区挤走（`resizable/panel.rs:318-322` 与官方文档同一句）
         let mut main_group = h_resizable("insp-split").with_state(&self.insp_split);
+        // 0 号面板 = 「侧栏 + 主区」那一整组，**不带 `size`**：宽度由 `flex_grow`
+        // 给。它为什么还需要上面那段 `reset_panel` 才不溢出，见那里
         main_group = main_group.child(resizable_panel().child(body));
         //
         // ⚠️ **检视列走的是与侧栏同一套补间**（阶段 21-6）。原先这里是
@@ -274,35 +302,59 @@ impl Shell {
         // 与左栏 `sidebar_mounted` 同一处理：宽度到 0 才把面板整个摘掉。
         // 留一个 0 宽面板在 flex 里，那条按了没用的拖拽把手还挂在原处
         let inspector_mounted = insp_anim_w > px(0.5);
+        // ⚠️ **Q23（抽屉一开、主区右半截看不见）已修，成因不是"内容压不动"，是这两列的分配本身错了**。
+        //
+        // 帧上量到的旧数（临时 `QB_GEOM_DEBUG` 自报，核完已删）：抽屉展开那一帧
+        // `split = [630, 282]`、`insp_split = [1232, 320]` ⇒ 中间那一列只剩 **282px**，
+        // 而左栏拿走了 630（用户设的是 263）。主区不是被裁掉一条，是被压掉三分之二。
+        //
+        // **根因**：一个分组里只要每一格都留下了宽度偏好（`panel.size = Some(..)`），
+        // 基座就在容器宽度变化时按**百分比**重分整组（`adjust_to_container_size`）。
+        // 挂上右栏 = 外层容器变了 → 中间那格被按比例缩小；内层容器又跟着变小 →
+        // 左栏也被按比例重分一次。两次都是**比例**，所以 `sidebar_w` / `inspector_w`
+        // 这两个数只在第一次挂载时管用，之后每开合一次就漂一次。
+        //
+        // **修法 = `keep_main_flexible`**：每帧把"中间那一格"的偏好交回 flex
+        // （基座自己给了这条早退：「Flex already fits the container, so there is
+        // nothing here to adjust」）。整组不做比例重分 ⇒ 两栏的宽恒等于用户设的数，
+        // 窗口变宽变窄全部由中间那一列吸收。
+        //
+        // 四条无效改法与两条基座事实登记在路线表 **31.4 补二十四**，别再查一遍。
+        // 其中两条仍然成立，是这次改动的地基：
+        // ① 面板的运行时约束（`min_w` / `max_w` / `flex_basis`）写在 `refine_style`
+        //    **之后**（`resizable/panel.rs:330` 与 `:334-336`）⇒ **调用方盖不住**，
+        //    往 `resizable_panel()` 上写 `min_w_0` 是空操作；
+        // ② 面板实测尺寸**一旦被量出来就锁死**：`update_panel_size` 只在
+        //    `sizes[ix]` 还等于占位值 `PANEL_MIN_SIZE` 时才写（`mod.rs:211-214`），
+        //    `panel.rs:350-351` 再拿它去写 `flex_basis` ⇒ 所以要**每帧**清，
+        //    不是只在挂载那一帧清一次
 
         // 检视抽屉只在仓库页有——总览页没有当前仓库，这一列里没有东西可看
         if inspector_mounted {
-            if insp_animating {
-                // 补间期间由 transition 说话。**不在非补间时写**：
-                // 那时宽度归拖拽，写进去会把用户刚拖出来的宽度一帧拽回去
-                //
-                // ⚠️ **下标是写死的 1，不是 `len() - 1`**（2026-10-05 实机闪退）。
-                // 这一组里**主区永远占 0 号位**（`main_group` 先挂它，
-                // 检视列第二个挂），所以检视列的下标恒为 1。
-                // 早先图省事写 `sizes().len().saturating_sub(1)`——在面板
-                // 还没挂上的那一帧 `len()` 是 1，减出来 **0**，于是把检视列
-                // **插到 0 号位顶掉了主区**；基座 `sync_panels_count`
-                // 下一帧按子元素个数对齐，列数与下标就此错位，
-                // 表现是**点导航轨第二颗按钮直接闪退**
-                // （实机 12:15 复现，事件日志 `ucrtbase.dll` +
-                // 异常码 `0xc0000409`，即 `/GS` 栈保护命中——
-                // 不是 Rust panic，所以 stderr 一个字都没有）
-                self.insp_split.update(cx, |s, cx| {
-                    if s.sizes().len() < 2 {
-                        // 面板这一帧才挂上。状态里还没有第 1 号面板，
-                        // `resize_panel` 是空操作，面板会退回 `initial_size`（= 全宽）
-                        // 闪一下再缩回去。直接按当前动画值插入 1 号位，省掉那一帧
-                        s.insert_panel(Some(insp_anim_w), Some(1), cx);
-                    } else {
-                        s.resize_panel(1, insp_anim_w, window, cx);
-                    }
-                });
-            }
+            // ⚠️ 与左栏**同一处修法**（AGENTS 那条"两处用了同一套写法必须一起改"）：
+            // 挂载那一帧按**意图宽**插入，不等基座去量实测——它量到的是
+            // "还没缩之前的整组宽"，随后被 `size_range` 夹住并**锁死**
+            // （左栏就是这么变成 360 的，见 `render_body` 里那一段）。
+            //
+            // 补间期间才由弹簧说话；非补间时不写，否则会把用户刚拖出来的宽度
+            // 一帧拽回去（阶段 25 那条「右栏拉大拉小会弹簧一下」的同一原因）。
+            //
+            // ⚠️ **下标是写死的 1，不是 `len() - 1`**（2026-10-05 实机闪退）。
+            // 这一组里**主区永远占 0 号位**（`main_group` 先挂它，检视列第二个挂），
+            // 所以检视列的下标恒为 1。早先写 `sizes().len().saturating_sub(1)`——
+            // 面板还没挂上的那一帧 `len()` 是 1，减出 **0**，于是把检视列
+            // **插到 0 号位顶掉了主区**；基座下一帧按子元素个数对齐，列数与下标就此错位，
+            // 表现是**点导航轨第二颗按钮直接闪退**（事件日志 `ucrtbase.dll` +
+            // 异常码 `0xc0000409`，即 `/GS` 栈保护命中——不是 Rust panic，
+            // 所以 stderr 一个字都没有）
+            let insp_w = px(self.inspector_w);
+            self.insp_split.update(cx, |s, cx| {
+                if s.sizes().len() < 2 {
+                    s.insert_panel(Some(insp_w), Some(1), cx);
+                } else if insp_animating {
+                    s.resize_panel(1, insp_anim_w, window, cx);
+                }
+            });
             main_group = main_group.child(
                 resizable_panel()
                     // 补间中下限放开成 0（滑进滑出都要经过窄于最小宽的一段），
@@ -322,6 +374,11 @@ impl Shell {
                     .child(self.inspector(&t, cx)),
             );
         }
+        // 与内层**同一句话、同一个理由**（AGENTS 那条"两处用了同一套写法必须一起改"）：
+        // 外层这一组里"中间那一格"永远是 0 号（主区先挂，检视列第二个挂）。
+        // 放在 `if` 外面是有意的——挂载分支里的 `insert_panel` 会把整组重分成 Some，
+        // 必须**在它之后**清才清得掉
+        self.insp_split.update(cx, |s, cx| Self::keep_main_flexible(s, 0, cx));
         // `on_resize` 只在拖拽松手时触发（不是每帧），正合"松手才落盘"的语义
         let main_group = main_group.on_resize({
             let this = cx.entity();
@@ -845,6 +902,125 @@ impl Shell {
     pub(crate) fn persist_inspector_layout(&self) {
         let _ = qingbird_core::store::set_inspector_layout(self.inspector_w, self.inspector_open);
     }
+
+    /// 把「中间那一格」的宽度偏好交回给 flex——**两栏抢宽的根就治在这一句**。
+    ///
+    /// 基座在容器宽度变化时（拖窗口 / 挂上或摘掉一栏）会把这一组里**每一格**按
+    /// 各自的比例重分一次（`resizable/mod.rs:353 adjust_to_container_size`）。
+    /// 它的早退条件写在原文里：
+    /// 「A panel with no size preference is laid out by flex …
+    /// **Flex already fits the container, so there is nothing here to adjust.**」
+    /// ⇒ 这一组里**只要有一格没有宽度偏好**，整组就不做比例重分。
+    ///
+    /// 这正是这里要的：两栏的宽是用户设的数（`sidebar_w` / `inspector_w`），
+    /// 窗口变宽变窄都该由中间那一列吸收。不清的话每开合一次、每拖一次窗口，
+    /// 两栏就按百分比漂一次——帧上量到过 `split = [630, 282]`，
+    /// 左栏 630 而用户设的是 **263**。
+    ///
+    /// `reset_panel` 只清「偏好」，`sizes` 里那一格保留原值
+    /// （基座文档原话 "while preserving its current size"），所以拖拽把手不受影响：
+    /// 拖的时候基座算出来的中间格宽度 = 容器 − 侧栏，**与 flex 自己算的那个值同一个数**，
+    /// 清不清都在同一处（阶段 31.4 补二十五帧上拖过侧栏把手，跟随正常）。
+    ///
+    /// ⚠️ **必须每帧清，不能只在挂载那一帧清一次**：`update_panel_size` 会在
+    /// 每一格被量出来时把偏好写回去（`mod.rs:211-214`），挂载那一帧清掉、
+    /// 下一帧 prepaint 又给填回去了。
+    ///
+    /// 越界不 panic：`reset_panel` 内部是 `self.panels[ix] = ..` 直接下标，
+    /// 而侧栏收起那一帧这一组只有一格，所以先判长度
+    fn keep_main_flexible(
+        state: &mut ResizableState,
+        flex_ix: usize,
+        cx: &mut Context<ResizableState>,
+    ) {
+        if state.sizes().len() > flex_ix {
+            state.reset_panel(flex_ix, cx);
+        }
+    }
+
+    /// 两栏（或多一栏）展开时把窗口**向右撑大**，让中间那一列不低于 `MAIN_MIN_W`。
+    ///
+    /// 用户 2026-10-09 的令：「检测中间最小宽度，小于 870 就自动向右将窗口撑大展开」。
+    /// ⚠️ **下限取的是 950 不是 870**：870 那一档中间列照样把右边那排键切掉，
+    /// 是帧上一档 20px 压出来的（948 干净 / 928 开切），推导与表都在 `tokens::MAIN_MIN_W`。
+    /// 三条守则各挡一种把这条规则用坏的方式：
+    /// ① **目标宽只由算式给**：撑到哪 = `required_shell_w(开没开, 意图宽)`，
+    ///    **不是**"当前宽 + 缺口"再迭代一次。当前宽只用来判"够不够"，
+    ///    不参与算目标——一旦让它参与就是正反馈环：撑一次算一次、
+    ///    每次又想再撑一点，窗口会自己往右爬；
+    /// ② **一次只发一个目标**（`shell_grow_pending`）：`Window::resize` 在 Windows 侧
+    ///    是 spawn 出去的 `SetWindowPos`（`gpui-pre-windows/window.rs:652-674`），
+    ///    生效前一两帧 `window.bounds()` 读到的还是旧宽，不记目标就会每帧重发、
+    ///    `shell_grown_w` 被重复累加，收起一栏时把窗口减得比原来还窄；
+    /// ③ **只还我们自己加的那一段**（`shell_grown_w`），且**下限钉在当前需求上**——
+    ///    还回去之后中间列照样 ≥ 870，绝不会因为"还原"把内容压窄。
+    ///    ⚠️ 已知的一处不完美：撑宽之后用户自己又拖过窗口，这里减掉的就不正好是
+    ///    我们加的那一段；因为下限钉在需求上，最坏是"回到刚好放得下的宽"，
+    ///    不会出现内容被压。真要精确得再记一格"撑之前的宽"，为这一处边缘情况
+    ///    多一个字段不值当，先记在这儿。
+    fn ensure_shell_width(
+        &mut self,
+        side_on: bool,
+        insp_on: bool,
+        window: &mut Window,
+    ) {
+        let required = required_shell_w(side_on, self.sidebar_w, insp_on, self.inspector_w);
+        let cur_w = window.bounds().size.width.as_f32();
+        let cur_h = window.bounds().size.height.as_f32();
+
+        // `shell_grow_pending` 的语义是"欠着一次还没生效的窗口宽请求"（撑宽与收窄都算）。
+        // **兑现了就清**：不清的话"同一个目标只发一次"那条守则会把下一次该发的挡掉——
+        // 最典型的是用户自己把窗口拖窄之后我们该再撑回去，却被上一次的目标挡住
+        if (cur_w - self.shell_grow_pending).abs() < 1.5 {
+            self.shell_grow_pending = 0.0;
+        }
+
+        if cur_w + 0.5 >= required {
+            // 够宽（这一支同时管"这一屏压根不该为两栏撑窗口"：总览页与两栏都收时
+            // 需求 919，本来就落在窗口下限以内）。这里必须**顺手把撑出去的那一段还回去**。
+            // 第一版把还原只写在"需求 ≤ 窗口下限"那一支里，于是收起抽屉时需求是 1182
+            // （仍然 > 1080）⇒ 那一支根本不进 ⇒ **窗口停在撑过的 1502 不回**，
+            // 症状是"抽屉关了右边多一条空"。判据②就是 `target/verify_grow.py` 抓的
+            self.give_shell_width_back(cur_w, required, cur_h, window);
+            return;
+        }
+        // ② 同一个目标只发一次（生效之前的那几帧 `cur_w` 还是旧的）
+        if (self.shell_grow_pending - required).abs() < 0.5 {
+            return;
+        }
+        // ① 加宽的量按"当前缺口"累计，不按需求累计——用户在中间自己拖过窗口也对得上
+        self.shell_grown_w += required - cur_w;
+        self.shell_grow_pending = required;
+        // 不用 `cx.notify()`：`SetWindowPos` 必带一次 WM_SIZE，窗口自己会再来一帧。
+        // 参数里没有 `cx` 就是有意的——这里**不该**手动催帧，催了就是第二条路径
+        window.resize(gpui_kit::size(px(required), px(cur_h)));
+    }
+
+    /// 把为两栏撑出去的那一段还给窗口。见 `ensure_shell_width` 守则 ③
+    fn give_shell_width_back(&mut self, cur_w: f32, required: f32, cur_h: f32, window: &mut Window) {
+        if self.shell_grown_w <= 0.0 {
+            return;
+        }
+        // 下限钉在当前需求与窗口下限上：还回去之后中间那一列照样 ≥ 870，
+        // 绝不会因为"还原"把内容压窄
+        let target = (cur_w - self.shell_grown_w).max(required).max(WIN_MIN_W);
+        let give_back = (cur_w - target).max(0.0);
+        if give_back <= 0.5 {
+            // ⚠️ **一段都还不出去时，一个字段都不许改**，尤其不许把 `shell_grown_w` 清零。
+            // 抽屉还开着的那些帧正好是这种帧（需求 == 当前宽）。第一版写成
+            // "先清零、再看要不要 resize" ⇒ 等到真收起抽屉，欠着的那一段早被抹平，
+            // 窗口永远停在 1502（判据②第一次跑红就是它）
+            return;
+        }
+        if (self.shell_grow_pending - target).abs() < 0.5 {
+            return; // 这个收窄目标已经发出去了，正在路上
+        }
+        // 按**实际还出去的**那一段减，不整个抹平：被需求夹住没还完的留着，
+        // 下次需求再降还能接着还
+        self.shell_grown_w -= give_back;
+        self.shell_grow_pending = target;
+        window.resize(gpui_kit::size(px(target), px(cur_h)));
+    }
 }
 
 // ================= 导航轨 =================
@@ -1104,6 +1280,9 @@ impl Shell {
             side_focus: Group::Mine,
             sidebar_collapsed: saved.sidebar_collapsed,
             sidebar_w: qingbird_core::store::clamp_sidebar_w(saved.sidebar_w),
+            // 启动这一屏是总览页，两栏都没挂 ⇒ 既没撑过窗口，也没有欠着的加宽目标
+            shell_grown_w: 0.0,
+            shell_grow_pending: 0.0,
             // 弹簧 id 的后缀。启动这一份状态的目标就是 `sidebar_w`，本来就是静止的，
             // 所以 0 就对（见 `state.rs` 里 `sidebar_gen` 的注释）
             sidebar_gen: 0,
@@ -1814,6 +1993,43 @@ impl Shell {
     }
 }
 
+/// 「这两栏（或多一栏）都展开时，窗口客户区至少要多宽」。
+///
+/// 用户 2026-10-09 给的规则是**展开时检测中间那一列不足 870 就向右把窗口撑大**，
+/// 这条算式就是"那一下要撑到哪"的唯一出处。每一项都来自一个真源，
+/// **不许在这里写裸数**（写了就是第二个出处，这类账本项目交过四次学费）：
+///
+/// | 项 | 来源 |
+/// |---|---|
+/// | 导航轨 + 那条右分界 | `NAV_W` + 1（`nav_rail` 的 `border_r_1`） |
+/// | 窗口右缘留白 | `GAP`（只在 `finish_frame` 那一处写） |
+/// | 左栏 / 右栏 | 用户自己设的 `sidebar_w` / `inspector_w`（**就是面板宽，不再另加缝**） |
+/// | 中间那一列 | `MAIN_MIN_W`（**帧上量的 950**，不是用户口头给的 870，推导在 tokens 里） |
+///
+/// ⚠️ **列与列之间没有"再扣一条缝"这一项**。第一版在这里每项加了 6px，
+/// 理由是"帧上卡间实测 6 = `GAP_TIGHT` + 两条 1px 边框"——那 6px 量的是
+/// **同一列里两张卡之间**，它本来就长在面板自己的 `flex_basis` 里
+/// （抽屉开那一帧实测：客户区 1514 = 轨 41 + 左栏 263 + 中间 883 + 右栏 320 + 右缘 8，
+/// 一像素不多不少，而中间那 883 比目标 870 正好多出 2×6）。
+/// 再扣一次就是**把同一个 6px 数两遍**，窗口会无故多宽 12px。
+///
+/// ⚠️ **纯函数、开环**（D56 那条教训）：输入里**没有**"窗口现在多宽"，
+/// 只有"两栏开不开 + 那两个意图宽"。一旦让当前宽度参与进来就是正反馈环——
+/// 撑一次算一次、每次又想再撑一点，窗口会自己往右爬。
+///
+/// ⚠️ 这条算式**只有在两栏的宽真的等于那两个意图值时才成立**。让宽漂回意图值的
+/// 是 `keep_main_flexible`，两者是一套，不是两个功能
+pub(crate) fn required_shell_w(side_on: bool, side_w: f32, insp_on: bool, insp_w: f32) -> f32 {
+    let mut w = NAV_W + 1.0 + GAP + MAIN_MIN_W;
+    if side_on {
+        w += side_w;
+    }
+    if insp_on {
+        w += insp_w;
+    }
+    w
+}
+
 /// `↑↓` 切仓库时下一步落在第几项。
 ///
 /// **到头就停，不绕回**——列表首尾相接会让用户按到底之后突然跳回第一个，
@@ -1835,6 +2051,43 @@ fn step_repo_index(cur: Option<usize>, delta: i32, total: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 两栏都开时，**用户设的那两个宽必须真的进到算式里**——
+    /// 这条挡的是"算式里用常量替了 state"：那样窗口撑到的宽度永远按默认宽算，
+    /// 用户把左栏拖到 360 之后中间列照样被压，而画面看不出来是算式没跟着走。
+    #[test]
+    fn the_two_panel_widths_actually_enter_the_formula() {
+        let base = required_shell_w(true, 263.0, true, 320.0);
+        let wider_side = required_shell_w(true, 360.0, true, 320.0);
+        let wider_insp = required_shell_w(true, 263.0, true, 560.0);
+        assert!(
+            (wider_side - base - 97.0).abs() < 0.01,
+            "左栏从 263 拖到 360，需要的窗口宽应该多 97，实得 {}",
+            wider_side - base
+        );
+        assert!(
+            (wider_insp - base - 240.0).abs() < 0.01,
+            "右栏从 320 拖到 560，应该多 240，实得 {}",
+            wider_insp - base
+        );
+    }
+
+    /// **总览页与"两栏都收"绝不该把窗口撑大**：那一屏没有左栏也没有右栏，
+    /// 算出来的需求宽必须落在窗口下限以内，否则一进总览窗口就被撑一次。
+    /// （撑不撑的判据是 `required <= WIN_MIN_W`，见 `ensure_shell_width` 第一条）
+    #[test]
+    fn nothing_open_never_forces_the_window_wider() {
+        assert!(
+            required_shell_w(false, 263.0, false, 320.0) <= WIN_MIN_W,
+            "两栏都收时的需求宽 {} 已经顶到窗口下限 {} 之上，进总览页会被撑",
+            required_shell_w(false, 263.0, false, 320.0),
+            WIN_MIN_W
+        );
+        // 只开一栏的需求宽必须**介于**"都收"与"都开"之间：
+        // 少开一栏就少一份宽，多开一栏就多一份——这两条挡的是"栏开没开没进算式"
+        assert!(required_shell_w(true, 263.0, false, 320.0) > required_shell_w(false, 263.0, false, 320.0));
+        assert!(required_shell_w(true, 263.0, true, 320.0) > required_shell_w(true, 263.0, false, 320.0));
+    }
 
     #[test]
     fn stepping_stops_at_the_ends_instead_of_wrapping() {

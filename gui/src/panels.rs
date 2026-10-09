@@ -10,7 +10,7 @@ use gpui_kit::component::Disableable as _;
 use gpui_kit::component::{Sizable, Size, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, Context, Div, FontWeight, Hsla, ParentElement, SharedString, Styled,
+    div, px, Context, Div, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled,
 };
 use qingbird_core::types::RepoStatus;
 
@@ -397,8 +397,12 @@ impl Shell {
                         )
                     })
                     // 「提交并推送…」与「提交是改自己的历史」绑在一起：第三方不出现。
-                    // 它那一格空出来的位置由**下面那行**的只读档案明细接手——
-                    // 少一把键总得少一份信息量，换个地方给回去，而不是让这一行空着
+                    // ⚠️ 这里原来写着"空出来的位置由**下面那行**的只读档案明细接手"——
+                    // **那句话已经不成立**：那一行（`third_archive_row`）同日随
+                    // 「第三方仓库只读」一起整行下线（用户点名"全部取消"，见下面
+                    // `third_bits` 那段与 `sync_card` 里第三行那段注释）。
+                    // ⇒ 第三方这一格现在**就是空的**，没有任何东西接手。
+                    // 留着旧话会让人以为"少一把键总得有补偿"、去屏上找那个不存在的地方
                     .when(!third, |row| {
                         row.child(
                             Button::new("sync-commit")
@@ -455,8 +459,27 @@ impl Shell {
             // 可见性由调用方把 `MOD_SEC_LANG` 的判定结果传进来，**不在这里读 store**：
             // "这一屏显示哪几段"的判据只有 `overview_body` 那一处，两处各读一次迟早漂
             .when(lang_on, |col| {
-                col.child(crate::widgets::card_split(t))
-                    .child(self.lang_section(t))
+                col.child(crate::widgets::card_split(t)).child(
+                    // **进度块坐在这里，不在日志卡上**（2026-10-08 用户指令：
+                    // 「点拉取需要，那个语言技术栈的那块位置就会切换成进度条显示的位置，
+                    // 完成后又切回语言技术栈。但是上面拉取检测哪些按钮不能跟着切换」）。
+                    // 为什么是"盖上去"而不是"二选一"——见 `widgets::slot_cover` 的注释：
+                    // 两块高度不同（83 对 27），二选一会让这张卡在操作开始与结束时
+                    // 各变一次高、下面的日志卡上下跳。
+                    // ⚠️ 三键与头卡那颗「停止」**不参与这次切换**（他要的正是这个）：
+                    // 键的禁用态由 `busy` 管、进度块由 `busy` 触发，两者互不遮蔽
+                    crate::widgets::slot_cover(
+                        self.lang_section(t).into_any_element(),
+                        busy.then(|| {
+                            // 文案拼法**不在这里写**，走 `log::progress_bar` 那一份
+                            // （它同时是日志卡退路那一处的拼法）——两处各拼一遍
+                            // 就漂过一次：一处「准备中…」、一处空串。
+                            // `id` 与日志卡 `log-progress` / 克隆框 `clone-progress`
+                            // 各不相同——同一帧里两颗同 id 是 debug 构建 panic
+                            crate::log::progress_bar(t, "sync-progress", lg)
+                        }),
+                    ),
+                )
             })
     }
 }
@@ -703,7 +726,10 @@ fn lang_ink(lang: &str, ix: usize, t: &Theme) -> Hsla {
 // （这里原来挂着 `impl Shell { fn third_archive_row(..) }`——第三方那一行四列
 // `DescriptionList` 的只读档案。2026-10-08 用户挑的方案 A 把那四样并进状态句，
 // 整块连同它的 `label_width(64)` 折行与基座兜底灰底一起删除，**不留转发层**。
-// 唯一的例外是那句「第三方仓库只读」，它还在，见 `sync_card` 里的 `.when(third, ..)`）
+// ⚠️ 原来这段还写着"唯一的例外是那句「第三方仓库只读」，它还在"——**也不在了**：
+// 同一轮用户点名「第三方仓库只读 那行 全部取消」⇒ 那一行整行下线。
+// ⇒ 第三方与"我的"现在屏上**唯一的差别就是少那几颗键**（提交并推送一类），
+// 别再去找什么只读声明或档案明细）
 
 #[cfg(test)]
 mod tests {

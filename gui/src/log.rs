@@ -19,7 +19,6 @@
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Disableable as _, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -27,12 +26,14 @@ use gpui_kit::{
     ParentElement, ScrollHandle, StatefulInteractiveElement, Styled,
 };
 use qingbird_core::run_cmd::Slot;
+use qingbird_core::types::UpdateChanges;
 
 use crate::os;
 use crate::keys::{OpenTerminal, StopOp};
 use crate::state::*;
 use crate::widgets::{
-    card, ghost_variant, meta_text, progress_readout, progress_text, sunken_box, CardHeader,
+    card, ghost_variant, meta_text, progress_readout, progress_text, sunken_box, vdivider,
+    CardHeader,
 };
 use crate::tokens::*;
 
@@ -52,7 +53,17 @@ impl Shell {
     ///
     /// **高度由外层管**：这里只给 `flex_1 + min_h_0`，`detail.rs` 负责
     /// 让它吃掉剩余高度（`LOG_MIN_H` 是它的下限）
-    pub(crate) fn log_panel(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
+    /// 日志卡。**`progress_here` 由调用方给**：操作进行中那根进度条平时坐在
+    /// 同步卡的语言技术栈那一格上（`panels::sync_card` 走 `slot_cover` 盖上去），
+    /// 只有用户把「语言技术栈」这一段关掉时，那一格不存在、进度才退回这里来画。
+    /// ⇒ 判据与"这一屏显示哪几段"同处一地（`detail.rs` 那一处 `on(..)`），
+    /// 不在这里自己读一遍 store——两处各读迟早漂成"两个地方同时画进度"或"都没有"
+    pub(crate) fn log_panel(
+        &self,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        progress_here: bool,
+    ) -> Div {
         let Some(path) = self.selected.clone() else {
             return card(t)
                 .flex_1()
@@ -70,21 +81,28 @@ impl Shell {
         // 否则观感上就是"慢一帧才滚"。
         let stick = self.log_follow_bottom();
 
-        // ⚠️ **状态行在"真的什么都没有"时整行不画**（原型 `.log-card` 里
+        // ⚠️ **"真的什么都没有"时那句状态话整条不给**（原型 `.log-card` 里
         // 那条 `bar` 只在有输出时长）。它第三档回落去问落盘历史，问不到就写
         // 「还没有操作记录」——而这句话**空态块的第一行已经在说了**，
         // 于是同一张卡左上角一句、正中间一句，两句一模一样的话隔着 300px 对视。
-        // 修法是让"没信息"这件事只由空态那一处说，不是一句都不说
-        let has_record = lg.running || lg.ts > 0 || !self.op_log_line(path.as_str()).is_empty();
+        // 修法是让"没信息"这件事只由空态那一处说，不是一句都不说。
+        // 2026-10-08 那句话从"独占一行"上移进表头（见 `log_header`），**这条判据一字没改**
+        let past = self.op_log_line(path.as_str());
+        let has_record = lg.running || lg.ts > 0 || !past.is_empty();
+        let state_line = has_record.then(|| {
+            log_state_line(lg.running, lg.op.map(|op| op.label()), lg.ts, past.as_str())
+        });
 
         let panel = card(t)
             .flex_1()
             .min_h_0()
-            .child(self.log_header(path.as_str(), lg, t, cx))
-            .when(has_record, |col| {
-                col.child(self.log_status_row(path.as_str(), t, lg, cx))
+            .child(self.log_header(path.as_str(), lg, state_line.as_deref(), t, cx))
+            // 进度条——**平时不在这儿**（2026-10-08 用户：它把日志卡占掉一大块，
+            // 要挪去同步卡里语言技术栈那一格）。这一行只剩"语言段被关掉"那一种退路：
+            // 那一格没了，进度总得有个地方说（D73：末端看不见就是缺陷）
+            .when(lg.running && progress_here, |col| {
+                col.child(progress_bar(t, "log-progress", lg))
             })
-            .when(lg.running, |col| col.child(progress_bar(t, lg)))
             .child(output_stream(
                 "log-stream",
                 &self.log_scroll,
@@ -96,6 +114,13 @@ impl Shell {
                 Some("还没有操作记录"),
                 "点同步三键或命令行的按钮，输出会实时回显在这里",
             ))
+            // **这次拉回来什么**（乙档默认一句，点开列前 3 条）。
+            // 坐在输出流与结论行之间：结论那句「拉取成功」回答"成没成"，
+            // 这一行回答"成了什么"——顺序就是提问的顺序
+            .when_some(
+                self.pull_block(path.as_str(), lg, t, cx),
+                |col, blk| col.child(blk),
+            )
             .child(self.log_verdict_row(t, lg));
 
         if stick {
@@ -118,7 +143,8 @@ impl Shell {
 }
 
 impl Shell {
-    /// 表头：左边「日志」，右边三颗键（复制 / 清空 │ 终端）。
+    /// 表头：左边「日志」+ 那句状态话，右边三颗键（复制 / 清空 / 终端），
+    /// **正在跑时最左边再多一颗「停止」并拉一条分组竖线**。
     ///
     /// **阶段 31.4 删掉了右边那两颗「开发运行」「编译构建」**（用户：
     /// 「仓库名后面加了开发运行和编译构建两个按钮，下面日志右上角的同功能按钮
@@ -126,12 +152,57 @@ impl Shell {
     /// 同一动作一屏两个入口本来就是设计缺陷（v4 铁律 3），而且头卡那对
     /// 是常驻的、切页签不重画，日志这一对只在概览页签出现，**留着只会让人
     /// 以为这两个地方做的事不一样**。
-    /// ⚠️ 分组用的那条 `vdivider` 一起删：它分的是"看结果 │ 接着跑"两组，
-    /// 右边那组没了，一条竖线挂在末尾就是句没头没尾的话。
-    fn log_header(&self, path: &str, lg: &LogState, t: &Theme, cx: &mut Context<Self>) -> Div {
+    /// ⚠️ 那次分组用的 `vdivider` 一起删过：它当时分的是"看结果 │ 接着跑"，
+    /// 右边那组没了、一条竖线挂在末尾就是句没头没尾的话。**现在这条线又有了，
+    /// 但分的是另一组关系**（结束这次操作 │ 处理已经拿到的输出），别当是同一条
+    ///
+    /// `state_line` 由调用方算好送进来（`log_state_line` 三档 + "真的什么都没有
+    /// 时整条不给"那条判据都在 `log_panel` 那一处），这里只管摆
+    fn log_header(
+        &self,
+        path: &str,
+        lg: &LogState,
+        state_line: Option<&str>,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let text = lg.lines.join("\n");
         let has_text = !text.is_empty();
-        let hdr = CardHeader::new("日志")
+        // **那句状态话挂在标题后面**（2026-10-08 用户：「把 日志 下面那行
+        // 检测更新.刚刚 的这个状态文字 上移到 日志 的后面显示，这样日志下面的
+        // 详细 显示是不是可以像上又可以加大很多啊。有限空间都是被这些
+        // 小状态提示词给占用了」）。它原来**独占一行**（就在表头下面，
+        // 行高 `row_h(fs_sec())` ≈ 24px），那一行整行撤掉 ⇒ 输出流向上顶 24px。
+        // ⚠️ 样式走 `CardHeader::note` 那一份（说明页 / 空间页 / 设置页…八处
+        // 表头附注同源），**不在这里自己拼一个 div**——那又是"同一个属性两个出处"。
+        // 代价照实说：附注只有 `tier3` 一档，比原来常态那句的 `tier4` 深一点，
+        // 换来的是与全站表头附注同一个出处；原来 running 档那颗 `Spinner` **撤了**
+        // （同帧有三处指示：仓库头那颗「停止」、侧栏行那颗、状态条那句，
+        // 而「进行中…」四个字本身就在说这件事）
+        let mut hdr = CardHeader::new("日志");
+        if let Some(line) = state_line {
+            hdr = hdr.note(line.to_string(), false);
+        }
+        if lg.running {
+            hdr = hdr
+                .right(
+                    // ⛔ **不给它 `.loading()`**（D64）：loading 的键整颗失能，
+                    // 而这颗键正是那个进行中操作的终止手段。"正在跑"不用它表达——
+                    // 它只在 running 时出现，存在本身就是指示器
+                    Button::new("log-stop")
+                        .label("停止")
+                        .custom(ghost_variant(cx))
+                        .with_size(Size::XSmall)
+                        .tooltip_with_action("停止当前操作", &StopOp, None)
+                        .accessibility_label("停止当前操作")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.stop_current(window, cx)
+                        }))
+                        .into_any_element(),
+                )
+                .right(vdivider(t).into_any_element());
+        }
+        let hdr = hdr
             .right(
                 Button::new("log-copy")
                     .label("复制")
@@ -179,69 +250,47 @@ impl Shell {
     }
 }
 
-// ================= 状态行 =================
+// ================= 状态话 =================
 
-impl Shell {
-    /// 「正在拉取…」/「跑测试 · 2 分钟前」+ 停止按钮。
-    /// 停止按钮只在跑的时候出现——平时摆一个点不动的停止键只会让人去试它
-    ///
-    /// ⚠️ **三档的判据要分清**：
-    /// ① 正在跑 → 报的是"进行中"（`lg.op` 一定有值）
-    /// ② 本次会话跑过 → 报"做了什么 · 多久前"
-    /// ③ **本次会话没跑过** → 去问落盘的操作历史（阶段 16 的 `op_history`）。
-    ///    少了③，重启一次这张卡就写「还没有操作记录」——而昨天明明拉过。
-    ///    **那一档不是"没有信息"，是"信息在库里没人去读"**
-    fn log_status_row(&self, path: &str, t: &Theme, lg: &LogState, cx: &mut Context<Self>) -> Div {
-        let text = if lg.running {
-            match lg.op {
-                Some(op) => format!("{} 进行中…", op.label()),
-                None => "进行中…".to_string(),
-            }
-        } else if lg.ts == 0 {
-            // 回落到落盘的那一条。空串 = 库里也没有，这个仓库真的没跑过操作
-            let past = self.op_log_line(path);
-            if past.is_empty() {
-                "还没有操作记录".to_string()
-            } else {
-                past
-            }
-        } else {
-            match lg.op {
-                Some(op) => format!("{} · {}", op.label(), rel_time(lg.ts)),
-                None => rel_time(lg.ts),
-            }
+/// 表头那句状态话的三个档位。**抽成纯函数才单测得掉**（D48 那条规律：
+/// 判据不抽出来就只能靠抓帧看，而抓帧只证明"某帧长那样"）。
+///
+/// ① 正在跑 → 报"进行中"（`op_label` 一定有值，`None` 只是兜底）
+/// ② 本次会话跑过 → 报"做了什么 · 多久前"
+/// ③ **本次会话没跑过** → 用调用方送进来的落盘历史 `past`（阶段 16 的 `op_history`）。
+///    少了③，重启一次这里就写「还没有操作记录」——而昨天明明拉过。
+///    **那一档不是"没有信息"，是"信息在库里没人去读"**
+///
+/// ⚠️ `past` 是**参数不是自查**：`Shell::op_log_line` 要 `&self`（读那张 SQLite 表），
+/// 判据留在方法里就测不了——同 `diag::log_path_in` / `git::ssh_auth_hint` 那条纪律。
+///
+/// 空串 `past` 才轮到「还没有操作记录」，而**调用方在三档全空时根本不给这一句**
+/// （`log_panel` 里那条 `has_record`）：空态块第一行说的就是同一句话，
+/// 两处各说一遍是这张卡原来那个"两句隔着 300px 对视"的缺陷。
+/// ⇒ 所以这一句在界面上**只可能出现在"库里也没有、但会话跑过"**那种不可能状态，
+/// 留着它是兜底，不是给屏上看的
+pub(crate) fn log_state_line(
+    running: bool,
+    op_label: Option<&str>,
+    ts: u64,
+    past: &str,
+) -> String {
+    if running {
+        return match op_label {
+            Some(label) => format!("{label} 进行中…"),
+            None => "进行中…".to_string(),
         };
-
-        let spin = Spinner::new().color(tier3(t)).with_size(Size::XSmall);
-        h_flex()
-            .w_full()
-            // 阶段 28：跟着这行 `fs_sec()` 的字走。原来写死 20，
-            // 中档 14px 的字上下只剩 3px，右侧那颗「停止」也挤着
-            .h(px(row_h(fs_sec())))
-            .flex_shrink_0()
-            .gap(px(GAP_TIGHT))
-            .items_center()
-            .when(lg.running, |row| row.child(spin))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(fs_sec()))
-                    .text_color(if lg.running { tier3(t) } else { tier4(t) })
-                    .child(text),
-            )
-            .when(lg.running, |row| {
-                row.child(
-                    Button::new("log-stop")
-                        .label("停止")
-                        .custom(ghost_variant(cx))
-                        .with_size(Size::XSmall)
-                        .tooltip_with_action("停止当前操作", &StopOp, None)
-                        .accessibility_label("停止当前操作")
-                        .on_click(cx.listener(|this, _, window, cx| this.stop_current(window, cx))),
-                )
-            })
+    }
+    if ts == 0 {
+        return if past.is_empty() {
+            "还没有操作记录".to_string()
+        } else {
+            past.to_string()
+        };
+    }
+    match op_label {
+        Some(label) => format!("{label} · {}", rel_time(ts)),
+        None => rel_time(ts),
     }
 }
 
@@ -256,10 +305,16 @@ impl Shell {
 ///
 /// 阶段还没来时给一句「准备中…」：常用命令那条路永远不发进度事件，
 /// 空着的一行比一句实话更让人以为渲染坏了
-fn progress_bar(t: &Theme, lg: &LogState) -> AnyElement {
+///
+/// ⛔ **`id` 由调用方给，但"文案怎么从 `LogState` 拼出来"只有这一处**。
+/// 进度块现在有两个落点（同步卡语言段那一格 / 语言段被关掉时的日志卡），
+/// 各自拼一遍文案的话，其中一条一定会漂——2026-10-08 就漂过一次：
+/// 这里写 `unwrap_or("准备中…")`，同步卡那处写成 `unwrap_or_default()`，
+/// 于是**同一个操作在两个落点上一个是空的**。挪落点可以，拼文案只认这一颗
+pub(crate) fn progress_bar(t: &Theme, id: &'static str, lg: &LogState) -> AnyElement {
     progress_readout(
         t,
-        "log-progress",
+        id,
         &progress_text(lg.stage.as_deref().unwrap_or("准备中…"), &lg.detail),
         lg.percent,
     )
@@ -425,6 +480,220 @@ pub(crate) fn output_stream(
     area.into_any_element()
 }
 
+// ================= 这次拉回来什么 =================
+
+/// 拉取结果那一行的两段（原型 `.pull .h` 的分工）：
+/// 主句报"带回几个提交"（`fs_body` / 中粗 / 墨），尾部报"改了多大量"
+/// （`fs_sec` / tier3）。**两句合起来是一句话，拆成两段是因为阅读重量不同**——
+/// 扫一眼要的是"3 个提交"，想知道细目才去看后半句。
+///
+/// ⚠️ **这一句只许有 `pull_summary` 一个出处**。日志卡与同步卡那次进度文案漂
+/// （一处 `unwrap_or("准备中…")`、一处 `unwrap_or_default()`，同一个操作在两个
+/// 落点上一个是空的）就是这么来的：拼文案的活儿一旦被复制，两条一定有一条先漂。
+///
+/// 四档措辞各有理由，一条都不许合并：
+/// ① 提交数与文件数都是 0 ⇒ `None`，**那一行整条不出现**
+///    （Already up to date 时 core 的 `pull_changes` 本来就返回 `None`；
+///    这一档是防以后有人把它改成返回空结构体，那会让卡底凭空一行）
+/// ② 只有文件数、没有提交（`git log` 那一趟没成而 `diff` 成了）⇒
+///    主句改说「这次带回 5 个文件」，**不写「0 个提交」**——
+///    用假数字撑起来的一句实话，不如换个说法
+/// ③ 有提交但增删都是 0（整批换的都是二进制文件）⇒ 尾部**不带 `+A −B`**，
+///    只剩「5 个文件」。写「+0 −0」是假精确：git 对二进制根本不给行数
+/// ④ 正常那档 ⇒「这次带回 3 个提交」+「+120 −30，5 个文件」
+pub(crate) fn pull_summary(c: &UpdateChanges) -> Option<PullCopy> {
+    let commits = c.commits.len();
+    let totals = c.totals;
+    if commits == 0 && totals.files == 0 {
+        return None;
+    }
+    if commits == 0 {
+        return Some(PullCopy {
+            head: format!("这次带回 {} 个文件", totals.files),
+            tail: String::new(),
+        });
+    }
+    let mut tail = String::new();
+    if totals.has_line_counts() {
+        tail.push_str(&format!("+{} −{}", totals.insertions, totals.deletions));
+    }
+    if totals.files > 0 {
+        if !tail.is_empty() {
+            tail.push('，');
+        }
+        tail.push_str(&format!("{} 个文件", totals.files));
+    }
+    Some(PullCopy {
+        head: format!("这次带回 {commits} 个提交"),
+        tail,
+    })
+}
+
+/// `pull_summary` 的返回值：两段文案，尾部可能是空串（那一半没数字可报）
+pub(crate) struct PullCopy {
+    pub(crate) head: String,
+    pub(crate) tail: String,
+}
+
+/// 展开态列几条。**3 就是原型 `.pull ul` 那个数**：再多这张卡就变成第二块内容，
+/// 而"完整清单"本来就在「历史」页签里——这一行只负责"一眼知道动了什么"。
+///
+/// ⚠️ 甲档（摊开三行 ≈120px）与乙档（一句 ≈33px）**共用这同一颗函数与同一个盒子**，
+/// 差别只是"列几条"这个开关（用户 2026-10-08 拍的是乙档为默认态）。
+/// 分成两套写法定会长成两套东西
+pub(crate) const PULL_LIST_MAX: usize = 3;
+
+/// 截断尾巴。**只有真被截时才说"这里列前 N 条"**——
+/// 3 条以内也挂这句就成了又一句谎话（①那一档的判据同源：宁可少说不假说）
+pub(crate) fn pull_list_note(total: usize, shown: usize) -> Option<String> {
+    (total > shown).then(|| format!("完整清单在「历史」页签 · 共 {total} 条，这里列前 {shown} 条"))
+}
+
+/// `git log --oneline` 的一行拆成（短 hash，标题）。
+///
+/// hash 走等宽、标题走正文字体，两列各管各的截断（标题省略号、hash 不缩）。
+/// 拆不出空格或后半截是空的（畸形行）⇒ **整行当标题、hash 留空**，
+/// 宁可少一列也不把内容吃掉半行
+pub(crate) fn oneline_split(line: &str) -> (&str, &str) {
+    match line.split_once(' ') {
+        Some((hash, subject)) if !hash.is_empty() && !subject.is_empty() => (hash, subject),
+        _ => ("", line),
+    }
+}
+
+impl Shell {
+    /// 「这次带回…」那一行，以及点开之后的清单。
+    ///
+    /// **位置**：输出流与结论行之间（原型 `.pull` 就坐在 `.verdict` 上面）。
+    /// **容器**：收起与展开共用同一个 `sunken_box`（`card-sunken` 底 + `line-soft`
+    /// 边），这样点一下**文字不会横向跳**——收起时不套盒、展开才套，
+    /// 摘要行的左缘会内缩一个 padding，那是"点一下抖一下"那一族。
+    ///
+    /// 三件事一起说清：
+    /// ① 它是**"这次"的**：跟着 `LogState` 走、不落盘，新一次操作重建时自动没有。
+    ///    跨会话那句归表头（`op_history` 的三档在 `log_state_line`）
+    /// ② 默认收起（乙档）：一句 + 一颗「看清单」；点开才列前 `PULL_LIST_MAX` 条
+    /// ③ 开关存在**这个仓库的 `LogState::pull_open`**，不存在 `Shell` 上：
+    ///    否则在 A 仓展开、切到 B 仓会看到 B 的清单也开着
+    fn pull_block(
+        &self,
+        path: &str,
+        lg: &LogState,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let c = lg.pulled.as_ref()?;
+        let copy = pull_summary(c)?;
+        let open = lg.pull_open;
+        let shown = c.commits.len().min(PULL_LIST_MAX);
+
+        let mut block = v_flex()
+            .w_full()
+            .min_w_0()
+            .gap(px(GAP_DENSE))
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(GAP_TIGHT))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(fs_body()))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(t.colors.foreground)
+                            .child(copy.head),
+                    )
+                    .when(!copy.tail.is_empty(), |row| {
+                        // 尾部必须能缩能截：主区被检视抽屉挤窄时这一句最长
+                        // （`+120 −30，5 个文件` 在 320 宽里会顶到键），
+                        // 而 `h_flex` 里没 `min_w_0` 的东西不肯缩——
+                        // 症状是「看清单」那颗键**不见了**（`CardHeader::note` 那次同款）
+                        row.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(fs_sec()))
+                                .text_color(tier3(t))
+                                .child(copy.tail.clone()),
+                        )
+                    })
+                    .when(copy.tail.is_empty(), |row| row.child(div().flex_1()))
+                    .child(
+                        Button::new("log-pull-list")
+                            .label(if open { "收起" } else { "看清单" })
+                            .custom(ghost_variant(cx))
+                            .with_size(Size::XSmall)
+                            .tooltip(if open {
+                                "收起这批提交"
+                            } else {
+                                "看这次带回的提交清单"
+                            })
+                            .on_click(cx.listener({
+                                let key = path.to_string();
+                                move |this, _, _, cx| {
+                                    if let Some(l) = this.logs.get_mut(&key) {
+                                        l.pull_open = !l.pull_open;
+                                    }
+                                    cx.notify();
+                                }
+                            }))
+                            .into_any_element(),
+                    ),
+            );
+
+        if open {
+            for line in c.commits.iter().take(PULL_LIST_MAX) {
+                let (hash, subject) = oneline_split(line);
+                block = block.child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .items_center()
+                        .gap(px(GAP_TIGHT))
+                        .when(!hash.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(fs_sec()))
+                                    .font_family(t.mono_font_family.clone())
+                                    .text_color(tier4(t))
+                                    .child(hash.to_string()),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(fs_sec()))
+                                .text_color(tier3(t))
+                                .child(subject.to_string()),
+                        ),
+                );
+            }
+            if let Some(note) = pull_list_note(c.commits.len(), shown) {
+                block = block.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(fs_sec()))
+                        .text_color(tier4(t))
+                        .child(note),
+                );
+            }
+        }
+
+        // 竖向 `GAP_TIGHT`(4) / 横向 `GAP`(8)：实测 4 + 24 行高 + 4 ≈ 33px，
+        // 就是原型乙档那个数。**横向比竖向宽**是因为这一行右边挂着那颗键，
+        // 文字与键之间要有呼吸量
+        Some(sunken_box(block.py(px(GAP_TIGHT)).px(px(GAP)), t))
+    }
+}
+
 // ================= 结论行 =================
 
 impl Shell {
@@ -499,7 +768,37 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::should_follow_bottom;
+    use super::{
+        log_state_line, oneline_split, pull_list_note, pull_summary, should_follow_bottom,
+    };
+
+    /// 表头那句状态话的三档。**2026-10-08 它从"独占一行"上移到标题后面，
+    /// 判据一个字没改**——这句断言钉的就是"搬位置不许改判据"。
+    ///
+    /// 三档各钉一条，外加一条最容易做反的：**本会话跑过（`ts > 0`）时不许去读库里那条**
+    /// （读的话，重启前刚拉成功的仓库会被库里那条更早的失败记录顶掉）
+    #[test]
+    fn the_three_tiers_of_the_header_state_line() {
+        // ① 正在跑：报"进行中"，操作名带上
+        assert_eq!(log_state_line(true, Some("拉取"), 0, ""), "拉取 进行中…");
+        // ① 兜底：操作名没记上也要有话说，不能空
+        assert_eq!(log_state_line(true, None, 0, ""), "进行中…");
+        // ② 本会话跑过：「做了什么 · 多久前」。`now - 630` = 十分钟档，
+        //    留 30 秒余量是给跑测试时的秒边界，不钉死"10"这个数
+        let now = qingbird_core::store::now_secs();
+        assert!(log_state_line(false, Some("推送"), now - 630, "库里那条")
+            .starts_with("推送 · "));
+        // ③ 本会话没跑过：**照搬落盘那一条**（少了这一档，重启一次昨天拉过的
+        //    事就整个看不见——D73 那一族："信息在库里没人去读"）
+        assert_eq!(log_state_line(false, None, 0, "上次拉取 成功 · 3 天前"),
+                   "上次拉取 成功 · 3 天前");
+        // ② 优先于 ③：`ts > 0` 时那条落盘历史**不许冒出来**
+        assert!(!log_state_line(false, Some("检测"), now - 630, "上次拉取 失败")
+            .contains("上次拉取"));
+        // ④ 三档全空才轮到这句，而调用方在这种情形**根本不给这一句**（`has_record`），
+        //    因为空态块第一行说的就是同一句话
+        assert_eq!(log_state_line(false, None, 0, ""), "还没有操作记录");
+    }
 
     /// 贴底判据守着的是 21-1 最容易做坏的那个方向：**把「用户正在回看」
     /// 误判成「在底部」**，于是每来一行输出就把视口拽走。
@@ -520,5 +819,93 @@ mod tests {
         assert!(should_follow_bottom(-318.0, -320.0));
         // 差 3px 就算离开底部：2px 是取整误差的容忍，不是任意宽容度
         assert!(!should_follow_bottom(-317.0, -320.0));
+    }
+
+    use qingbird_core::types::{DiffTotals, UpdateChanges};
+
+    /// 造一份 `pulled`：提交数、文件数、增删行数各给一个，其余字段界面不读
+    fn changes(commits: usize, files: usize, ins: usize, del: usize) -> UpdateChanges {
+        UpdateChanges {
+            commits: (0..commits)
+                .map(|i| format!("abc{i:02} 标题 {i}"))
+                .collect(),
+            diff_stat: String::new(),
+            totals: DiffTotals {
+                files,
+                insertions: ins,
+                deletions: del,
+            },
+        }
+    }
+
+    /// 拉取结果那一行的四档措辞。**每档各钉一条**，因为难写对的正是那三档
+    /// "没有数字可报"的：一退化成"有数就拼上去"，界面就会一本正经地报出
+    /// git 根本没给过的数（二进制文件的行数、没跑成的 `git log` 的提交数）。
+    ///
+    /// 主句与尾部分两段断言（`PullCopy`）：那是原型 `.pull .h` 与 `.h em` 的分工，
+    /// 合成一条字符串就测不出"尾部该不该出现"这一档
+    #[test]
+    fn the_pull_summary_line_never_reports_a_number_git_did_not_give() {
+        // ④ 正常那档：主句报提交数，尾部报量
+        let s = pull_summary(&changes(3, 5, 120, 30)).unwrap();
+        assert_eq!(s.head, "这次带回 3 个提交");
+        assert_eq!(s.tail, "+120 −30，5 个文件");
+
+        // ③ 整批换的都是二进制：`git diff` 对二进制给的是 `-\t-`、core 存成 `None`
+        //    ⇒ 尾部**只剩文件数**，一个 `+` 都不许出现
+        let b = pull_summary(&changes(2, 4, 0, 0)).unwrap();
+        assert_eq!(b.head, "这次带回 2 个提交");
+        assert_eq!(b.tail, "4 个文件");
+        assert!(!b.tail.contains('+'));
+
+        // 只有提交、连一个文件都数不出来（`--numstat` 那趟没成）⇒ 尾部空串，
+        // **调用方那一档整半句不画**（`pull_block` 里那条 `when`）
+        let n = pull_summary(&changes(1, 0, 0, 0)).unwrap();
+        assert_eq!(n.head, "这次带回 1 个提交");
+        assert_eq!(n.tail, "");
+
+        // ① 什么都没带回来（Already up to date）⇒ `None`，那一行整条不出现
+        assert!(pull_summary(&changes(0, 0, 0, 0)).is_none());
+
+        // ② 只数得出文件、`git log` 那一趟没成 ⇒ 主句改口说文件，**不写「0 个提交」**
+        let f = pull_summary(&changes(0, 7, 10, 2)).unwrap();
+        assert_eq!(f.head, "这次带回 7 个文件");
+        assert_eq!(f.tail, "");
+    }
+
+    /// 截断尾巴那句只在**真被截**时出现：3 条以内也说"这里列前 3 条"是谎话，
+    /// 而那句谎话就挂在用户能一眼看见的地方
+    #[test]
+    fn the_truncation_note_only_appears_when_there_is_something_to_truncate() {
+        assert_eq!(pull_list_note(2, 2), None);
+        assert_eq!(pull_list_note(3, 3), None);
+        assert_eq!(
+            pull_list_note(9, 3).unwrap(),
+            "完整清单在「历史」页签 · 共 9 条，这里列前 3 条"
+        );
+    }
+
+    /// `git log --oneline` 那行的拆分。两列各管各的截断（hash 不缩、标题省略号），
+    /// 所以判据是"切在**第一个**空格"——标题里还有空格时不许切成两段
+    #[test]
+    fn an_oneline_commit_splits_at_the_first_space_only() {
+        assert_eq!(
+            oneline_split("9f2c1ab 修代理赛跑"),
+            ("9f2c1ab", "修代理赛跑")
+        );
+        assert_eq!(
+            oneline_split("4d0b7e3 空间页：目录树根层改按名称排"),
+            ("4d0b7e3", "空间页：目录树根层改按名称排")
+        );
+        // 标题**自己带空格**是常态（中文提交标题里空格很常见）：
+        // 从右边切会把 hash 切成标题的最后一截，所以判据是"只切第一个"
+        assert_eq!(
+            oneline_split("c81a55f README：中英 两份 都进缓存"),
+            ("c81a55f", "README：中英 两份 都进缓存")
+        );
+        // 畸形行（没有空格 / 标题是空的）⇒ **整行当标题**，宁可少一列
+        // 也不把用户的东西吃掉半行
+        assert_eq!(oneline_split("没有空格的一行"), ("", "没有空格的一行"));
+        assert_eq!(oneline_split("abc123"), ("", "abc123"));
     }
 }

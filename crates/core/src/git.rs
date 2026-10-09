@@ -172,7 +172,29 @@ pub fn run_git_auth(
     ssh_command: Option<&str>,
 ) -> GitOutput {
     run_git_inner(
-        repo_path, args, proxy_url, timeout, on_line, git_config, ssh_command, None,
+        repo_path, args, proxy_url, timeout, on_line, git_config, ssh_command, None, true,
+    )
+}
+
+/// **收尾必达**那一类：用户已经取消、甚至正在取消，这一步也**必须跑完**。
+///
+/// 目前只有一个用户：`do_pull` 把本地变更 `git stash push -u` 之后，
+/// 无论拉取成功、失败还是被取消，**都得把 `stash pop` 跑掉**——
+/// 那是用户没提交的文件，留在 stash 里就是"东西不见了"。
+///
+/// ⚠️ 走普通 `run_local` 会被**进程级取消标记**带倒：轮询每 50ms 查一次
+/// `is_cancelled()`（`git.rs` 里那个 `cancelled` 分支），而用户点「停止」时
+/// 标记早就置位了 ⇒ 这条 pop 在第一个周期就被整树杀掉 ⇒
+/// **文件留在 stash 里，界面还说"拉取完成"**
+/// （2026-10-08 实测坐实，路线表 31.4 补二十一）。
+///
+/// 它**不是**"能忽略取消的通用跑法"：网络操作一律不许走这里，
+/// 那会让人按了停止却还在传。判据是「这一步不做完，用户的东西就回不来」。
+/// 超时由调用方给（`net::run_local_essential` 传 `LOCAL_TIMEOUT`），
+/// 这里不自己写一个 10 秒——同一个档不许有第二个出处
+pub fn run_essential(repo_path: &str, args: &[&str], timeout: Duration) -> GitOutput {
+    run_git_inner(
+        repo_path, args, None, timeout, None, &[], None, None, false,
     )
 }
 
@@ -189,7 +211,7 @@ pub fn run_git_stdin(
     stdin_data: &[u8],
     timeout: Duration,
 ) -> GitOutput {
-    run_git_inner(repo_path, args, None, timeout, None, &[], None, Some(stdin_data))
+    run_git_inner(repo_path, args, None, timeout, None, &[], None, Some(stdin_data), true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -202,6 +224,10 @@ fn run_git_inner(
     git_config: &[String],
     ssh_command: Option<&str>,
     stdin_data: Option<&[u8]>,
+    // false = 这一步**不受进程级取消标记影响**（只有 `run_essential` 传）。
+    // ⚠️ 它是参数不是"调用方自己记得判"：新加一条收尾必达的命令时，
+    // 少传一个参数**编译不过**（D78 那条：让"忘"没有选项）
+    cancellable: bool,
 ) -> GitOutput {
     let fail = |stderr: String| GitOutput {
         success: false,
@@ -331,7 +357,7 @@ fn run_git_inner(
                 if got_line {
                     last_line = Instant::now();
                 }
-                if is_cancelled() {
+                if cancellable && is_cancelled() {
                     terminate_job_tree(job_handle);
                     let _ = child.kill();
                     let _ = child.wait();
@@ -443,6 +469,38 @@ pub(crate) fn terminate_job_tree(job: isize) {
 #[cfg(not(windows))]
 pub(crate) fn terminate_job_tree(_job: isize) {}
 
+/// 造一个「连得上、但永远不回话」的本机地址，用来把 git 子进程**挂着**。
+///
+/// 这类测试的前提是"命令还在跑"。早先用黑洞地址 `10.255.255.1` 造这个前提，
+/// 于是它其实同时测了"本机网络栈会不会把这条连接挂着"：
+/// 2026-10-09 本机对那个地址 **0 毫秒就拒绝连接**
+/// （`Failed to connect to 10.255.255.1:443 after 0 ms`），git 在 400ms 的
+/// 取消窗口**之前**就走完 ⇒ 断言"`stderr` 含已取消"必红，
+/// 而**红的不是取消，是前提没了**——这种红隔天会变成噪音，噪音会被关掉。
+///
+/// 现在自己监听一个本机端口，`accept` 之后**一个字节都不回也不关**，
+/// git 的 http 客户端就一直等（curl 默认不设读超时）。
+/// 前提由测试自己保证：不碰外网、不碰代理与防火墙、离线也能跑。
+///
+/// ⚠️ 返回的那个 `TcpListener` **必须交出去**（一般交给 `hold_the_connection`）：
+/// 它一被 drop，端口就没人听着了，连接变成"立刻拒绝"，前提又没了
+#[cfg(test)]
+pub(crate) fn hanging_url() -> (String, std::net::TcpListener) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("本机监听失败：取消类测试没有夹具了");
+    let addr = listener.local_addr().expect("拿不到本机监听地址");
+    (format!("http://{addr}/x.git"), listener)
+}
+
+/// 握着这条连接不放，直到测试进程自己结束（不需要 join，进程退出即回收）
+#[cfg(test)]
+pub(crate) fn hold_the_connection(listener: std::net::TcpListener) {
+    std::thread::spawn(move || {
+        let _silent = listener.accept().map(|(stream, _)| stream).ok();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,11 +516,12 @@ mod tests {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         clear_cancel();
-        // 黑洞地址：TCP 连接会长时间挂起，给取消留出触发窗口
-        let t = std::thread::spawn(|| {
+        let (url, listener) = hanging_url();
+        hold_the_connection(listener);
+        let t = std::thread::spawn(move || {
             run_git_auth(
                 ".",
-                &["ls-remote", "https://10.255.255.1/x.git"],
+                &["ls-remote", url.as_str()],
                 None,
                 Duration::from_secs(30),
                 None,
@@ -477,6 +536,55 @@ mod tests {
         assert!(!out.success);
         assert!(!out.timed_out);
         assert!(out.stderr.contains(CANCELLED_MSG), "stderr = {}", out.stderr);
+    }
+
+    /// **收尾必达那一条命令，在取消标记已经置位时照样跑**（2026-10-08 修的那条）。
+    ///
+    /// 判据**不能是"它跑成功了"**：那要真造一个 stash 才谈得上恢复，
+    /// 而短命令在第一个 50ms 轮询之前就返回了，**变异了也不会红**——
+    /// 那种测试只是给"没测东西"盖一个测试的章。
+    /// 取的是**两条退出分支互斥**这一点：轮询里先查取消、后查超时，
+    /// 所以给一个 1ms 超时 + 一条必然挂着的命令，就能把"走的哪条分支"读出来：
+    ///   · 正确（essential 不看取消）⇒ `timed_out = true`
+    ///   · 错（照旧看取消）⇒ `stderr` 是 `CANCELLED_MSG`、`timed_out = false`
+    ///
+    /// "必然挂着"那条命令由 `hanging_url()` 给（本机监听、accept 之后不回话），
+    /// 不再是黑洞地址——理由写在 `hanging_url()` 那儿。两趟都在 50ms 量级收手。
+    /// 整段持写锁独占——它会动那个**进程级**标记
+    #[test]
+    fn an_essential_command_ignores_the_cancel_flag() {
+        let _exclusive = GIT_TEST_LOCK
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        request_cancel(); // 用户已经按了停止
+
+        // 夹具同一个：`essential` 那半条要的是"1ms 超时到的时候命令还在跑"，
+        // 用黑洞地址时这条靠的是网络栈的行为，本机一改（2026-10-09 就是 0ms 拒绝）
+        // 断言就变成测运气。本机握着连接才是自己说了算
+        let (url, listener) = hanging_url();
+        hold_the_connection(listener);
+        let black_hole = ["ls-remote", url.as_str()];
+        let essential = run_essential(".", &black_hole, Duration::from_millis(1));
+        // 对照那半条**先跑**：它依赖标记还置着。两趟都跑完再清、再断言，
+        // 免得断言 panic 把标记留在置位状态去连坐别的测试
+        let normal = run_git(".", &black_hole, None, Duration::from_secs(5));
+        clear_cancel();
+
+        assert!(
+            essential.timed_out,
+            "收尾必达的命令被取消标记带倒了（走的是取消分支不是超时分支）：stderr = {}",
+            essential.stderr
+        );
+        assert!(
+            !essential.stderr.contains(CANCELLED_MSG),
+            "essential 不该走取消那条分支：stderr = {}",
+            essential.stderr
+        );
+        assert!(
+            !normal.success && normal.stderr.contains(CANCELLED_MSG),
+            "普通命令在标记置位时**没**被取消 ⇒ 上面那半条测的其实是『取消整个坏了』：{}",
+            normal.stderr
+        );
     }
 
     #[test]

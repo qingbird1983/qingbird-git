@@ -742,8 +742,9 @@ pub(crate) fn badge_tone(
             let _ = third;
             tone(kind, orange(t), orange_bg(t))
         }
-        // 分叉是红（Q7）：徽标、状态点、同步环、分叉条四处必须同一色，
-        // 同一屏里出现"环是红的、条是橙的"会让人以为那是两件事
+        // 分叉是红（Q7）：徽标、状态点、分叉条**三处必须同一色**，
+        // 同一屏里出现"这里红、那里橙"会让人以为那是两件事。
+        // （原来这一条列的是四处，第四处是同步环——那颗环 2026-10-05 已下线）
         BadgeKind::Forked => tone(kind, t.colors.danger, red_bg(t)),
         BadgeKind::Ahead => tone(kind, t.colors.accent, blue_bg(t)),
         BadgeKind::Dirty => tone(kind, t.colors.accent, blue_bg(t)),

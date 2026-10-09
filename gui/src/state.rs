@@ -1,7 +1,10 @@
 ﻿//! 界面状态与纯逻辑：仓库视图、操作类别、对话框状态、分档口径。
 //!
-//! `bucket_of` 是全站唯一的仓库分档口径——侧栏徽标、总览、同步环、
-//! ⌘K 状态点都从这儿取。别在别处另写一套判断。
+//! `bucket_of` 是全站唯一的仓库分档口径——侧栏徽标、总览、⌘K 状态点
+//! 都从这儿取。别在别处另写一套判断。
+//! （原来这里还列着"同步环"：那颗环 2026-10-05 已随用户口径「占地方还难看」下线，
+//! 见 `panels.rs::sync_card` 那句「没有圆环」。**别再去找那个文件**——
+//! `gui/src/sync_ring.rs` 从来没有存在过，环以前是画在 `sync_card` 里的）
 
 // 图标只认这一套：assets 里是完整 lucide，外加品牌 Bird。
 // 早先同时用了 component::IconName 和 assets::IconName——两套的线宽与视觉重量不同，
@@ -21,7 +24,7 @@ use qingbird_core::repos::{self, ActivityDay, ChangeEntry, LangStat};
 use qingbird_core::run_cmd::{self, Slot};
 use qingbird_core::space;
 use qingbird_core::store::{self, CloseAction, RepoEntry};
-use qingbird_core::types::{ForkInfo, RepoStatus};
+use qingbird_core::types::{ForkInfo, RepoStatus, UpdateChanges};
 use std::collections::{HashMap, HashSet};
 
 use crate::history_tab::CommitDelegate;
@@ -206,6 +209,25 @@ pub(crate) struct LogState {
     pub(crate) percent: Option<f32>,
     /// 上次操作的秒级时间戳，0 = 本会话没跑过
     pub(crate) ts: u64,
+    /// **这次拉回来什么**（提交数 / 增删行 / 文件数 + 提交清单）。
+    ///
+    /// ⚠️ core 早就算好了（`sync::pull_changes`），2026-10-08 之前它在这一层
+    /// **一个读者都没有**：`ops.rs` 收尾只读 `ok` / `message` / `used_proxy` /
+    /// `fork` / `backup_branch` 五个字段，`changes` 整条丢掉。
+    /// 与 D73（进度信息断在中间层的字段声明里）同族——**编译器不报、单测不红、
+    /// 抓帧也只是"少了一行"**。加这一格就是把那条断线接上。
+    ///
+    /// **只有成功的拉取才是 `Some`**：Already up to date 时 core 返回 `None`
+    /// （`commits` 与 `diff_stat` 都空），界面那一行跟着整条不出现。
+    /// 会话级、不落盘——措辞是「这次带回」，重启后再说"这次"就是谎话；
+    /// 跨会话那句归 `op_history`（表头那三条档在读它）
+    pub(crate) pulled: Option<UpdateChanges>,
+    /// `pulled` 那一行摊开了没有（「看清单」那颗键的开关）。
+    ///
+    /// 存在这里而不是 `Shell` 上：日志按仓库存，开关也得跟着仓库走，
+    /// 否则在 A 仓展开、切到 B 仓会看到 B 的清单是开着的。
+    /// 新操作重建 `LogState` 时随 `..default()` 自动关掉，不用手写重置
+    pub(crate) pull_open: bool,
 }
 
 /// 没日志时读的兜底。**放在模块级而不是 `impl` 里的 `static`**：
@@ -226,6 +248,8 @@ pub(crate) static LOG_EMPTY: LogState = LogState {
     detail: String::new(),
     percent: None,
     ts: 0,
+    pulled: None,
+    pull_open: false,
 };
 
 /// 磁盘占用卡的状态（只跟随当前选中的仓库）
@@ -527,6 +551,21 @@ pub(crate) struct Shell {
     /// 侧栏当前宽度（px，已夹在 200–360）。拖动结束后由 `on_resize` 写回这里，
     /// 折叠再展开时恢复的就是它。
     pub(crate) sidebar_w: f32,
+    /// **窗口为了放得下这两栏，向右撑出去的那一段**（0 = 从没撑过）。
+    ///
+    /// 只在收起一栏时按原样还回去：加了多少减多少，**用户自己拖过的窗口尺寸不碰**。
+    /// 判据、三条守则与"为什么必须记住这一个数"都在 `shell.rs::ensure_shell_width`
+    pub(crate) shell_grown_w: f32,
+    /// 上一次已经发出去、**还没兑现**的那个窗口宽目标（客户区宽，逻辑 px；
+    /// 撑宽与收窄都记在同一格里）。
+    /// ⚠️ **必须有这一格**：`Window::resize` 在 Windows 侧是 `spawn` 出去的
+    /// `SetWindowPos`（`gpui-pre-windows/window.rs:652-674`），发出去到真正生效
+    /// 中间那一两帧 `window.bounds()` 读到的**还是旧宽** ⇒ 不记目标就会每帧重发一次、
+    /// `shell_grown_w` 被重复累加，收起一栏时把窗口减得比原来还窄。
+    /// ⚠️ **兑现了就要清**（`ensure_shell_width` 开头那两行）：不清的话"同一个目标
+    /// 只发一次"那条守则会把**下一次**该发的挡掉——用户自己把窗口拖窄之后我们
+    /// 该再撑回去，却被上一次的目标钉住。
+    pub(crate) shell_grow_pending: f32,
     /// 侧栏宽度的**代次**。只在 `commit_sidebar_width`（拖拽松手）里自增，
     /// 并且**只用来给弹簧的 id 换个后缀**——见 `shell.rs` 里那段。
     ///
@@ -1336,7 +1375,8 @@ pub(crate) fn bucket_of(s: &RepoStatus) -> Bucket {
 }
 
 /// 分档取色。**全站唯一一份口径**（Q7，2026-10-03 用户拍板），
-/// 侧栏状态点 / 侧栏徽标 / 同步环 / ⌘K 状态点 / 总览统计卡都从这里取。
+/// 侧栏状态点 / 侧栏徽标 / ⌘K 状态点 / 总览统计卡都从这里取
+/// （原来还多一项"同步环"，那颗环 2026-10-05 已下线）。
 ///
 /// | 档位 | 取色 | 理由 |
 /// |---|---|---|

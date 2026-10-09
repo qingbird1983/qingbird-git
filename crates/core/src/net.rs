@@ -326,6 +326,16 @@ pub fn run_local(repo_path: &str, args: &[&str]) -> git::GitOutput {
     git::run_git(repo_path, args, None, LOCAL_TIMEOUT)
 }
 
+/// **收尾必达**那一类本地命令：用户已经按了停止也照样跑完。
+///
+/// 与 `run_local` 的唯一区别就是不受进程级取消标记影响，
+/// 判据与限制都写在 `git::run_essential` 那条注释里
+/// （一句话：**只给"这一步不做完，用户的东西就回不来"的命令用**，
+/// 网络操作与一切可以被打断的活儿照旧走 `run_local`）
+pub fn run_local_essential(repo_path: &str, args: &[&str]) -> git::GitOutput {
+    git::run_essential(repo_path, args, LOCAL_TIMEOUT)
+}
+
 /// 直连与已知可用代理并行赛跑：谁先成功用谁。
 /// 解决直连被墙时长时间挂起、要等满超时才轮到代理重试的问题。
 fn race_direct_vs_proxy(

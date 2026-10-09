@@ -809,6 +809,15 @@ impl CardHeader {
             .when_some(self.note, |r, (text, danger)| {
                 r.child(
                     div()
+                        // ⚠️ **附注必须能缩能截**（2026-10-08）：日志卡把那句状态话
+                        // 从"独占一行"上移到这里之后，附注第一次会带上**长度没上限的
+                        // 内容**（失败原因那句，`op_line` 压过也有几十字）。
+                        // 不给 `min_w_0` 它就不肯缩，右侧那组键会被顶出卡外——
+                        // 而这一行是 `h_flex`，`flex_1` 那个空撑块先被压成 0，
+                        // 症状是"键不见了"，check 与单测都不报。
+                        // 现有八处附注全是短句 ⇒ 这条对它们是空操作
+                        .min_w_0()
+                        .truncate()
                         .text_size(px(fs_sec()))
                         .text_color(if danger { t.colors.danger } else { tier3(t) })
                         .child(text),
@@ -916,6 +925,47 @@ pub(crate) fn progress_readout(
         )
         .child(bar)
         .into_any_element()
+}
+
+/// **同一格位放两样内容：平时那一样占住高度，有事时另一样盖上去。**
+///
+/// ⛔ **不要改成 `if 有事 { A } else { B }` 二选一**——两块内容高度不一样，
+/// 二选一会让这张卡在"操作开始"和"操作结束"各变一次高，下面那张卡跟着上下跳。
+/// 实测数：同步卡里语言技术栈那一格 **83px**（发丝线 y=265 → 卡底边 y=348），
+/// 进度块只有 **27px** ⇒ 一跳就是 56px。这正是"界面抖了一下"那种报告的机制。
+///
+/// 落法：平时那一块**永远照常渲染并占位**，有事时只是被设成 `opacity(0.)`
+/// （`styled.rs:746` 文档原文 "this element **and its children**"，
+/// `div.rs:2538` 真的带进绘制 ⇒ 占位但不画）；盖上来的那块走
+/// `absolute().inset_0()`——**正 inset 不会被丢，丢的是负 inset**（AGENTS 那条），
+/// 仓库里拖放薄纱卡是同一个 idiom 的先例。
+/// ⇒ 附带一个定高方案给不了的好处：**占位那块自然跟随内容长高**
+/// （语言图例折成两行时这一格跟着变高），盖上来的进度块照样铺满，
+/// **不需要写死任何一个高度数**。
+///
+/// ⚠️ 占位那块**不许放可点的东西**：它看不见但仍参与命中测试，
+/// 能点的东西放进来就变成"看不见却能按"。目前唯一调用点（语言技术栈段）
+/// 是纯只读内容 ⇒ 这条成立。以后要往这块加交互，先回来读这句
+pub(crate) fn slot_cover(base: AnyElement, cover: Option<AnyElement>) -> Div {
+    div()
+        .w_full()
+        .flex_shrink_0()
+        .child(
+            div()
+                .w_full()
+                .opacity(if cover.is_some() { 0.0 } else { 1.0 })
+                .child(base),
+        )
+        .when_some(cover, |slot, el| {
+            slot.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .child(el),
+            )
+        })
 }
 
 #[cfg(test)]

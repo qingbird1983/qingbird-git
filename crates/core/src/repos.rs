@@ -268,10 +268,20 @@ pub fn list_dir_items(path: &str) -> Vec<DirItem> {
 }
 
 /// 把非 git 文件夹初始化为仓库：`git init` → 勾选的排除项写进 `.gitignore`
-/// → 初始提交 → 加入管理列表。
+/// → 初始提交 → （`register` 为真时）加入管理列表。
 ///
 /// 排除项只**追加**，不动已有 `.gitignore` 的内容（用户自己的规则不能被覆盖）。
-pub fn init_repo(path: &str, excludes: &[String]) -> Result<RepoEntry, String> {
+///
+/// ⚠️ **`register` 是必填的，不是开关装饰**：这个函数会 `store::save` 用户的
+/// `config.json`，而"初始化一个文件夹"与"把它记到用户的列表里"是两件事。
+/// 2026-10-09 实测：`init_tests` 那三条要建**真的 git 仓库**才能验 `.gitignore`
+/// 与初始提交，于是端到端跑的就是这一个函数 ⇒ 它每跑一次就往用户真实配置里
+/// 塞一条 `C:\Users\…\Temp\qbg-init-` 加进程号的临时仓库，`cargo test` 跑过十几轮之后
+/// 用户列表里躺着 **40 条测试垃圾**（他的真实仓库只有 3 条）。
+/// `cargo check` 零错、184 条单测全绿、令牌闸干净——**没有一闸报这件事**，
+/// 是收尾按 AGENTS 那条「单测跑完要核对它没往真实目录写」比 mtime 才抓到的。
+/// ⇒ 生产调用点传 `true`，测试一律传 `false`；**忘传编译不过**（D78）。
+pub fn init_repo(path: &str, excludes: &[String], register: bool) -> Result<RepoEntry, String> {
     let path = path.trim().to_string();
     let dir = std::path::Path::new(&path);
     if !dir.is_dir() {
@@ -326,7 +336,6 @@ pub fn init_repo(path: &str, excludes: &[String]) -> Result<RepoEntry, String> {
         return Err(format!("{msg}：{}", commit.stderr.trim()));
     }
 
-    let mut cfg = store::load();
     let entry = RepoEntry {
         name: repo_name(&path),
         path: path.clone(),
@@ -334,10 +343,16 @@ pub fn init_repo(path: &str, excludes: &[String]) -> Result<RepoEntry, String> {
         last_used: store::now_secs(),
         ..RepoEntry::default()
     };
-    if !cfg.repos.iter().any(|r| r.path == path) {
-        cfg.repos.push(entry.clone());
+    // **这一句 `store::save` 是全站唯一会因跑单测而改写用户配置的地方**（见函数头）。
+    // 不登记时连 `store::load()` 都不做：读一次配置也要开文件，而那条路径在
+    // 沙箱外，没必要为了让测试拿一个用不上的 cfg 去碰它。
+    if register {
+        let mut cfg = store::load();
+        if !cfg.repos.iter().any(|r| r.path == path) {
+            cfg.repos.push(entry.clone());
+        }
+        store::save(&cfg)?;
     }
-    store::save(&cfg)?;
     Ok(entry)
 }
 
@@ -412,15 +427,26 @@ pub fn touch_repo(path: &str) {
     let _ = with_repo(path, |e| e.last_used = store::now_secs());
 }
 
-/// 改某仓库的某个字段并落盘。仓库不在列表里时返回 None（不改配置）。
+/// 改某仓库的某个字段并落盘。**仓库不在列表里时什么都不写**，
+/// 只把当前列表原样返回。
+///
+/// ⛔ 这一档以前是**无条件 `save`**，而函数自己的注释写着"不改配置"——
+/// 代码与注释两条有一条在说谎，说谎的是代码（2026-10-08 查"一条 core 单测
+/// 每次跑都改写用户真实 `config.json`"时抓出来的）。踩到它的是 `touch_repo`：
+/// 对**没登记过**的仓库跑一次拉取（后台调度器、测试夹具都是这种），
+/// 就会把整份配置原样重写一遍——内容没变，但 mtime 变了、
+/// 用户正开着应用时还会与界面的写互相踩。
+/// 判据与 D78 同族：**"这次要不要落盘"不能靠调用方记得判**，
+/// 得让"没有条目"这条分支本身就走不到写
 fn with_repo<F>(path: &str, f: F) -> Result<Vec<RepoEntry>, String>
 where
     F: FnOnce(&mut RepoEntry),
 {
     let mut cfg: AppConfig = store::load();
-    if let Some(e) = cfg.repos.iter_mut().find(|r| r.path == path) {
-        f(e);
-    }
+    let Some(e) = cfg.repos.iter_mut().find(|r| r.path == path) else {
+        return Ok(cfg.repos);
+    };
+    f(e);
     store::save(&cfg)?;
     Ok(cfg.repos)
 }
@@ -1158,6 +1184,21 @@ mod porcelain_tests {
 mod init_tests {
     use super::*;
 
+    /// **这条闸存在的唯一理由**：下面三条端到端测试要在 `$TEMP` 建**真的 git 仓库**
+    /// 才能验 `.gitignore` 与初始提交，跑的就是生产那颗 `init_repo`——而它末尾会
+    /// `store::save` 用户的 `config.json`。2026-10-09 实测：这条线一直是敞的，
+    /// `cargo test` 跑过十几轮，用户列表里躺着 **40 条 `qbg-init-` 临时仓库**
+    /// （他真实的只有 3 条），而 check 零错、184 条单测全绿、**没有一闸报它**。
+    ///
+    /// 判据取「**跑完之后列表里查不到这一条路径**」，不取「config 的 mtime 没变」：
+    /// 后者要脚本去比 `%APPDATA%`，在测试进程里既做不到并行安全、也容易被跳过。
+    /// ⇒ **末端有没有被写，就直接查末端**（D73 那条判据的写盘版本）。
+    fn assert_not_registered(root: &std::path::Path) {
+        let p = root.to_string_lossy().to_string();
+        let hit = store::load().repos.iter().any(|r| r.path == p);
+        assert!(!hit, "临时仓库被写进了用户的管理列表：{p} ⇒ register 传错了");
+    }
+
     #[test]
     fn dir_items_put_folders_first_and_hide_git() {
         let root = std::env::temp_dir().join(format!("qbg-items-{}", std::process::id()));
@@ -1185,12 +1226,15 @@ mod init_tests {
         let root = std::env::temp_dir().join(format!("qbg-init-bad-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         // 不存在的目录
-        assert_eq!(init_repo(root.to_str().unwrap(), &[]).unwrap_err(), "文件夹不存在");
+        assert_eq!(
+            init_repo(root.to_str().unwrap(), &[], false).unwrap_err(),
+            "文件夹不存在"
+        );
         // 已经是仓库的目录：不能再 init 一次（那会重置已有历史）
         std::fs::create_dir_all(&root).unwrap();
         sh(&root, &["init", "-q"]);
         assert_eq!(
-            init_repo(root.to_str().unwrap(), &[]).unwrap_err(),
+            init_repo(root.to_str().unwrap(), &[], false).unwrap_err(),
             "该文件夹已经是 git 仓库"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -1213,6 +1257,7 @@ mod init_tests {
         match init_repo(
             root.to_str().unwrap(),
             &["node_modules".to_string(), "dist".to_string()],
+            false,
         ) {
             Ok(entry) => {
                 assert!(valid_repo(root.to_str().unwrap()));
@@ -1233,6 +1278,7 @@ mod init_tests {
                     .contains("node_modules"));
             }
         }
+        assert_not_registered(&root);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1246,10 +1292,11 @@ mod init_tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
-        let _ = init_repo(root.to_str().unwrap(), &["dist".to_string()]);
+        let _ = init_repo(root.to_str().unwrap(), &["dist".to_string()], false);
         let gi = std::fs::read_to_string(root.join(".gitignore")).unwrap();
         assert!(gi.starts_with("*.log"), "原有规则要留着：{gi}");
         assert!(gi.contains("dist"));
+        assert_not_registered(&root);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

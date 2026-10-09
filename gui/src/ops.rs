@@ -301,6 +301,15 @@ impl Shell {
                     lg.percent = None;
                     // 网速跟着 percent 一起收：留着就是一句已经过时的谎话
                     lg.detail.clear();
+                    // **这次拉回来什么**（提交数 / 增删行 / 文件数）。
+                    // core 在 `sync::pull_changes` 里算好、填进 `OpResult.changes`，
+                    // 而这一层以前**从来没读过那个字段**（D73 那一族：断点在字段声明
+                    // 与收尾这几行里，不在逻辑里——`cargo check` 零错、core 单测全绿、
+                    // 界面只是答不出"改了啥"）。
+                    // 只在成功时留：失败那几条路径上 core 填的就是 `None`，
+                    // 这里再判一次是防以后有人给失败分支补上 changes
+                    lg.pulled = if result.ok { result.changes.clone() } else { None };
+                    lg.pull_open = false;
                 }
                 // **落进 `op_history`（阶段 16）**：这一句是**跨会话**的。
                 // 没有它的话重启一次，日志卡就写「还没有操作记录」——

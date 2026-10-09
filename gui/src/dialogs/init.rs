@@ -222,7 +222,7 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_executor()
-                .spawn(async move { repos::init_repo(&path, &excludes) })
+                .spawn(async move { repos::init_repo(&path, &excludes, true) })
                 .await;
             let win = this.update(cx, |this, _| this.win).ok();
             this.update(cx, |this, cx| {

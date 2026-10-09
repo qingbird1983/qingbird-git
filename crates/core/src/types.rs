@@ -36,11 +36,36 @@ pub struct ProgressEvent {
     pub to_log: bool,
 }
 
+/// 一次拉取带回的变更量：改了几个文件、加了多少行、删了多少行。
+///
+/// ⚠️ **这三个数从 `git diff --numstat` 的制表符数字列聚合，不从 `--stat`
+/// 那句「4 files changed, 5 insertions(+), 2 deletions(-)」里抠**：
+/// 那句是给人看的措辞，会随 git 版本与语言环境变，而「前两列是数字」这个结构
+/// 不会。与 `do_pull` 里"分叉用 ahead/behind 判、不猜 stderr 措辞"是同一条纪律
+#[derive(Serialize, Clone, Copy, Default, Debug, PartialEq)]
+pub struct DiffTotals {
+    pub files: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+}
+
+impl DiffTotals {
+    /// 增删行数都是 0：只有二进制文件被换掉（`-\t-`）、或整趟没改动行数时成立。
+    /// 界面据此**退成不带 `+A −B` 的那句**，而不是写「+0 −0」这种假精确
+    pub fn has_line_counts(&self) -> bool {
+        self.insertions > 0 || self.deletions > 0
+    }
+}
+
 /// 拉取成功后的更新内容：新拉下来的提交与文件变更摘要
 #[derive(Serialize, Clone)]
 pub struct UpdateChanges {
     pub commits: Vec<String>,
     pub diff_stat: String,
+    /// 数字摘要（界面上那句「这次带回 3 个提交 +120 −30，5 个文件」读它）。
+    /// 与 `diff_stat` 并存不冗余：那一份是**逐文件的文本图**（自动同步的通知读它），
+    /// 这一份是**三个数**（拉取结果那一行读它）
+    pub totals: DiffTotals,
 }
 
 /// 分叉信息：本地与云端各自都有对方没有的提交（`ahead > 0 && behind > 0`）。

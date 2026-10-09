@@ -256,7 +256,8 @@ impl Shell {
     /// **这条代价是有意接受的**——刚跑完时屏幕上就有完整输出与结论，
     /// 几分钟后这一行只需要回答"上次成没成"。见路线表阶段 16 的决策记录。
     ///
-    /// ⚠️ 摆的位置是 **20px 高的一行**（`log.rs::log_status_row`，超出部分截断），
+    /// ⚠️ 摆的位置是**日志卡表头那句附注**（2026-10-08 之前是它下面那一整行，
+    /// 行高 20px；现在并进行「日志」标题后面，超出部分照样截断），
     /// 所以失败原因还要 `one_line` 压过——git 的报错常带 stderr 原文
     pub(crate) fn op_log_line(&self, path: &str) -> String {
         let Some(o) = self.op_logs.get(path) else {
