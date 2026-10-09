@@ -69,41 +69,61 @@ def find_window(pid, timeout=25.0):
 
 
 def ensure_focus(hwnd):
-    """把窗口弄到前台并**确认**它真的在前台。
+    """把窗口弄到前台并**确认**它真的在前台。确认不了就返回 `False`，
+    **绝不为了"试试能不能激活"而往桌面上发一次点击**。
 
-    AGENTS.md 那条纪律：窗口未获焦时第一击只用于激活窗口。`SetForegroundWindow`
-    不保证立刻生效，所以这里轮询确认；确认不了就空点一下再确认。
+    AGENTS.md 那条纪律：窗口未获焦时第一击只用于激活窗口——但那一击是按**屏幕
+    坐标**派发的，本应用不在前台时它就落在用户当时的前台窗口上（2026-10-09 实测：
+    前台锁在编辑器手里，`SetForegroundWindow` 连拒三轮，而旧版这里紧接着
+    `SetCursorPos` + 空点击"把激活吃掉"，等于往用户的工作界面上乱点一下）。
+
+    四档代价递增、每档都复验 `GetForegroundWindow`：
+    ① 直接 `SetForegroundWindow`；② **按一次 ALT 再试**——Windows 的前台锁在
+    "刚有按键事件"之后会松开，这是公认的那把钥匙；③ 最小化 → 还原（还原必然带前台）；
+    ④ `SwitchToThisWindow`（绕过锁的最后一招，废弃 API 但仍在）。
     """
-    for _ in range(3):
+    for _ in range(2):
         user32.SetForegroundWindow(hwnd)
         time.sleep(0.25)
         if user32.GetForegroundWindow() == hwnd:
             return True
-    # 退一步：用一次空点击把激活吃掉
-    pt = wt.POINT(5, 400)
-    user32.ClientToScreen(hwnd, ctypes.byref(pt))
-    user32.SetCursorPos(pt.x, pt.y)
-    time.sleep(0.1)
     for _ in range(2):
-        user32.mouse_event(0x0002, 0, 0, 0, 0)
-        time.sleep(0.05)
-        user32.mouse_event(0x0004, 0, 0, 0, 0)
-        time.sleep(0.15)
-    time.sleep(0.4)
+        user32.keybd_event(0x12, 0, 0, 0)          # Alt down
+        user32.keybd_event(0x12, 0, 0x0002, 0)     # Alt up
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.3)
+        if user32.GetForegroundWindow() == hwnd:
+            return True
+    user32.ShowWindow(hwnd, 6)                     # SW_MINIMIZE
+    time.sleep(0.3)
+    user32.ShowWindow(hwnd, 9)                     # SW_RESTORE
+    time.sleep(0.35)
+    if user32.GetForegroundWindow() == hwnd:
+        return True
+    user32.SwitchToThisWindow(hwnd, True)
+    time.sleep(0.35)
     return user32.GetForegroundWindow() == hwnd
 
 
 def click(hwnd, x, y, settle=0.7):
     """单击。**不要连点两下**——连着两次 down/up 会被当成双击，
-    而且第一次的抬起常常落在窗口还没激活的时段里，白点。"""
-    if user32.GetForegroundWindow() != hwnd:
-        ensure_focus(hwnd)
+    而且第一次的抬起常常落在窗口还没激活的时段里，白点。
+
+    ⛔ 动手之前先确认前台是本应用，**确认不了就抛错**：`SetCursorPos` +
+    `mouse_event` 按屏幕坐标派发，前台是别人的窗口时这一击就点到别人身上。
+    "点不到"必须表现为报错，不能表现为"点到用户正在用的窗口上"。
+    """
+    if user32.GetForegroundWindow() != hwnd and not ensure_focus(hwnd):
+        raise RuntimeError(
+            "click(%s, %s) 中止：拿不到前台（hwnd=%s），不动鼠标" % (x, y, hwnd))
     pt = wt.POINT(int(x), int(y))
     user32.ClientToScreen(hwnd, ctypes.byref(pt))
     user32.SetCursorPos(pt.x, pt.y)
     time.sleep(0.2)
     if user32.GetForegroundWindow() != hwnd:
-        ensure_focus(hwnd)
+        if not ensure_focus(hwnd):
+            raise RuntimeError(
+                "click(%s, %s) 中止：移动光标后前台被抢走，不动鼠标" % (x, y))
         user32.SetCursorPos(pt.x, pt.y)
         time.sleep(0.2)
     user32.mouse_event(0x0002, 0, 0, 0, 0)

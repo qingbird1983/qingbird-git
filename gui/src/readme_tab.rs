@@ -30,11 +30,11 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{
     Empty, EmptyContent, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
 };
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::{Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, AnyElement, Context, Div, IntoElement, ParentElement, SharedString,
+    div, px, AnyElement, Context, Div, HighlightStyle, IntoElement, ParentElement, SharedString,
     Styled, Window,
 };
 use qingbird_core::repos;
@@ -45,6 +45,43 @@ use crate::widgets::{ghost_variant, skeleton_bar, vdivider, CardHeader};
 
 /// 排版区左右留白。README 的表格常常比正文宽，两边各留一档才不顶到边
 const README_PAD: f32 = 20.0;
+
+/// README 正文的样式覆盖：**只改行内代码那一格的颜色，其余全部交回主题**。
+///
+/// ⛔ 成因（2026-10-09 用户报「文档里那些高亮字底色接近黑、字根本看不清」）：
+/// 基座把行内代码的底色写成 `theme.accent`（`gpui-component/text/mod.rs:59`，
+/// 它自己的单测还钉着这条）。那是 shadcn 的 token 语义——`accent` 在官方配色里是
+/// **一档浅灰**，用途就是悬停面与小胶囊。而我们 v4 把 `accent.background` 定成了
+/// 品牌深青 #0E4F55（深色主题是亮青 #3FB9C4）——**18 处、10 个文件**在读它
+/// （侧栏选中行、总览徽标与波形、拖放描边、空间页色带、设置页…），
+/// 改它等于改半个界面。⇒ 同一个 token 两套语义，撞在行内代码这一格上：
+/// **深底配墨字，字被埋了**。
+///
+/// 为什么在调用侧覆盖、不去动 token：这是"上游默认值对我们 token 语义的假设"，
+/// 动 token 影响面大得多，而这一格只有 README 一处需要不一样。
+///
+/// ⚠️ 组件层 `TextView::style(..)` 是**叠加式**的（`text/compat.rs:313
+/// resolve_component_style` 把传进去的每一项 `refine` 到主题推出来的那份上），
+/// 所以这里只填 `inline_code` 两个字段：表格圆角、代码块底色、段距都还是主题那份。
+/// 标题档看着像会被换掉——组件层那把尺与基座内置的（`node.rs:3326`）是同一组数
+/// （2 / 1.5 / 1.25 / 1.125 / 1 / 1 rem @ 14px）。
+///
+/// 上面那句"只动胶囊"不是推断，是量出来的（2026-10-09，沙箱夹具同一份 README
+/// 改前/改后各一帧）：内容区 #0E4F55 的像素 **4482 → 141**（剩下那 141 颗是正文
+/// 链接的字），`card-sunken` 档 **+4236**；逐行 diff 只落在 **4 段**、每段 15px 高，
+/// 正好是四行带行内代码的位置（正文那句 / 表格两格 / 列表那行），标题、表格线与
+/// 文字、代码块、段距**逐像素相同**。深色主题同一份复验：胶囊底 #101E22 配
+/// #E6EFF0 字，accent 档同样只剩链接那 136 px。
+///
+/// 底色取 v4 的 `card-sunken`（`muted.background`，与代码块同一档），字色取 `foreground`。
+/// ⚠️ 别拿 `popover.background` 当"浅一档"：两条主题里它都等于卡面白，铺上去是空操作。
+fn readme_text_style(t: &Theme) -> TextViewStyle {
+    TextViewStyle::default().inline_code(HighlightStyle {
+        background_color: Some(t.colors.muted),
+        color: Some(t.colors.foreground),
+        ..Default::default()
+    })
+}
 
 /// 一条 README 里的链接要点去哪
 #[derive(Debug, PartialEq, Eq)]
@@ -221,6 +258,8 @@ impl Shell {
                     // 上调 `reveal_range`
                     .child(
                         TextView::new(&self.readme_state)
+                            // 行内代码胶囊的底色/字色覆盖，理由全在 `readme_text_style`
+                            .style(readme_text_style(t))
                             .w_full()
                             .h_full()
                             .selectable(true)

@@ -478,6 +478,7 @@ R5 第一版把 `↑ ↓ → ←` 也算"文字冒充图标"，于是"到「设�
 | `GLYPH` | `tokens.rs`：40 / 12 / 20 | ✅ 已落（31.3 `widgets::glyph`，用在总览四张统计卡与设置页两栏盒的图标位） |
 | `FORM_LABEL_W` | `tokens.rs` = **112** | ✅ 已落（31.5 `widgets::FormRows` 的标签列）。**只有 `FormRows` 读它**；推导写在常量注释里：最长那条标签「GitHub 令牌」约 95px，折一行整页行高就齐不了 |
 | `ok-wash` | `tokens::green_bg(t)`（浅 `#D6F0DD` / 深 `#10281A`） | ✅ 已落（31.5「即时生效」胶囊与「已改 N 项」那类状态字）。四色 wash 到此补齐：`blue_bg` / `orange_bg` / `red_bg` / `green_bg` |
+| markdown **行内代码胶囊**（README 正文里的 `code`） | `card-sunken` 底 + `ink` 字，**在调用侧 `TextView::style()` 覆盖**（`readme_tab.rs::readme_text_style`） | ⛔ 基座默认把这一格画成 `theme.accent`（shadcn 语义里那是浅灰），而我们的 `accent` 是 `brand` 本体（18 处、10 文件在读）⇒ **深底埋字**。动 token 影响半个界面，所以覆盖在 README 这一处。实测见路线表 31.4 补二十六⑤ |
 | 时长 / 缓动 / 位移 | **直接用 `cx.theme().motion_tokens()`**（`theme/mod.rs:496`，已核实） | ✅ 不落新常量。⚠️ 现在 `gui/src` 里那 3 处 `Duration::from_millis` **是轮询节奏不是时长档**，别当"待清理" |
 | `R_SM` / `R_MD` | `tokens.rs` 常量 4 / 6 | ✅ 小控件不跟主题（保持常量） |
 | `hover_face()` | **待新增** `tokens.rs` | ⏳ 未落地：gpui 裸 `Div` 没有 `.hover()` 入口，要靠 `on_hover` 记状态 ⇒ 阶段 31.4 |
