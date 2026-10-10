@@ -328,7 +328,7 @@ pub fn run_local(repo_path: &str, args: &[&str]) -> git::GitOutput {
 
 /// **收尾必达**那一类本地命令：用户已经按了停止也照样跑完。
 ///
-/// 与 `run_local` 的唯一区别就是不受进程级取消标记影响，
+/// 与 `run_local` 的唯一区别就是不受**那个仓库的**取消标记影响，
 /// 判据与限制都写在 `git::run_essential` 那条注释里
 /// （一句话：**只给"这一步不做完，用户的东西就回不来"的命令用**，
 /// 网络操作与一切可以被打断的活儿照旧走 `run_local`）
@@ -524,7 +524,14 @@ pub fn run_net_op(
     on_stage: Option<&dyn Fn(&str)>,
     mode: NetMode,
 ) -> (git::GitOutput, Option<String>) {
-    git::clear_cancel();
+    // ⛔ **这里原来有一句 `git::clear_cancel()`，32-8 把它搬走了**，而且搬走它不是整理：
+    // 那个位置等于把"清掉上一次残留的取消意图"外包给"这条命令恰好走网络层"。
+    // 而 `do_pull` 走到这里**之前**要跑 `read_status` + `rev-parse` + `stash push`
+    // 三条本地命令 ⇒ 用户按过一次停止之后标记一直留着，每一次新拉取都死在
+    // `stash push` 上、而那一步失败就 `return`、**永远到不了这个会清标记的地方**。
+    // 症状是"这个仓库再也拉不动了，每次都显示拉取已取消"，重启应用就好——
+    // 典型的只问"有没有报错"查不到（路线表 32-8 调研账②）。
+    // 现在清除只发生在「拿到这个仓库的忙槽」那一刻：`sync::try_begin_op`。
     // 强制 IPv4：IPv6 被禁用/不可用的机器上，git 会先尝试 AAAA 连接白白浪费时间
     let mut owned_args: Vec<&str> = args.to_vec();
     owned_args.insert(1, "--ipv4");

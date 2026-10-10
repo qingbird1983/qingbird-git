@@ -1,6 +1,7 @@
+use std::collections::HashSet;
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 // GUI 程序派生控制台子进程（git）时 Windows 会弹出一个立即消失的终端窗口，
@@ -10,30 +11,96 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-/// 用户取消标记：置位后所有运行中的 git 子进程在下个轮询周期（≤50ms）被终止。
-/// 同一时刻 UI 只允许一个忙操作，全局标记足够。
-static CANCELLED: AtomicBool = AtomicBool::new(false);
+/// 用户取消标记：**每个仓库各一份**。置位后那个仓库正在跑的 git 子进程在下个
+/// 轮询周期（≤50ms）被整树终止，**别的仓库不受影响**。
+///
+/// ⚠️ 它以前是一颗进程级 `AtomicBool`，那时**够用**是因为 `sync::OP_LOCK` 也只放
+/// 一个忙操作——两件事各自都对，错在它们共用同一个「全应用只有一个」的假设。
+/// 路线表 32-8 把锁下沉到每仓库之后，全局标记就变成「点 A 的停止把 B 正在跑的
+/// 拉取一起杀掉」，而且**它不报错**：两边都正常返回，只是 B 那句变成"已取消"，
+/// 谁都不知道是谁干的。⇒ 撤销那颗假设必须连着撤这一颗，少撤一半就是这种形状。
+static CANCELLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-/// 请求取消当前正在进行的 git 操作
-pub fn request_cancel() {
-    CANCELLED.store(true, Ordering::SeqCst);
+fn cancelled_set() -> &'static Mutex<HashSet<String>> {
+    CANCELLED.get_or_init(Default::default)
 }
 
-/// 新操作开始前清除取消标记
-pub fn clear_cancel() {
-    CANCELLED.store(false, Ordering::SeqCst);
+/// 仓库路径的**归一键**：取消标记表（本文件）与忙锁表（`sync::SLOTS`）共用这一颗。
+///
+/// ⛔ **不许有第二份归一**。两表都以路径为键、又必须指向同一个仓库，各写一份的话
+/// 最坏情况是"锁按一种写法分、取消按另一种写法打"⇒ **A 拿到的槽锁不住 B，
+/// 而 B 的停止键按下去什么都不发生**——两边都不报错，只有帧上看得见。
+///
+/// 归一管的是三件事：反斜杠与正斜杠、结尾有没有斜杠、盘符大小写。同一仓库从列表、
+/// 从缓存、从拖放各来一种写法是常态（界面上它们长得一样）。
+///
+/// `to_lowercase` 只在 Windows 语义下成立（那边路径大小写不敏感）。非 Windows 上
+/// 大小写是路径的一部分，小写化会把两个真不同的目录并成一个键——本项目是 Windows
+/// 桌面工具，**把这条边界写住，而不是假装它不存在**。
+pub(crate) fn repo_key(repo_path: &str) -> String {
+    let mut key = repo_path.trim().replace('\\', "/");
+    while key.len() > 1 && key.ends_with('/') {
+        key.pop();
+    }
+    #[cfg(windows)]
+    {
+        key = key.to_lowercase();
+    }
+    key
 }
 
-fn is_cancelled() -> bool {
-    CANCELLED.load(Ordering::SeqCst)
+/// 锁中毒只发生在别的线程 panic 时，而这个集合里只放字符串、panic 不来自这里。
+/// 取 `into_inner` 而不是丢掉：中毒之后**照样该认这个标记**——
+/// "取消"宁可多认一次，也不许在用户按了停止之后什么都不发生。
+fn with_cancelled<R>(f: impl FnOnce(&mut HashSet<String>) -> R) -> R {
+    let mut set = cancelled_set().lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut set)
+}
+
+/// 请求取消**这一个仓库**正在进行的 git 操作。
+///
+/// 参数是仓库路径不是"当前那一个"：core 不认识界面，不知道用户选中的是谁，
+/// 所以调用方必须把"要停的是哪一颗"说出来（D78：让"停错仓库"没有选项）。
+pub fn request_cancel_for(repo_path: &str) {
+    with_cancelled(|set| {
+        set.insert(repo_key(repo_path));
+    });
+}
+
+/// 清掉**这一个仓库**的取消标记。
+///
+/// ⛔ **调用时机只在「一次操作刚拿到它自己那把锁」那一刻**（`sync::begin_user_op` /
+/// `try_begin_op` 内部），别学以前那样放在 `run_net_op` 开头。那个位置错过一次事故：
+/// 它等于把"清除残留取消意图"外包给"这条命令恰好走网络层"，而 `do_pull` 在
+/// `run_net_op` **之前**要跑 `read_status` + `rev-parse` + `stash push` 三条本地命令
+/// ⇒ 用户按过一次停止之后，标记一直留着，**每一次新拉取都在 `stash push` 上被上一次
+/// 的取消杀掉**，而那一步失败就 `return`、永远走不到会清标记的 `run_net_op`。
+/// 症状是"这个仓库再也拉不动了，每次都显示拉取已取消"，而重启应用就好了——
+/// 典型的只在看"有没有报错"时查不到（路线表 32-8 调研账②）。
+/// 放在入口之后：拿到锁 ⇒ 同仓库没有别人在跑 ⇒ 清的只可能是上一次的残留。
+pub fn clear_cancel_for(repo_path: &str) {
+    with_cancelled(|set| {
+        set.remove(&repo_key(repo_path));
+    });
+}
+
+/// 这个仓库此刻是不是被要求取消
+fn is_cancelled_for(repo_path: &str) -> bool {
+    with_cancelled(|set| set.contains(&repo_key(repo_path)))
 }
 
 /// 测试用的"别和取消测试同时派生 git"读写锁。
 ///
-/// `CANCELLED` 是进程级全局标记（生产环境同一时刻只允许一个忙操作，这样最简单），
-/// 但 `cargo test` 默认并行：取消测试一置位，别的测试正在跑的 git 子进程会被
-/// 整树终止，表现为"没有退出码、stderr 为空"的诡异失败——看起来像 git 挂了，
-/// 其实是被隔壁测试连坐。所以约定：取消测试持写锁独占，其余会派生 git 的测试持读锁。
+/// ⚠️ **路线表 32-8 之后它挡的还是同一件事，但成因窄了一圈**：取消标记已经从
+/// 进程级改成按仓库，所以**两个各用自己那份 `$TEMP` 仓库的测试从此不再连坐**。
+/// 它仍然必须留着，因为剩下的那一半没变：**同一份仓库路径被多条用例共用**时
+/// （`sync.rs` 那组拉取用例都在同一个 fixture 上），取消测试一置位，隔壁正在
+/// 跑的 git 子进程照样被整树终止，表现为"没有退出码、stderr 为空"的诡异失败——
+/// 看起来像 git 挂了，其实是被隔壁测试连坐。所以约定：取消测试持写锁独占，
+/// 其余会派生 git 的测试持读锁。
+///
+/// 判据：**「标记按谁分」决定「谁会被连坐」，不决定「有没有连坐」**。
+/// 把标记拆细就顺手删掉这把锁，等于把"共用路径的那几条"暴露在红一下好一下里。
 #[cfg(test)]
 pub(crate) static GIT_TEST_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
@@ -182,8 +249,8 @@ pub fn run_git_auth(
 /// 无论拉取成功、失败还是被取消，**都得把 `stash pop` 跑掉**——
 /// 那是用户没提交的文件，留在 stash 里就是"东西不见了"。
 ///
-/// ⚠️ 走普通 `run_local` 会被**进程级取消标记**带倒：轮询每 50ms 查一次
-/// `is_cancelled()`（`git.rs` 里那个 `cancelled` 分支），而用户点「停止」时
+/// ⚠️ 走普通 `run_local` 会被**那个仓库的取消标记**带倒：轮询每 50ms 查一次
+/// `is_cancelled_for(repo_path)`（`git.rs` 里那个 `cancelled` 分支），而用户点「停止」时
 /// 标记早就置位了 ⇒ 这条 pop 在第一个周期就被整树杀掉 ⇒
 /// **文件留在 stash 里，界面还说"拉取完成"**
 /// （2026-10-08 实测坐实，路线表 31.4 补二十一）。
@@ -224,7 +291,7 @@ fn run_git_inner(
     git_config: &[String],
     ssh_command: Option<&str>,
     stdin_data: Option<&[u8]>,
-    // false = 这一步**不受进程级取消标记影响**（只有 `run_essential` 传）。
+    // false = 这一步**不受那个仓库的取消标记影响**（只有 `run_essential` 传）。
     // ⚠️ 它是参数不是"调用方自己记得判"：新加一条收尾必达的命令时，
     // 少传一个参数**编译不过**（D78 那条：让"忘"没有选项）
     cancellable: bool,
@@ -357,7 +424,7 @@ fn run_git_inner(
                 if got_line {
                     last_line = Instant::now();
                 }
-                if cancellable && is_cancelled() {
+                if cancellable && is_cancelled_for(repo_path) {
                     terminate_job_tree(job_handle);
                     let _ = child.kill();
                     let _ = child.wait();
@@ -511,11 +578,14 @@ mod tests {
 
     #[test]
     fn cancel_kills_running_git() {
-        // 取消是整个进程的全局状态，跑这段时必须独占，否则会杀掉别的测试的 git
+        // 标记从 32-8 起按仓库分，而这两条用例都打在 `.` 这个地址上
+        // （`ls-remote` 不需要真仓库，只要有个目录给 `-C` 就行）⇒ 共用同一个键的
+        // 就是它们俩，仍按老约定持写锁独占。别的用例各用自己那份 `$TEMP` 绝对路径，
+        // **从此不再被这里连坐**——那才是这次下沉真正买到的东西
         let _exclusive = GIT_TEST_LOCK
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        clear_cancel();
+        clear_cancel_for(".");
         let (url, listener) = hanging_url();
         hold_the_connection(listener);
         let t = std::thread::spawn(move || {
@@ -530,9 +600,9 @@ mod tests {
             )
         });
         std::thread::sleep(Duration::from_millis(400));
-        request_cancel();
+        request_cancel_for(".");
         let out = t.join().unwrap();
-        clear_cancel();
+        clear_cancel_for(".");
         assert!(!out.success);
         assert!(!out.timed_out);
         assert!(out.stderr.contains(CANCELLED_MSG), "stderr = {}", out.stderr);
@@ -550,13 +620,13 @@ mod tests {
     ///
     /// "必然挂着"那条命令由 `hanging_url()` 给（本机监听、accept 之后不回话），
     /// 不再是黑洞地址——理由写在 `hanging_url()` 那儿。两趟都在 50ms 量级收手。
-    /// 整段持写锁独占——它会动那个**进程级**标记
+    /// 整段持写锁独占——它会动 `.` 这个地址上的取消标记，与上面那条共用同一个键
     #[test]
     fn an_essential_command_ignores_the_cancel_flag() {
         let _exclusive = GIT_TEST_LOCK
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        request_cancel(); // 用户已经按了停止
+        request_cancel_for("."); // 用户已经按了停止
 
         // 夹具同一个：`essential` 那半条要的是"1ms 超时到的时候命令还在跑"，
         // 用黑洞地址时这条靠的是网络栈的行为，本机一改（2026-10-09 就是 0ms 拒绝）
@@ -568,7 +638,7 @@ mod tests {
         // 对照那半条**先跑**：它依赖标记还置着。两趟都跑完再清、再断言，
         // 免得断言 panic 把标记留在置位状态去连坐别的测试
         let normal = run_git(".", &black_hole, None, Duration::from_secs(5));
-        clear_cancel();
+        clear_cancel_for(".");
 
         assert!(
             essential.timed_out,
@@ -585,6 +655,97 @@ mod tests {
             "普通命令在标记置位时**没**被取消 ⇒ 上面那半条测的其实是『取消整个坏了』：{}",
             normal.stderr
         );
+    }
+
+    /// 取消打在 A 上，**B 那一条必须活到它自己的超时**（路线表 32-8 的全部意义）。
+    ///
+    /// 判据取**两条退出分支互斥**，手法照上面 essential 那一条：轮询里先查取消、
+    /// 后查超时，所以给 B 一个 1.5 秒超时 + 一条必然挂着的命令，就能读出它走的哪条分支：
+    ///   · 正确（每个仓库各记一份）⇒ B `timed_out = true`
+    ///   · 错（退回一颗全局标记）⇒ B 在 400ms 就被整树杀掉，`stderr` 是"已取消"
+    /// **不能只断言"B 跑成功了"**：短命令在第一个 50ms 轮询之前就返回了，
+    /// 那种测试变异了也不会红（AGENTS：只判"有没有报错"的自查拦不住任何东西）。
+    ///
+    /// 两个地址各要一个自己的挂起夹具——端口不同。共用一个监听的话，
+    /// A 与 B 连的是同一条连接，"互不影响"这件事根本没被分开
+    #[test]
+    fn cancelling_one_repo_leaves_the_other_one_running() {
+        // 读锁就够：这条只动它自己那两个键。以前它必须跟着写锁独占，
+        // 因为一颗进程级标记会把隔壁测试的 git 一起杀掉——**那正是这次拆掉的东西**
+        let _shared = GIT_TEST_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join("qbg-cancel-two-repos");
+        std::fs::create_dir_all(&root).expect("临时目录建不出来，这条没有夹具");
+        // `-C` 只要一个**存在**的目录：`ls-remote` 问的是远端，不需要本地是仓库
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let a = a.to_string_lossy().to_string();
+        let b = b.to_string_lossy().to_string();
+
+        let (url_a, l_a) = hanging_url();
+        hold_the_connection(l_a);
+        let (url_b, l_b) = hanging_url();
+        hold_the_connection(l_b);
+
+        let ta = {
+            let (path, url) = (a.clone(), url_a.clone());
+            std::thread::spawn(move || {
+                run_git(&path, &["ls-remote", url.as_str()], None, Duration::from_secs(30))
+            })
+        };
+        let tb = {
+            let (path, url) = (b.clone(), url_b.clone());
+            std::thread::spawn(move || {
+                run_git(&path, &["ls-remote", url.as_str()], None, Duration::from_millis(1500))
+            })
+        };
+
+        std::thread::sleep(Duration::from_millis(400));
+        request_cancel_for(&a);
+        let oa = ta.join().expect("A 那条线程该回来");
+        let ob = tb.join().expect("B 那条线程该回来");
+        clear_cancel_for(&a);
+        clear_cancel_for(&b);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            oa.stderr.contains(CANCELLED_MSG),
+            "A 该被取消，实际 stderr = {}",
+            oa.stderr
+        );
+        assert!(
+            ob.timed_out,
+            "B 被 A 的取消带倒了：它本该走自己那条超时分支。stderr = {}",
+            ob.stderr
+        );
+        assert!(
+            !ob.stderr.contains(CANCELLED_MSG),
+            "B 读到了 A 的取消标记 ⇒ 标记还是全局的一颗：{}",
+            ob.stderr
+        );
+    }
+
+    /// 归一键：同一颗仓库的三种写法必须并成一个串。
+    ///
+    /// 这条单测的是**键**，不是行为——行为由上面那条与 `sync` 那两条负责。
+    /// 分开是因为症状不同：键没归一不会出现"测试红"，出现的是
+    /// 「停止按下去没反应」和「同一仓库两个槽、真的并发写同一个 `.git`」
+    #[test]
+    fn one_path_three_spellings_is_one_key() {
+        let base = repo_key("D:\\Work\\Repo");
+        assert_eq!(base, repo_key("D:/Work/Repo"));
+        assert_eq!(base, repo_key("  D:/Work/Repo/  "));
+        // 只有 Windows 才把大小写当同一颗仓库，所以这一档跟着 cfg 走：
+        // 在会区分大小写的那个平台上把它并起来是**错的**，不许悄悄钉进同一条断言
+        #[cfg(windows)]
+        assert_eq!(base, repo_key("d:\\work\\repo"));
+        // 盘根是个例外：`D:\` 与 `D:` 归一之后必须仍是同一个键，
+        // 而 `D:` 不能被削成空串（那是"所有仓库共用一个键"的那种事故）
+        assert_eq!(repo_key("D:\\"), repo_key("D:"));
+        assert!(!repo_key("D:\\").is_empty());
     }
 
     #[test]

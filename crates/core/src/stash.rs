@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::net::run_local;
 use crate::repos::read_status;
-use crate::sync::begin_user_op;
+use crate::sync::{begin_user_op, BUSY_MSG};
 use crate::types::{combined, OpResult};
 
 /// 自动暂存的消息**前缀**——全仓唯一出处。
@@ -221,16 +221,16 @@ fn first_reason(out: &crate::git::GitOutput) -> String {
         .to_string()
 }
 
-/// 取回第 `index` 条。**用户入口**：先拿操作锁，再交给 [`do_apply`]。
+/// 取回第 `index` 条。**用户入口**：先拿这个仓库的忙槽，再交给 [`do_apply`]。
 ///
-/// 分工照 `pull_repo` / `do_pull` 那一套：**锁只在"用户点出来的那一条路"上**，
-/// 无锁的那一半才是可测的。为什么值得多一层：`begin_user_op` 撞锁时会先
-/// `git::request_cancel()` 再等十秒，测试里撞上它不只这条会红，
-/// **正在并行跑的其他 git 用例会被同一个标记一起带倒**（表现为"没有退出码、
-/// stderr 为空"那种查不到的 flaky）
+/// 分工照 `pull_repo` / `do_pull` 那一套：**槽只在"用户点出来的那一条路"上**，
+/// 无槽的那一半才是可测的。以前多这一层还有个理由：`begin_user_op` 撞锁时会
+/// `git::request_cancel()` 打一个**进程级**标记，测试里撞上它不只这条会红，
+/// 并行跑的其他 git 用例被同一个标记一起带倒。32-8 之后取消按仓库分，
+/// 那条连坐只剩"共用同一个路径的用例"——所以 `GIT_TEST_LOCK` 仍然留着
 pub fn apply_one(repo_path: &str, index: u32, expect: &str) -> OpResult {
-    let Some(_guard) = begin_user_op() else {
-        return OpResult::err("有操作正在进行，请稍后再取回".into(), String::new());
+    let Some(_guard) = begin_user_op(repo_path) else {
+        return OpResult::err(BUSY_MSG.into(), String::new());
     };
     do_apply(repo_path, index, expect)
 }
@@ -271,8 +271,8 @@ fn do_apply(repo_path: &str, index: u32, expect: &str) -> OpResult {
 /// **不可逆**，所以界面上必须二次确认并打出 `entry.subject` 原文
 /// （确认框在 `gui/src/dialogs/stash.rs`，这一层只管执行与身份比对）。
 pub fn drop_one(repo_path: &str, index: u32, expect: &str) -> OpResult {
-    let Some(_guard) = begin_user_op() else {
-        return OpResult::err("有操作正在进行，请稍后再丢".into(), String::new());
+    let Some(_guard) = begin_user_op(repo_path) else {
+        return OpResult::err(BUSY_MSG.into(), String::new());
     };
     do_drop(repo_path, index, expect)
 }
@@ -421,7 +421,9 @@ mod tests {
     struct Fixture {
         root: PathBuf,
         work: PathBuf,
-        /// 持到测试结束：这些用例都在派生 git，不能和取消测试（全局 CANCELLED）并行
+        /// 持到测试结束：这些用例都在派生 git。⚠️ 32-8 之后取消标记按仓库带地址，
+        /// 而每个夹具各用自己那份 `qbg-stash-{pid}-{n}` ⇒ **隔壁的取消测试杀不到这里**，
+        /// 这把读锁留着是为了让"会动 `.` 那两条"（`git.rs`）仍然与它们错开
         _git_lock: std::sync::RwLockReadGuard<'static, ()>,
     }
 
@@ -555,5 +557,66 @@ mod tests {
         // 拿着旧序号点第二条会动到别的东西——而 drop 不可逆
         assert_eq!(after[0].index, 0);
         assert_eq!(after[0].note, MSG_PULL);
+    }
+
+    /// 一条**必然挂住**的 git 命令（连本机那个不回话的监听）。
+    /// 用于"取消标记到底杀不杀得动人"这种必须跨过 50ms 轮询才谈得上判读的场合
+    fn hanging(path: &str, url: &str, timeout: std::time::Duration) -> git::GitOutput {
+        git::run_git(path, &["ls-remote", url], None, timeout)
+    }
+
+    /// ⛔ **上一次按停留下的取消标记，不许把下一次操作一起卡死**（路线表 32-8 调研账②）。
+    ///
+    /// 这条不是假想的防御，是查实时撞出来的真实事故形状。清除原来写在
+    /// `net::run_net_op` 开头，于是"清掉残留的取消意图"被**外包给"这条命令恰好
+    /// 走网络层"**。而拉取走到网络层**之前**要跑三条本地命令（`read_status`、
+    /// `rev-parse`、`stash push`）⇒ 用户按过一次停止之后标记一直立着，
+    /// 每一次新拉取都死在 `stash push`，而那步一失败就 `return`、
+    /// **永远走不到那个清除点**。症状是「这个仓库再也拉不动了，每次都显示
+    /// 拉取已取消」，而重启应用就好了——拿"有没有报错"当判据的自查零证明力。
+    ///
+    /// ⚠️ 判据**不能拿一条几十毫秒的短命令跑**（比如真的 `stash apply`）：
+    /// `run_git_inner` 的轮询是 `try_wait` 优先，命令在第一个 50ms 之前就返回了
+    /// ⇒ 一次取消都不会查 ⇒ 把入口那句清除删掉，测试照样绿。那正是
+    /// "给没测东西盖一个测试的章"。所以②用挂住的命令，跨过超时那一档才收手。
+    ///
+    /// 变异：删掉 `sync::try_begin_op` 里的 `git::clear_cancel_for` ⇒ ②精确红
+    /// （走的是取消分支不是超时分支）；①不动，因为它压根不走入口
+    #[test]
+    fn a_leftover_cancel_does_not_jam_the_next_operation() {
+        let f = parked();
+        let p = path(&f);
+
+        // ① **先自证这个标记真杀得动人**，否则下面那句"没被杀"是空的
+        let (url1, l1) = crate::git::hanging_url();
+        crate::git::hold_the_connection(l1);
+        crate::git::request_cancel_for(&p);
+        let killed = hanging(&p, &url1, std::time::Duration::from_secs(30));
+        assert!(
+            killed.stderr.contains(git::CANCELLED_MSG),
+            "前提没了：残留的标记杀不动命令，这条测试什么都证明不了。stderr = {}",
+            killed.stderr
+        );
+
+        // ② 走一次**用户入口**（它拿到这颗仓库的槽 ⇒ 那一刻正是清残留的时机），
+        //    同样一条挂住的命令必须活到它自己的超时
+        let (url2, l2) = crate::git::hanging_url();
+        crate::git::hold_the_connection(l2);
+        crate::git::request_cancel_for(&p);
+        let guard = begin_user_op(&p).expect("这颗仓库此刻没有别人在占");
+        let alive = hanging(&p, &url2, std::time::Duration::from_millis(1500));
+        drop(guard);
+        crate::git::clear_cancel_for(&p);
+
+        assert!(
+            alive.timed_out,
+            "上一次按停的残留把这一次也带倒了（就是「这个仓库再也拉不动」那一档）：stderr = {}",
+            alive.stderr
+        );
+        assert!(
+            !alive.stderr.contains(git::CANCELLED_MSG),
+            "用户入口拿到槽之后那颗标记还立着 ⇒ 清除没人负责：{}",
+            alive.stderr
+        );
     }
 }

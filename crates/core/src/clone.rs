@@ -53,8 +53,17 @@ pub fn clone_repo(
     third: bool,
     on_progress: Option<&dyn Fn(&ProgressEvent)>,
 ) -> Result<CloneOutcome, String> {
-    let Some(_guard) = sync::begin_user_op() else {
-        return Err("后台自动同步正在进行，已请求中断，请稍后重试".into());
+    // ⚠️ **槽键是父目录，不是仓库路径**：克隆那一刻仓库还不存在，`git clone` 实际的
+    // `-C` 地址就是这里（下面 `run_net_op(parent_dir.trim(), ..)` 同一处）。
+    // 取消标记必须打在子进程真正认得的那个地址上，打错的结果不是报错而是
+    // 「停止键按下去什么都不发生」——同一件事在两个文件里各写一种写法时一定会漂。
+    let Some(_guard) = sync::begin_user_op(parent_dir) else {
+        // **故意不复用 `sync::BUSY_MSG`**：那句说"这个仓库还有另一个操作在跑"，
+        // 而克隆这一刻仓库还不存在、后台自动同步更不可能在跑它——照抄过去就是
+        // 界面说了一句假话。这里要说的是**同一个文件夹**被另一次操作占着
+        return Err("同一个文件夹里有另一个操作还没结束（也许是另一次克隆），\
+                    已请求中断它，请稍后重试"
+            .into());
     };
     let url = url.trim();
     // 只有一个词、既没有冒号也没有斜杠：多半是用户只打了域名

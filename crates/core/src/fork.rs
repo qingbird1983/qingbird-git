@@ -253,11 +253,8 @@ pub fn rebase_fork(
     if !valid_repo(path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
-    let Some(_guard) = sync::begin_user_op() else {
-        return OpResult::err(
-            "后台自动同步正在进行，已请求中断，请稍后重试".into(),
-            String::new(),
-        );
+    let Some(_guard) = sync::begin_user_op(path) else {
+        return OpResult::err(sync::BUSY_MSG.into(), String::new());
     };
     // 动手前的状态：是否脏、有没有上游，都在 rebase_core 之前定下来
     let before = repos::read_status(path);
@@ -300,11 +297,8 @@ pub fn undo_rebase(path: &str) -> OpResult {
     if !valid_repo(path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
-    let Some(_guard) = sync::begin_user_op() else {
-        return OpResult::err(
-            "后台自动同步正在进行，已请求中断，请稍后重试".into(),
-            String::new(),
-        );
+    let Some(_guard) = sync::begin_user_op(path) else {
+        return OpResult::err(sync::BUSY_MSG.into(), String::new());
     };
     let local = |args: &[&str]| net::run_local(path, args);
     let refname = format!("refs/heads/{BACKUP_BRANCH}");

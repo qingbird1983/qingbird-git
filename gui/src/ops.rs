@@ -364,10 +364,17 @@ impl Shell {
 }
 
 impl Shell {
-    /// 停掉当前正在跑的操作（工具行那个「停止」按钮与 `Ctrl .` 共用这一个入口）。
+    /// 停掉**眼前这一颗仓库**正在跑的操作（工具行那个「停止」按钮与 `Ctrl .` 共用这一个入口）。
     ///
-    /// core 那两个入口都是**进程级全局**的——同一时刻只放一个忙操作——
-    /// 所以这里不按仓库分：只要有活就停，活是谁的不影响结果。
+    /// ⚠️ 这句从 32-8 起才成立。以前这里调的是进程级 `git::request_cancel()`，
+    /// 注释写「core 那两个入口都是全局的——同一时刻只放一个忙操作——所以这里
+    /// 不按仓库分：只要有活就停，活是谁的不影响结果」。**那句"不影响结果"只在全局锁
+    /// 之下才对**：锁下沉到每仓库之后照抄，就是点 A 的停止把 B 正在跑的拉取一起杀掉，
+    /// 而两边都正常返回、界面上看不出是谁干的。
+    /// 现在取消标记按仓库带地址，而 `log()` 取的就是选中仓库的日志 ⇒ 两者天然对齐。
+    ///
+    /// 一键命令（`Op::Cmd`）那一支仍然交给 `run_cmd::stop_repo_cmd()`：它自己那套
+    /// 「全应用只放一个后台命令」是它的语义，不是被 `OP_LOCK` 逼出来的，本轮不动。
     pub(crate) fn stop_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let lg = self.log();
         if !lg.running {
@@ -387,9 +394,13 @@ impl Shell {
         };
         let r = if is_cmd {
             run_cmd::stop_repo_cmd()
-        } else {
-            git::request_cancel();
+        } else if let Some(path) = self.selected.as_deref() {
+            git::request_cancel_for(path);
             Ok(())
+        } else {
+            // 到不了这里（`running` 为真就必然有选中仓库），但"不知道该停哪一颗"
+            // 不许变成"那就全停"——那正是这次要拆掉的那件事
+            Err("没选中仓库，不知道该停哪一颗".to_string())
         };
         match r {
             Ok(()) => {
@@ -645,17 +656,24 @@ impl Shell {
         self.run_batch(kind, paths, cx);
     }
 
-    /// 串行跑一批同步操作。
+    /// 并发跑一批同步操作：**最多 `sync::MAX_CONCURRENT_OPS` 路，完成一颗补一颗**。
     ///
-    /// **串行而不是并发**：core 那边的 `OP_LOCK` 是进程级的，同一时刻只放
-    /// 一个忙操作，并发发过去等于后面每一个都立刻失败。串行还顺带给了
-    /// 用户一个"跑到第几个了"的确定进度。
+    /// ⚠️ 这里原来是 `for path in paths { …spawn().await }`——**一句 `await`
+    /// 就把 core 那把每仓库锁给绕回串行上了**。路线表 32-8 那句
+    /// "串行不是必需，是被锁的形状逼出来的"只说对一半：**锁是一半，
+    /// GUI 自己 await 是另一半**。只拆 core 那一半，批量照样一颗一颗跑，
+    /// 而且没有任何一处会报错——这是本轮最容易"只改一半就收手"的地方。
+    ///
+    /// 为什么调度放在这一层、而不是"17 个任务一起发给 core 让它排队"：
+    /// gpui 那个后台执行器是**共享线程池**，全堵在额度等待里会把扫描、
+    /// 克隆进度这些别的活儿饿死。自己数着在跑几颗，池子里最多占 4 个，
+    /// 同时也没有"一批里一颗挂死、整批等它"的队头阻塞。
     ///
     /// 拉取遇脏工作区**跳过并记日志、继续下一个**（不自动 stash——那是替用户
     /// 做决定），与旧版总览批量的约定一致。
     ///
     /// **不新增后端批量 command**：代理回退、分叉识别、脏工作区判定都已经
-    /// 在 `sync::pull_repo` / `push_repo` / `check_update` 那两条路径里，
+    /// 在 `sync::pull_repo` / `push_repo` / `check_update` 那三条路径里，
     /// 再写一份 `pull_many` 只会让两边行为漂移。
     pub(crate) fn run_batch(
         &mut self,
@@ -672,6 +690,8 @@ impl Shell {
         self.batch = Some(BatchRun {
             kind,
             paths: paths.clone(),
+            queue: paths,
+            running_now: Vec::new(),
             done: 0,
             ok: 0,
             skipped: 0,
@@ -684,142 +704,188 @@ impl Shell {
         self.app_log.error = None;
         self.app_log.verdict = None;
         cx.notify();
+        self.pump_batch(cx);
+    }
 
+    /// 把队列里能发的发出去，发到并发上限为止。
+    ///
+    /// 写成"一次取一颗"的循环，是为了让 `self.batch` 的可变借用每取一颗就结束一次：
+    /// 下面 `status_of` / `title` / `log_of` 都要再借一次 `self`，
+    /// 拿着长借用去调它们是**编译不过**的那种"看着一样"的写法
+    fn pump_batch(&mut self, cx: &mut Context<Self>) {
+        while let Some(path) = self.batch_take_next() {
+            self.start_batch_item(path, cx);
+        }
+    }
+
+    /// 该发下一颗了吗？并发位满了、队列空了、或这一批已经收尾 ⇒ `None`。
+    ///
+    /// 那一问本身抽成了纯函数 `batch_can_launch_more`（理由写在那颗函数上：
+    /// `Shell` 构造不出来，不抽出来"上限有没有生效"就一条用例都写不了）
+    fn batch_take_next(&mut self) -> Option<String> {
+        let b = self.batch.as_mut()?;
+        if !crate::state::batch_can_launch_more(b.running, b.running_now.len(), b.queue.len()) {
+            return None;
+        }
+        let path = b.queue.first().cloned()?;
+        b.queue.remove(0);
+        Some(path)
+    }
+
+    /// 发一颗出去（或就地结清一颗不用跑的）
+    fn start_batch_item(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(kind) = self.batch.as_ref().map(|b| b.kind) else {
+            return;
+        };
+        // 拉取对脏工作区让路。**只在拉取时判定**——检测不改工作区，
+        // 推送推的是提交不是文件。
+        // ⚠️ 它一秒都不跑，所以**不占并发位**：占了就等于把这一批的上限压低一颗
+        if kind == BatchKind::Pull && self.status_of(&path).dirty {
+            self.finish_batch_item(&path, None, cx);
+            return;
+        }
+        if let Some(b) = self.batch.as_mut() {
+            b.running_now.push(path.clone());
+        }
+        // 让侧栏那一行转起来：批量也是"点下去就有反馈"的操作，
+        // 不标出来用户会以为卡住了
+        {
+            let lg = self.log_of(&path);
+            lg.running = true;
+            lg.op = Some(match kind {
+                BatchKind::Pull => Op::Pull,
+                BatchKind::Push => Op::Push,
+                BatchKind::Check => Op::Check,
+            });
+            lg.ts = store::now_secs();
+        }
+        cx.notify();
+        let p = path.clone();
         cx.spawn(async move |this, cx| {
-            for path in paths {
-                // 跑之前先看脏不脏：拉取对脏工作区让路。
-                // 只在拉取时判定——检测不改工作区，推送推的是提交不是文件
-                let skip = kind == BatchKind::Pull
-                    && this
-                        .update(cx, |this, _| this.status_of(&path).dirty)
-                        .unwrap_or(false);
-                // None = 跳过，Some((成功?, 一句话)) = 跑过了
-                let outcome: Option<(bool, String)> = if skip {
-                    None
-                } else {
-                    let k = kind;
-                    let p = path.clone();
-                    this.update(cx, |this, cx| {
-                        // 让侧栏那一行转起来：批量也是"点下去就有反馈"的操作，
-                        // 不标出来用户会以为卡住了
-                        let lg = this.log_of(&p);
-                        lg.running = true;
-                        lg.op = Some(match k {
-                            BatchKind::Pull => Op::Pull,
-                            BatchKind::Push => Op::Push,
-                            BatchKind::Check => Op::Check,
-                        });
-                        lg.ts = store::now_secs();
-                        cx.notify();
-                    })
-                    .ok();
-                    Some(
-                        cx.background_executor()
-                            .spawn(async move {
-                                let r = match k {
-                                    BatchKind::Pull => sync::pull_repo(&p, true, None),
-                                    BatchKind::Push => sync::push_repo(&p),
-                                    BatchKind::Check => sync::check_update(&p, None),
-                                };
-                                (r.ok, r.message)
-                            })
-                            .await,
-                    )
-                };
-                let p = path.clone();
-                this.update(cx, |this, cx| {
-                    // 先算全局那一行：`log_of` 会把 `this` 整个可变借走，
-                    // 拿了它再去碰 `app_log` 是第二个可变借用
-                    let app_line = match &outcome {
-                        None => Some(format!("· {}：工作区有改动，已跳过", this.title(&p))),
-                        Some((true, _)) => None,
-                        Some((false, msg)) => Some(format!("✗ {}：{msg}", this.title(&p))),
-                    };
-                    if let Some(line) = app_line {
-                        this.app_log.lines.push(line);
-                    }
-                    // 每一条都记进**那个仓库自己的**日志：失败原因在那里，
-                    // 汇总只报数字
-                    let lg = this.log_of(&p);
-                    match &outcome {
-                        None => lg
-                            .lines
-                            .push("· 工作区有改动，已跳过（切到该仓库确认后再拉）".into()),
-                        Some((true, msg)) => lg.lines.push(format!("✓ {msg}")),
-                        Some((false, msg)) => {
-                            lg.lines.push(format!("✗ {msg}"));
-                            lg.error = Some(msg.clone());
-                        }
-                    }
-                    lg.running = false;
-                    // 批量也落进 `op_history`（阶段 16），**逐仓库各记一条**——
-                    // 这一批改了五个仓库，切到任何一个都得看得到它自己那条，
-                    // 而不是"上一个仓库的时间"串到这边来。
-                    // ⚠️ **跳过的不记**：工作区有改动时一个字节都没动，
-                    // 记一条"跳过"进历史等于把"上次成功同步"的时间抹掉，
-                    // 而那次成功仍然是真的
-                    if let Some((ok, msg)) = &outcome {
-                        let op = match kind {
-                            BatchKind::Pull => Op::Pull,
-                            BatchKind::Push => Op::Push,
-                            BatchKind::Check => Op::Check,
+            // 内层那个 `async move` 会把 `p` 搬走，而回报结果时还要用它 ⇒
+            // 两条路各留一份，别指望编译器替你想到
+            let outcome = {
+                let p = p.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        let r = match kind {
+                            BatchKind::Pull => sync::pull_repo(&p, true, None),
+                            BatchKind::Push => sync::push_repo(&p),
+                            BatchKind::Check => sync::check_update(&p, None),
                         };
-                        this.record_op(&p, op, *ok, msg);
-                    }
-                    let Some(b) = this.batch.as_mut() else {
-                        return;
-                    };
-                    b.done += 1;
-                    match &outcome {
-                        None => b.skipped += 1,
-                        Some((true, _)) => b.ok += 1,
-                        Some((false, _)) => b.failed += 1,
-                    }
-                    cx.notify();
-                })
-                .ok();
+                        (r.ok, r.message)
+                    })
             }
-            let win = this.update(cx, |this, _| this.win).ok();
-            let note = this
-                .update(cx, |this, cx| {
-                    let Some(b) = this.batch.as_mut() else {
-                        return None;
-                    };
-                    b.running = false;
-                    let mut parts = vec![format!("{} 个成功", b.ok)];
-                    if b.skipped > 0 {
-                        parts.push(format!(
-                            "{} 个跳过（工作区有改动，需切到该仓库确认后再拉）",
-                            b.skipped
-                        ));
-                    }
-                    if b.failed > 0 {
-                        parts.push(format!("{} 个失败，原因见各自仓库的日志", b.failed));
-                    }
-                    let note = format!("{}完成：{}", b.kind.label(), parts.join(" · "));
-                    b.note = Some(note.clone());
-                    // 汇总落全局槽。这一批横跨多个仓库，记到"当前选中"名下
-                    // 会让人以为只动了一个仓库
-                    this.app_log.lines.push(note.clone());
-                    this.app_log.verdict = Some((b.failed == 0, note.clone()));
-                    this.app_log.ts = store::now_secs();
-                    // 拉取/推送改了 ahead/behind，重扫刷新侧栏与表格
-                    this.refresh_status(cx);
-                    cx.notify();
-                    Some(note)
-                })
-                .ok()
-                .flatten();
-            // 通知要一个活的 `&mut Window`，而后台任务里只有 `&mut AsyncApp`。
-            // 用记着的窗口句柄换回来——和总览表格点行那条路同一个套路
-            if let (Some(note), Some(win)) = (note, win) {
-                cx.update_window(win, |_, window, cx| {
-                    window.push_notification(note, cx);
-                })
+            .await;
+            this.update(cx, |this, cx| this.finish_batch_item(&p, Some(outcome), cx))
                 .ok();
-            }
         })
         .detach();
+    }
+
+    /// 一颗有了结果（跑完了，或被跳过）：写日志、结计数、腾出并发位，
+    /// 然后要么补一颗、要么收尾。`None` = 跳过（工作区有改动，一个字节都没动）
+    fn finish_batch_item(
+        &mut self,
+        path: &str,
+        outcome: Option<(bool, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(kind) = self.batch.as_ref().map(|b| b.kind) else {
+            return;
+        };
+        // 先算全局那一行：`log_of` 会把 `self` 整个可变借走，
+        // 拿了它再去碰 `app_log` 是第二个可变借用
+        let app_line = match &outcome {
+            None => Some(format!("· {}：工作区有改动，已跳过", self.title(path))),
+            Some((true, _)) => None,
+            Some((false, msg)) => Some(format!("✗ {}：{msg}", self.title(path))),
+        };
+        if let Some(line) = app_line {
+            self.app_log.lines.push(line);
+        }
+        {
+            // 每一条都记进**那个仓库自己的**日志：失败原因在那里，汇总只报数字
+            let lg = self.log_of(path);
+            match &outcome {
+                None => lg
+                    .lines
+                    .push("· 工作区有改动，已跳过（切到该仓库确认后再拉）".into()),
+                Some((true, msg)) => lg.lines.push(format!("✓ {msg}")),
+                Some((false, msg)) => {
+                    lg.lines.push(format!("✗ {msg}"));
+                    lg.error = Some(msg.clone());
+                }
+            }
+            lg.running = false;
+        }
+        // 批量也落进 `op_history`（阶段 16），**逐仓库各记一条**——
+        // 这一批改了五个仓库，切到任何一个都得看得到它自己那条，
+        // 而不是"上一个仓库的时间"串到这边来。
+        // ⚠️ **跳过的不记**：工作区有改动时一个字节都没动，
+        // 记一条"跳过"进历史等于把"上次成功同步"的时间抹掉，而那次成功仍然是真的
+        if let Some((ok, msg)) = &outcome {
+            let op = match kind {
+                BatchKind::Pull => Op::Pull,
+                BatchKind::Push => Op::Push,
+                BatchKind::Check => Op::Check,
+            };
+            self.record_op(path, op, *ok, msg);
+        }
+        let finished = {
+            let Some(b) = self.batch.as_mut() else {
+                cx.notify();
+                return;
+            };
+            b.running_now.retain(|p| p != path);
+            b.done += 1;
+            match &outcome {
+                None => b.skipped += 1,
+                Some((true, _)) => b.ok += 1,
+                Some((false, _)) => b.failed += 1,
+            }
+            b.done >= b.paths.len()
+        };
+        if finished {
+            self.finish_batch(cx);
+        } else {
+            // 腾出一个位子就补一颗。收尾与补位互斥：整批完了就不该再发
+            self.pump_batch(cx);
+        }
+    }
+
+    /// 整批跑完：算那句结论、落全局槽、重扫刷新，通知交 `render` 兑现
+    fn finish_batch(&mut self, cx: &mut Context<Self>) {
+        let (note, all_ok) = {
+            let Some(b) = self.batch.as_mut() else {
+                return;
+            };
+            b.running = false;
+            let mut parts = vec![format!("{} 个成功", b.ok)];
+            if b.skipped > 0 {
+                parts.push(format!(
+                    "{} 个跳过（工作区有改动，需切到该仓库确认后再拉）",
+                    b.skipped
+                ));
+            }
+            if b.failed > 0 {
+                parts.push(format!("{} 个失败，原因见各自仓库的日志", b.failed));
+            }
+            let note = format!("{}完成：{}", b.kind.label(), parts.join(" · "));
+            b.note = Some(note.clone());
+            (note, b.failed == 0)
+        };
+        // 汇总落全局槽。这一批横跨多个仓库，记到"当前选中"名下会让人以为只动了一个
+        self.app_log.lines.push(note.clone());
+        self.app_log.verdict = Some((all_ok, note.clone()));
+        self.app_log.ts = store::now_secs();
+        // ⚠️ 走一次性标记，不走这里直接 `cx.update_window`：
+        // 收尾这一句可能在主线程的**同步结清**里走到（最后一颗是脏跳过），
+        // 那条路上窗口已被 take 走，`update_window` 会把闭包静默丢掉
+        self.pending_batch_note = Some(note);
+        // 拉取/推送改了 ahead/behind，重扫刷新侧栏与表格
+        self.refresh_status(cx);
+        cx.notify();
     }
 
     /// 状态条里那一格批量进度（跑批时覆盖「运行中 · X」）。
@@ -829,7 +895,20 @@ impl Shell {
     /// 完整结论在 `app_log` 与跑完时的通知里
     pub(crate) fn batch_note(&self) -> Option<String> {
         self.batch.as_ref().map(|b| {
-            batch_summary(b.kind, b.done, b.paths.len(), b.ok, b.skipped, b.failed)
+            // 传的是**显示名**不是路径：状态条那一格就这么宽。
+            // `running_now` 是并发之后新增的那一格——光有 `done/total`
+            // 只回答"完了几个"，不回答"现在在跑谁"，而后者在并发之后
+            // 再也不能从前者推出来
+            let running: Vec<String> = b.running_now.iter().map(|p| self.title(p)).collect();
+            batch_summary(
+                b.kind,
+                b.done,
+                b.paths.len(),
+                b.ok,
+                b.skipped,
+                b.failed,
+                &running,
+            )
         })
     }
 }

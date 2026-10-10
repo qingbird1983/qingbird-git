@@ -81,6 +81,9 @@ impl Shell {
             running: false,
             progress: CloneProgress::default(),
             error: None,
+            // 起跑那一刻才填（见字段注释）。这里给空串是"没在克隆"，
+            // 而 `cancel_clone` 在 `running == false` 时根本不读它
+            cloning_into: String::new(),
         });
         self.build_clone_dlg(window, cx);
     }
@@ -178,6 +181,9 @@ impl Shell {
 
         if let Some(d) = self.clone_dlg.as_mut() {
             d.running = true;
+            // **取消要打的那个地址在这里定死**（就是下面交给 `clone_repo` 的那一个串，
+            // 不是"取消时再读一次输入框"）。路线表 32-8：取消标记按仓库带地址了
+            d.cloning_into = parent.clone();
             // "准备中…"只是起跑与第一条 git 输出之间那一小段的占位。
             // **它必须由下面那条轮询循环被真实阶段换掉**——2026-10-10 那条缺陷
             // 的症状就是这句话挂满整个克隆过程
@@ -322,16 +328,25 @@ impl Shell {
         }
     }
 
-    /// 取消走 core 的全局取消标记。**不在这里清目标目录**——
+    /// 取消走 core 那个**按仓库**的取消标记（32-8 之前它是进程级的一颗 bool）。
+    /// **不在这里清目标目录**——
     /// 那是 `clone_repo` 失败分支的事，它知道那个目录是本次尝试产生的
     pub(crate) fn cancel_clone(&mut self, cx: &mut Context<Self>) {
         let running = self.clone_dlg.as_ref().map(|d| d.running).unwrap_or(false);
+        let addr = self
+            .clone_dlg
+            .as_ref()
+            .map(|d| d.cloning_into.clone())
+            .unwrap_or_default();
         if !running {
             self.clone_dlg = None;
             cx.notify();
             return;
         }
-        git::request_cancel();
+        // ⚠️ 打在**本次克隆那个 git 进程实际的 `-C` 地址**上——是目标父目录，
+        // 不是仓库路径（仓库这一刻还不存在，而 core 里 `run_net_op` 收到的就是父目录）。
+        // 打成别的只会得到"按了取消却还在传"，且一个字都不报（路线表 32-8）
+        git::request_cancel_for(&addr);
         if let Some(d) = self.clone_dlg.as_mut() {
             d.progress.stage = "正在取消…".into();
         }

@@ -554,13 +554,64 @@ pub fn load() -> AppConfig {
         .unwrap_or_default()
 }
 
+/// 配置落盘的**唯一**出口，两件事一起才成立（路线表 32-8c）。
+///
+/// ① **一把进程级写锁**。32-8 之前那一颗全局 `OP_LOCK` 顺带替这里挡着并发——
+/// 忙操作只有一个，所以 `net.rs` 那两处「上次成功代理」写回、后台同步的结果写回
+/// 永远不会撞车。**那条保护不在任何人的注释里**，所以撤掉它不会有任何东西报错：
+/// 锁下沉到每仓库之后，两个线程真的会同时 `fs::write` 同一个 `config.json`。
+///
+/// ② **写临时文件再改名替换**。光加锁只挡住"两个写者交叠"，挡不住"写了一半
+/// 进程被杀 / 磁盘满 / 被安全软件拦"留下的**半份 JSON**。而 `load()` 读不出来就
+/// `unwrap_or_default()` ⇒ 用户那一整张仓库列表静默消失，界面上看起来像
+/// "程序把我配置弄丢了"。改名替换在 NTFS 上是原子的，要么旧的一份要么新的一份。
+///
+/// ⚠️ 临时文件名是**固定**的（`config.json.qbg-tmp`）——整段都在锁内，同一时刻
+/// 只有一个写者，所以不需要 pid 之类的区分量；加了反而多一处会漂的东西。
+///
+/// ⚠️ **这只保证「一次写」是完整的，不保证「读→改→写」整段不丢更新**。
+/// 后者要把每个调用方的 `load` 一起纳进来，那是另一件事、另一个尺寸；
+/// 现在每个调用点都是"重新 load 之后只改自己那一格再 save"（`gui/scheduler.rs`
+/// 那句注释就写着为什么必须重读），窗口窄但没归零——**如实记着，别把它写成已解决**。
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn save(cfg: &AppConfig) -> Result<(), String> {
     let path = config_path().ok_or("无法确定配置目录")?;
+    save_to(&path, cfg)
+}
+
+/// [`save`] 的实现，**目标路径由调用方给**。
+///
+/// 拆这一层不是为了好看，是为了让上面那两件事进得了单测：AGENTS 钉着
+/// 「单测里不许 `set_var` 改进程级全局（`APPDATA` 尤其）」，而 `config_path()`
+/// 读的正是它 ⇒ 不拆出来，「并发写会不会留下半份配置」这条判据**一条用例都写不了**，
+/// 只能靠"我相信 rename 是原子的"。（同 `diag::log_path_in` 那次：把被依赖的值收成参数）
+pub(crate) fn save_to(path: &std::path::Path, cfg: &AppConfig) -> Result<(), String> {
+    // 中毒只可能来自别的线程在 save 里 panic；配置写这件事不许因为"上一次有人 panic"
+    // 就永久失败 ⇒ 取 `into_inner` 继续（这把锁保护的是"不许交叠"，不是某个不变量）
+    let _serial = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| e.to_string())
+    let tmp = {
+        let mut t = path.as_os_str().to_os_string();
+        t.push(".qbg-tmp");
+        PathBuf::from(t)
+    };
+    // 残留的先扫掉：上一次 rename 失败会留一份，而 `fs::write` 覆盖它本来就是对的，
+    // 但留着会让"配置目录里有什么"这件事一直说不清
+    let _ = fs::remove_file(&tmp);
+    fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    // Windows 上 rename 会替换已存在的目标（std 走 `MoveFileExW` +
+    // `MOVEFILE_REPLACE_EXISTING`），所以这里不需要"先删再改名"那种更脆弱的写法：
+    // 先删后改名中间有一段**配置文件根本不存在**的窗口，那一段里 `load()` 会读到
+    // 空并把默认值当成用户的配置存回去 ⇒ 列表清空。改名是原子的那一段就没有这个窗口
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("写入配置文件失败：{e}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -884,5 +935,168 @@ mod tests {
         // "点一下 X 软件就没了"，而他从没选过
         assert_eq!(close_action_of(&default_close_action()), CloseAction::Ask);
         assert_eq!(close_action_of(""), CloseAction::Ask);
+    }
+
+    fn big_cfg(tag: &str, n: usize) -> AppConfig {
+        AppConfig {
+            repos: (0..n)
+                .map(|i| RepoEntry {
+                    path: format!(r"D:\{tag}\repo{i:04}"),
+                    name: format!("{tag}{i:04}"),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// 两个线程同时写同一份配置：**一个都不许失败，落下的必须是一份能读的**
+    /// （路线表 32-8c）。
+    ///
+    /// 这条的动机不是假想。忙锁从进程级下沉到每仓库之后，`net.rs` 那两处
+    /// 「上次成功代理」写回与后台同步的结果写回**第一次真的可以并发**——
+    /// 以前那颗全局 `OP_LOCK` 顺带把它们串成了一条队，**而那条保护不在任何人的注释里**，
+    /// 所以撤掉它不会有任何东西报错。裸 `fs::write` 在 Windows 上撞车会直接返回
+    /// "另一个程序正在使用此文件"（os error 32，AGENTS 里那条要显式认的错误号），
+    /// 侥幸没撞上的话就是两份 JSON 交叠出的**半份**——而 `load()` 读不出来就
+    /// `unwrap_or_default()` ⇒ **用户那一整张仓库列表静默消失**。
+    ///
+    /// ⚠️ 这条断的是「永远不出现坏结果」，不是「跑一次没报错」：轮数跑到 12，
+    /// 两个线程写的内容故意不同（500 条 / 800 条），所以"最后是哪一份"必须是
+    /// 可枚举的两种之一，而不是"随便哪个数"
+    /// ⚠️ **这条测的是「两个写者都不失败」，测不到 `SAVE_LOCK`**——2026-10-10 变异
+    /// 实测：把那把锁删掉，四条用例照样全绿（Rust 在 Windows 上开文件默认带
+    /// `FILE_SHARE_WRITE`，两个 `fs::write` 允许同时打开，各写各的，于是既不报错
+    /// 也看不出交叠）。**登记这件事而不是把断言吹成能挡住它**：
+    /// 锁真正管的是两件更窄的事——① 固定名的 `.qbg-tmp` 不会被两个写者互相抢走
+    /// （抢走的后果是 rename 报"找不到文件"），② 少一次毫无意义的重复序列化。
+    /// "旁观者读不到半份配置"那一档由下面那条负责，它是**唯一能红的一档**。
+    #[test]
+    fn two_writers_never_leave_a_half_config() {
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qbg-save-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let file = dir.join("config.json");
+
+        let f1 = file.clone();
+        let f2 = file.clone();
+        let a = std::thread::spawn(move || {
+            let mut last = Ok(());
+            for _ in 0..12 {
+                last = save_to(&f1, &big_cfg("aaa", 500));
+            }
+            last
+        });
+        let b = std::thread::spawn(move || {
+            let mut last = Ok(());
+            for _ in 0..12 {
+                last = save_to(&f2, &big_cfg("bbb", 800));
+            }
+            last
+        });
+        let ra = a.join().expect("第一个写者该回来");
+        let rb = b.join().expect("第二个写者该回来");
+        assert!(ra.is_ok(), "并发写把第一个写者顶失败了：{}", ra.unwrap_err());
+        assert!(rb.is_ok(), "并发写把第二个写者顶失败了：{}", rb.unwrap_err());
+
+        let text = fs::read_to_string(&file).expect("配置该在");
+        let back: AppConfig =
+            serde_json::from_str(&text).expect("落下的必须是一份完整的 JSON，不是半份");
+        assert!(
+            back.repos.len() == 500 || back.repos.len() == 800,
+            "既不是甲那份也不是乙那份（{} 条）⇒ 两份交叠出了第三个东西",
+            back.repos.len()
+        );
+        // 临时文件必须被改名带走了：留在配置目录里就是"这里还有什么"说不清
+        assert!(
+            fs::read_dir(&dir).unwrap().count() == 1,
+            "配置目录里多了别的东西"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 一边有人在写，**旁观者每一次读到的都必须是一份完整的**——32-8c 真正的判据。
+    ///
+    /// 为什么另起一条而不把断言塞进上面那条：上面那条只断"两个写者都不失败"，
+    /// 而变异实测它**挡不住删掉锁**（见那条上的登记）。用户会碰到的伤害其实不在这：
+    /// 伤害在 `load()` **读不出来就 `unwrap_or_default()`** ⇒ "某一瞬间没读到你那
+    /// 17 个仓库"与"配置被清空"在界面上长得一模一样，而且一个字都不报。
+    /// 三种坏法这条都算：
+    /// ① 半份 JSON（裸 `fs::write` 的 truncate→写之间有个真实存在的窗口）
+    /// ② 文件一瞬间不存在（"先删旧的再改名"那种退化）
+    /// ③ 读到一半文件被换掉
+    /// ⇒ 只有"写临时文件 + 改名替换"把三种一起压成零：改名在 NTFS 上是原子的，
+    /// 旁观者要么拿到旧的一份、要么拿到新的一份，**不存在"正在写的那一份"**
+    #[test]
+    fn a_bystander_never_reads_a_half_config() {
+        static SEQ3: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ3.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qbg-save-by-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let file = dir.join("config.json");
+        save_to(&file, &big_cfg("seed", 120)).expect("先铺一份底");
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
+        let reader = {
+            let (file, stop) = (file.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut bad: Vec<String> = Vec::new();
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    match fs::read_to_string(&file) {
+                        Err(e) => bad.push(format!("文件读不到：{e}")),
+                        Ok(text) => {
+                            if let Err(e) = serde_json::from_str::<AppConfig>(&text) {
+                                bad.push(format!("半份 JSON：{e}（{len} 字节）", len = text.len()));
+                            }
+                        }
+                    }
+                }
+                let _ = tx.send(bad);
+            })
+        };
+
+        for i in 0..60 {
+            // 两份相差一个量级：写的时间越长那个窗口越宽，最好让交叠真发生
+            let (tag, count) = if i % 2 == 0 { ("even", 40) } else { ("oddish", 420) };
+            save_to(&file, &big_cfg(tag, count))
+                .unwrap_or_else(|e| panic!("第 {i} 轮写失败：{e}"));
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        reader.join().expect("旁观线程该回来");
+        let bad = rx.recv().expect("该拿到旁观者的账");
+        assert!(
+            bad.is_empty(),
+            "旁观者读到过 {} 次坏状态。第一条：{} ⇒ 配置落盘不是原子的，\
+             而 `load()` 会把这种一瞬间读空当成「用户没有仓库」",
+            bad.len(),
+            bad.first().map(String::as_str).unwrap_or("")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 写之前目标已经存在（每次真写都是这种情况）⇒ 旧的必须被**替换**掉，
+    /// 而且中途不许出现"配置文件不见了"的那一段。
+    ///
+    /// 为什么单独钉这一条：如果落法退化成"先删再改名"，`load()` 在那一段窗口里
+    /// 会读到空、把 `AppConfig::default()` 当成用户的配置存回去 ⇒ 列表清空，
+    /// 而**整个过程一个字都不报错**。这条断的就是"目标始终存在"这一件事
+    #[test]
+    fn a_rewrite_replaces_the_old_one_and_never_leaves_a_gap() {
+        static SEQ2: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qbg-save-rep-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let file = dir.join("config.json");
+
+        save_to(&file, &big_cfg("first", 3)).expect("第一次写");
+        save_to(&file, &big_cfg("second", 7)).expect("覆盖写");
+        let back: AppConfig = serde_json::from_str(&fs::read_to_string(&file).unwrap())
+            .expect("覆盖之后仍是一份完整的");
+        assert_eq!(back.repos.len(), 7, "旧的没被替换掉");
+        assert_eq!(back.repos[0].name, "second0000", "内容得是后写那一份");
+        assert!(dir.join("config.json.qbg-tmp").exists() == false, "临时文件留下了");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

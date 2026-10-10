@@ -1,8 +1,10 @@
 //! 三键操作与提交推送：检测云端更新 / 一键拉取（--ff-only）/ 一键推送 / 提交并推送。
 //! 自 src-tauri 平移：`AppHandle`/`Channel` 去除，进度改走回调闭包，设置读写走 core store。
 
-use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::fork;
 use crate::history::{parse_numstat, CommitFile};
@@ -19,30 +21,192 @@ pub const NET_TIMEOUT: Duration = Duration::from_secs(300);
 /// 检查云端更新只做 fetch + 对比，超时比完整拉取短得多
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// 全局网络操作互斥锁：用户操作与后台自动同步互斥。
-/// 自动同步只 try_lock（拿不到就跳过本轮），用户操作优先并可打断后台同步。
-static OP_LOCK: Mutex<()> = Mutex::new(());
+/// 每仓库一个忙槽。
+///
+/// **为什么把锁从进程级降下来**（路线表 32-8）：原来那颗 `OP_LOCK: Mutex<()>`
+/// 让「整个应用同一时刻只放一个忙操作」成了所有上层设计的**隐含前提**——
+/// 批量只能串行（`gui/src/ops.rs` 的注释明写这就是理由）、后台自动同步与用户操作
+/// 只能二选一、而"两个不同仓库并发写各自的 `.git`"本来毫无冲突却被一并挡住。
+/// 仓库之间不共享 `.git`，**串行不是必需，是被锁的形状逼出来的**。
+///
+/// ⚠️ **全局并发上限这一轮故意没有**：锁下沉之后并发并不会自己变多（界面还是一次
+/// 点一键、后台仍一仓一仓跑），先加一个没人消费的限额只是多一处会漂的数。
+/// 它的消费者是 32-9 批量并发——**那一批必须连着把上限一起落**，
+/// 否则一次批量就是同时派生 17 个 git。已登记进 Q28。
+static SLOTS: OnceLock<Mutex<HashMap<String, Arc<Slot>>>> = OnceLock::new();
 
-/// 后台自动同步尝试进入操作区：用户正在操作时返回 None（跳过本轮）
-pub fn try_begin_op() -> Option<MutexGuard<'static, ()>> {
-    OP_LOCK.try_lock().ok()
+/// 一个仓库的忙位。**取消标记不在这里**：那一份只有子进程轮询那一层需要读
+/// （`git::run_git_inner`），放在 `git::CANCELLED`。两处共用 [`git::repo_key`]
+/// 这**一个**键的出处——各写一份归一，就会出现"锁拿到了、取消却打不到"。
+struct Slot {
+    busy: AtomicBool,
 }
 
-/// 用户网络操作进入操作区：若被后台自动同步占用，先请求取消其 git 子进程
-/// 再等锁（最多约 10 秒），等不到说明有异常占用，返回 None
-pub fn begin_user_op() -> Option<MutexGuard<'static, ()>> {
-    if let Ok(g) = OP_LOCK.try_lock() {
-        return Some(g);
-    }
-    git::request_cancel();
-    for _ in 0..50 {
-        if let Ok(g) = OP_LOCK.try_lock() {
-            return Some(g);
+fn slots() -> &'static Mutex<HashMap<String, Arc<Slot>>> {
+    SLOTS.get_or_init(Default::default)
+}
+
+/// 取（或建）这个仓库的槽。
+///
+/// 表只增不减：一条 40 字节上下，而它的上界就是用户添加过的仓库数（本机 17 个）。
+/// 移除仓库后留着那条**不影响正确性**——槽空着，重建同名仓库拿回同一个键。
+fn slot_for(repo_path: &str) -> Arc<Slot> {
+    slots()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(git::repo_key(repo_path))
+        .or_insert_with(|| Arc::new(Slot { busy: AtomicBool::new(false) }))
+        .clone()
+}
+
+/// **同时在跑的忙操作上限**（路线表 Q28，2026-10-10 定 4 路）。
+///
+/// 为什么是 4 而不是"越多越好"：批量并发真正的瓶颈不是 CPU，也不是磁盘，
+/// 而是**同时开十几个 git 进程去连同一个远端**——github 一类远端对同账号 / 同 IP
+/// 的并发请求会限流，路数越高越容易撞 429 / 502，而撞上的表现是"个别仓库拉取失败"，
+/// 用户只会以为程序不稳。17 个仓库在 4 路上已经从"分钟级"掉到十几秒，
+/// 再往上收益递减、失败率上升。⇒ **要改只改这一颗数**，别在调用处各写一遍。
+pub const MAX_CONCURRENT_OPS: usize = 4;
+
+/// 在途路数。用 `isize` 而不是 `usize`：还票写错（多还一次）时 `usize` 会**下溢成一个
+/// 巨大值** ⇒ 上限从此形同虚设而且看不出来；`isize` 会跑到负数，被下面那条
+/// `debug_assert` 当场抓住（release 下它是空操作，所以真正的防线是
+/// "票只在 `OpGuard` 的 `Drop` 里还一次"这个结构）
+static IN_FLIGHT: AtomicIsize = AtomicIsize::new(0);
+
+/// 取一票额度。拿不到返回 `false`——**不排队**，排队是调用方的事
+fn acquire_credit() -> bool {
+    let mut cur = IN_FLIGHT.load(Ordering::SeqCst);
+    loop {
+        if cur >= MAX_CONCURRENT_OPS as isize {
+            return false;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        match IN_FLIGHT.compare_exchange_weak(
+            cur,
+            cur + 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => cur = actual,
+        }
     }
-    None
 }
+
+fn release_credit() {
+    let after = IN_FLIGHT.fetch_sub(1, Ordering::SeqCst) - 1;
+    debug_assert!(after >= 0, "全局并发额度被多还了一次，现在 {after}");
+}
+
+/// 撞同一颗仓库的槽时最多等多久。原来写成"50 次 × 200 毫秒"两个魔法数，
+/// 收成一颗数才好读也好测
+const SLOT_WAIT: Duration = Duration::from_secs(10);
+const SLOT_POLL: Duration = Duration::from_millis(200);
+/// 等额度时的轮询间隔。比等槽密：额度是"前面那路跑完就有"，通常几秒内变化
+const CREDIT_POLL: Duration = Duration::from_millis(50);
+
+/// 一次忙操作的凭证：持有期间这个仓库不许有第二个忙操作，并且占一份全局额度。
+/// `Drop` 把**两样一起还**。
+///
+/// 类型是自己写的而不是 `MutexGuard`：**守卫要能在函数间移动、且活到 `'static`，
+/// 而 `Mutex<HashMap<..>>` 的守卫借用那张表，会把表的锁一路带进整条调用链**
+/// （连 git 子进程跑那几十秒都攥着表锁，别的仓库连"查一下自己忙不忙"都做不了）。
+pub struct OpGuard {
+    slot: Option<Arc<Slot>>,
+    /// 这一票额度。**漏还一次，整个应用就永久少一路并发**，
+    /// 症状是"越用越慢、最后又变回一次只能做一件事"，而没有任何一处会报错。
+    /// ⇒ 它只在 `Drop` 里还、且 `Drop` 之外没有任何手工还票的出口
+    credit: bool,
+}
+
+impl Drop for OpGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            slot.busy.store(false, Ordering::SeqCst);
+        }
+        if self.credit {
+            release_credit();
+        }
+    }
+}
+
+/// 抢这颗仓库的槽。抢到返回它的 `Arc`，抢不到返回 `None`——**不碰额度**，
+/// 还不还由调用方决定（`begin_user_op` 要还回去重试，`try_begin_op` 也还回去）
+fn take_slot(repo_path: &str) -> Option<Arc<Slot>> {
+    let slot = slot_for(repo_path);
+    slot.busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .ok()
+        .map(|_| slot)
+}
+
+/// 后台自动同步尝试进入**那个仓库**的操作区：额度满了、或那颗仓库正被用户操作，
+/// 都返回 `None`（跳过这一轮，**不排队也不等待**——那是用户操作那条路的特权）
+pub fn try_begin_op(repo_path: &str) -> Option<OpGuard> {
+    if !acquire_credit() {
+        return None;
+    }
+    let Some(slot) = take_slot(repo_path) else {
+        release_credit();
+        return None;
+    };
+    // ⛔ **清除只能放在这里，不能放回 `run_net_op` 开头**。理由写在
+    // `git::clear_cancel_for` 那条注释里（一句话：那个位置把"清残留取消意图"
+    // 外包给了"这条命令恰好走网络层"，而拉取在网络层之前要跑三条本地命令 ⇒
+    // 用户按过一次停止之后，这个仓库每次都死在第一步）。
+    // 拿到槽 ⇒ 同仓库没有别人在跑 ⇒ 此刻存在的标记只可能是上一次留下的。
+    git::clear_cancel_for(repo_path);
+    Some(OpGuard { slot: Some(slot), credit: true })
+}
+
+/// 用户对**某个仓库**发起操作。**两段等待语义不同，顺序也不能反**：
+///
+/// ① **额度**（全应用最多 [`MAX_CONCURRENT_OPS`] 路）——这是**排队**：
+///   批量里第 5 颗等前面跑完是设计上的行为，等到有额度为止；
+///   上限取 `NET_TIMEOUT`（等不到一条完整网络操作的时间，就算真被占死了）。
+/// ② **这颗仓库的槽**——这是"它正被别的操作占着"：先请求取消**它那一个**
+///   正在跑的 git 子进程，再等 [`SLOT_WAIT`]，等不到就报忙（不能无限等，
+///   一次异常占用会把这条仓库钉死）。
+///
+/// ⛔ **必须先额度后槽**。反过来写会"占着额度排队等槽"：4 个额度全被这种等待占住，
+/// 而它们各自等的那颗仓库正跑在第五个操作上、第五个又拿不到额度
+/// ⇒ **自己造出来的死锁**，而且它不报任何错，只是界面从此不动。
+/// 所以抢不到槽一定要**把额度还回去**再重试。
+pub fn begin_user_op(repo_path: &str) -> Option<OpGuard> {
+    let credit_until = Instant::now() + NET_TIMEOUT;
+    let slot_deadline = Instant::now() + SLOT_WAIT;
+    let mut asked = false;
+    loop {
+        if acquire_credit() {
+            if let Some(slot) = take_slot(repo_path) {
+                git::clear_cancel_for(repo_path);
+                return Some(OpGuard { slot: Some(slot), credit: true });
+            }
+            release_credit();
+            if !asked {
+                // **只打一次**取消。`request_cancel_for` 是"请它停下"，
+                // 每 200ms 重发一次不会更快，反而让这个意图一直挂着
+                git::request_cancel_for(repo_path);
+                asked = true;
+            }
+            if Instant::now() >= slot_deadline {
+                return None;
+            }
+            std::thread::sleep(SLOT_POLL);
+        } else {
+            if Instant::now() >= credit_until {
+                return None;
+            }
+            std::thread::sleep(CREDIT_POLL);
+        }
+    }
+}
+
+/// 抢不到槽时给的那句话。**别说成"后台自动同步正在进行"**——那是进程级锁时代的
+/// 唯一可能来源；槽按仓库分之后，占着它的也可能是这个仓库自己的上一次操作。
+/// 话说不准的后果不是报错，是用户去等一个根本没有在跑的后台任务。
+pub(crate) const BUSY_MSG: &str = "这个仓库还有另一个操作没结束（也许是后台自动同步），\
+                                   已请求中断它，请稍后重试";
 
 /// 三处失败出口（检测 / 拉取 / 推送）都要判"SSH 公钥被拒"，
 /// 所以取公钥路径也收成一处。**只在这条分支上被调用**——
@@ -52,8 +216,9 @@ fn pubkey_path() -> String {
 }
 
 /// 检查云端更新（用户触发）。on_progress 为 None 时进度静默丢弃。
-pub fn check_update(path: &str, on_progress: Option<&dyn Fn(&ProgressEvent)>) -> OpResult {    let Some(_guard) = begin_user_op() else {
-        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+pub fn check_update(path: &str, on_progress: Option<&dyn Fn(&ProgressEvent)>) -> OpResult {
+    let Some(_guard) = begin_user_op(path) else {
+        return OpResult::err(BUSY_MSG.into(), String::new());
     };
     do_check(path, on_progress)
 }
@@ -141,8 +306,8 @@ pub fn pull_repo(
     stash: bool,
     on_progress: Option<&dyn Fn(&ProgressEvent)>,
 ) -> OpResult {
-    let Some(_guard) = begin_user_op() else {
-        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+    let Some(_guard) = begin_user_op(path) else {
+        return OpResult::err(BUSY_MSG.into(), String::new());
     };
     do_pull(path, stash, on_progress)
 }
@@ -180,21 +345,30 @@ pub fn do_pull(
     let mut log = String::new();
     let mut stashed = false;
     if stash && status_before.dirty {
-        let s = run_local(
+        // ⛔ **`stash push` 与收尾的 `stash pop` 是一对，essential 化必须一起做**。
+        // 补二十一（2026-10-08）把 pop 改成"用户按了停止也照样跑完"，
+        // 而 push 一直还是可取消的 `run_local` ⇒ 取消落在 push 期间时，git 已经
+        // 打了 "Saved working directory…"、把文件收进了 stash，却在**清理工作区
+        // 那一步被 kill**：`stashed` 还是 false ⇒ 收尾那句 pop 根本不跑，
+        // 而 `pop_ok` 也是 None ⇒ 连"文件还压在暂存里"那一句都不说
+        // ⇒ 用户的东西**凭空从工作区消失，界面一个字都不提**。
+        // （2026-10-10 由一条偶发红抓出来：全量并行六轮红三轮，聚焦单跑十轮全绿——
+        // 红不红只取决于有没有别的使用者在抢 CPU，而抢到的那一次正好把停止
+        // 按进 push 的收尾里。见路线表 32-9 落地账。）
+        //
+        // 判据不是新发明的：`net.rs::run_local_essential` 那条写的就是
+        // **"只给这一步不做完、用户的东西就回不来的命令用"**——push 半途被杀
+        // 留下的状态连 git 自己都说不清，它比 pop 更符合这一条
+        let s = run_local_essential(
             path,
             &["stash", "push", "-u", "-m", crate::stash::MSG_PULL],
         );
         log.push_str(&combined(&s));
         if !s.success {
-            // 取消落在 `stash push` 这一档时说"已取消"，不说"暂存失败"：
-            // 那一步是被按停的，不是出了故障（同 `pull_verdict` 里①那一档一个道理）。
+            // essential 命令**不会**返回 `CANCELLED_MSG`（机制那条单测钉着），
+            // 所以这一档只剩一种解释：暂存本身出了故障。
             // 这里 `stashed` 还是 false ⇒ 没有文件压在 stash 里，回滚是干净的
-            let msg = if s.stderr.contains(git::CANCELLED_MSG) {
-                "拉取已取消".to_string()
-            } else {
-                "暂存本地变更失败，已取消拉取".to_string()
-            };
-            return OpResult::err(msg, log);
+            return OpResult::err("暂存本地变更失败，已取消拉取".to_string(), log);
         }
         stashed = true;
     }
@@ -215,7 +389,7 @@ pub fn do_pull(
     // ① 顺序：拉取成功、失败、被取消——**三种结局都得把用户那些没提交的文件还回去**。
     //    原来 pop 的失败判断排在"拉取成败"之前，于是取消那一次界面说的是
     //    「拉取完成，但恢复暂存变更时冲突」——**一句里两个假话**：既没完成，也不是冲突
-    // ② 必达：原来走 `run_local`，而它每 50ms 查一次进程级取消标记 ⇒
+    // ② 必达：原来走 `run_local`，而它每 50ms 查一次那个仓库的取消标记 ⇒
     //    用户点「停止」时标记早就置位，这条 pop 在第一个周期就被整树杀掉 ⇒
     //    **7 个未跟踪文件留在 stash 里**（2026-10-08 实测坐实，路线表 31.4 补二十一）
     let mut pop_ok: Option<bool> = None;
@@ -392,8 +566,8 @@ pub fn push_repo(path: &str) -> OpResult {
     if !valid_repo(path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
-    let Some(_guard) = begin_user_op() else {
-        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+    let Some(_guard) = begin_user_op(path) else {
+        return OpResult::err(BUSY_MSG.into(), String::new());
     };
     do_push(path)
 }
@@ -499,8 +673,8 @@ pub fn commit_push_with(path: &str, message: &str, pull_first: bool) -> OpResult
     if !valid_repo(path) {
         return OpResult::err("该文件夹不是 git 仓库".into(), String::new());
     }
-    let Some(_guard) = begin_user_op() else {
-        return OpResult::err("后台自动同步正在进行，已请求中断，请稍后重试".into(), String::new());
+    let Some(_guard) = begin_user_op(path) else {
+        return OpResult::err(BUSY_MSG.into(), String::new());
     };
     let msg = message.trim();
     if msg.is_empty() {
@@ -566,15 +740,177 @@ pub fn commit_push_with(path: &str, message: &str, pull_first: bool) -> OpResult
 mod tests {
     use super::*;
 
+    /// 额度是**全局的一扇门**：`MAX_CONCURRENT_OPS` 路同时持有没问题，
+    /// 多一路就进不来，而**还一票就得放得进一票**。
+    ///
+    /// 这条测的是 32-9 新加的那道闸门。用 `try_begin_op` 而不是 `begin_user_op`：
+    /// 前者撞满立刻返回 `None`，后者会排队等（等到 `NET_TIMEOUT` 才放弃）——
+    /// **拿"会等的那条路"去测"满不满"，测出来的永远是"它还在等"**。
+    ///
+    /// ⚠️ 整段持 `GIT_TEST_LOCK` **写锁**独占，理由与取消测试不同：
+    /// 额度是**进程级计数**，而 `stash.rs` 那几条用例走 `apply_one` ⇒
+    /// `begin_user_op` ⇒ 各占一票。不独占的话这里会假红——
+    /// 而红的不是上限，是隔壁占掉的票（"前提不能外包给环境"的同族）
     #[test]
-    fn op_lock_is_reentrant_user_side() {
-        // begin_user_op 在没有并发占用时必然成功
-        let g = begin_user_op();
-        assert!(g.is_some());
-        // 持有期间 try_begin_op（后台视角）拿不到
-        assert!(try_begin_op().is_none());
-        drop(g);
-        assert!(try_begin_op().is_some());
+    fn the_credit_gate_holds_exactly_max_concurrent_ops() {
+        let _exclusive = crate::git::GIT_TEST_LOCK
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = "qbgcredit://";
+        let mut held = Vec::new();
+        // ⚠️ 循环上界**故意不写 `0..MAX_CONCURRENT_OPS`**：写成它的话，
+        // 把上限变异成 `usize::MAX` 就变成要跑 1.8e19 次——那不是"红在预期的那条"，
+        // 是测试自己挂住（本轮第一次跑变异就撞在这上面，四条里三条报"退出码 101、
+        // 失败 0 条"，看着像判据坏，其实是脚本分不清"编译失败 / 挂住 / 真红"）
+        const PROBES: usize = 8;
+        for i in 0..PROBES {
+            match try_begin_op(&format!("{base}{i}")) {
+                Some(guard) => held.push(guard),
+                None => break,
+            }
+        }
+        assert_eq!(
+            held.len(),
+            MAX_CONCURRENT_OPS,
+            "一次能拿到的票数不等于上限（拿到 {} 票）⇒ 要么限流整条没了，要么闸门漏了",
+            held.len()
+        );
+        assert!(
+            try_begin_op(&format!("{base}overflow")).is_none(),
+            "额度用满之后还放得进第 {} 路 ⇒ 上限形同虚设，\
+             批量会一次开十几个 git 进程去撞远端限流",
+            MAX_CONCURRENT_OPS + 1
+        );
+        // 还一票必须放得进一票。**漏还的表现不是报错，是"越用越慢、
+        // 最后又变回一次只能做一件事"**——所以这一半比上面那一半更要紧
+        held.pop();
+        assert!(
+            try_begin_op(&format!("{base}overflow")).is_some(),
+            "还了一票之后第 {} 路仍进不来 ⇒ 额度漏还了",
+            MAX_CONCURRENT_OPS + 1
+        );
+        drop(held);
+        // 全部放开之后，一整轮上限都得进得来（防"计数没归零"）
+        let mut again = Vec::new();
+        for i in 0..PROBES {
+            match try_begin_op(&format!("{base}again{i}")) {
+                Some(guard) => again.push(guard),
+                None => break,
+            }
+        }
+        assert_eq!(
+            again.len(),
+            MAX_CONCURRENT_OPS,
+            "释放之后上限没能完整恢复（只拿到 {} 票）",
+            again.len()
+        );
+    }
+
+    /// 上限那几路是**真的同时在场**，不是拿到票之后仍然排队。
+    ///
+    /// 上面那条测"闸门发几张票"，这条测"票发出去之后有没有人一起跑"——
+    /// 两件事可以各自都对：假如槽仍然串在一把进程级锁上，
+    /// `try_begin_op` 照样能一次把 4 票发满（它发完就返回），
+    /// 于是**上限那条全绿而批量还是逐颗跑**。这是 D73 的第三型：
+    /// 结构对、末端没并行
+    ///
+    /// ⚠️ 判据取**同时在场的最大人数**，不取总耗时：耗时要靠"这机器跑多快"，
+    /// 又是一条外包给环境的前提（AGENTS 明写的那条）。这里的形状是有界的：
+    /// 每人在自己那一段里停 250ms 就走，谁也不会被卡住 ⇒
+    /// **串行会得到 1、并行会得到上路数**，两种结局都能当场判定，不会挂住用例。
+    /// 路数取 `min(上限, 8)`：写成上限本身，把上限变异成 40 就会起 40 个线程、
+    /// 各自在 `begin_user_op` 里等满 10 秒——那还是"测试自己变成前提"
+    #[test]
+    fn the_credit_actually_runs_that_many_at_once() {
+        // 只有这条用例用得到它，导在函数里 ⇒ 生产构建不会多一条 unused import
+        use std::sync::atomic::AtomicUsize;
+        // 与另外两条占用类用例同理：额度是进程级计数，必须独占
+        let _exclusive = crate::git::GIT_TEST_LOCK
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let roads = MAX_CONCURRENT_OPS.min(8);
+        let peak = Arc::new(AtomicUsize::new(0));
+        let inside = Arc::new(AtomicUsize::new(0));
+        let mut joins = Vec::new();
+        for i in 0..roads {
+            let (peak, inside) = (Arc::clone(&peak), Arc::clone(&inside));
+            // 每颗仓库用自己那一个假路径（不碰磁盘）：共用一个键就变成在测互斥
+            let path = format!("qbgconcurrent://{i}");
+            joins.push(std::thread::spawn(move || {
+                // 拿不到也继续往下走：那样 peak 会小于路数、由断言报出来，
+                // 而不是在这里 panic 掉其余几路（ panic 会把"为什么"糊掉）
+                if let Some(_guard) = begin_user_op(&path) {
+                    let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(250));
+                    inside.fetch_sub(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        for j in joins {
+            j.join().ok();
+        }
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            roads,
+            "同时在场最多只有 {} 路（上路数 {}）⇒ 上限发了票却没人一起跑，\
+             批量仍然是逐颗跑：界面会显示「1/17」很久",
+            peak.load(Ordering::SeqCst),
+            roads
+        );
+    }
+
+    /// 忙槽是**按仓库**的：同一颗仓库仍然互斥，别的仓库不再被牵连。
+    ///
+    /// 这条测试钉的是 32-8 的全部内容。它的反面就是旧形状：一颗进程级
+    /// `Mutex<()>` 让"整个应用同时只有一个忙操作"变成所有上层设计的隐含前提，
+    /// 于是批量只能串行、后台自动同步与用户操作只能二选一。
+    ///
+    /// ⚠️ 每条用例各用自己那一串假路径（不碰磁盘，也不需要真是仓库）：
+    /// `cargo test` 并行跑，两条用例共用一个路径就会互相抢槽，
+    /// 表现成"红一下好一下"的 flaky——那正是本项目最恨的东西
+    #[test]
+    fn the_busy_slot_is_per_repo() {
+        // 额度是进程级计数 ⇒ 与上面那条同理，要独占
+        let _exclusive = crate::git::GIT_TEST_LOCK
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mine = "qbgslot://per-repo-mutex";
+        let other = "qbgslot://per-repo-other";
+        let guard = begin_user_op(mine).expect("无占用时用户入口必然拿到槽");
+        // 持有期间后台视角（`try_begin_op`）拿不到同一颗仓库
+        assert!(try_begin_op(mine).is_none());
+        // 另一颗仓库照样进得来——**这条在旧的全局锁下必红**
+        assert!(try_begin_op(other).is_some(), "另一个仓库被无辜挡住了");
+        drop(guard);
+        assert!(try_begin_op(mine).is_some(), "释放之后同一颗仓库进不来");
+    }
+
+    /// 同一颗仓库的三种写法必须算**同一把槽**。
+    ///
+    /// 这条不是洁癖：界面上同一仓库从列表、从缓存、从拖放各来一种写法是常态。
+    /// 归一不彻底的症状**不是"报错"**，是两种更坏的：
+    /// ① 同一仓库长出两个槽 ⇒ **真的并发写同一个 `.git`**（32-1 那条撞墙的老账）；
+    /// ② 锁按一种写法分、取消按另一种写法打 ⇒ **停止键按下去什么都不发生**。
+    #[cfg(windows)]
+    #[test]
+    fn one_repo_written_three_ways_occupies_one_slot() {
+        // 同样要独占：这一条也占额度（`begin_user_op`）
+        let _exclusive = crate::git::GIT_TEST_LOCK
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let guard = begin_user_op(r"Qbgslot:/mixed-form").expect("first");
+        for alt in [
+            r"qbgslot:\mixed-form",
+            r"QBGSLOT:/MIXED-FORM/",
+            r" qbgslot:/mixed-form ",
+        ] {
+            assert!(
+                try_begin_op(alt).is_none(),
+                "写法「{alt}」被当成了另一颗仓库，于是同一仓库会有两个槽"
+            );
+        }
+        drop(guard);
     }
 
     /// 拉取带回的那三个数：走 `parse_numstat` → `totals_of` **整条链**。
@@ -755,91 +1091,163 @@ mod tests {
         String::from_utf8_lossy(&o.stdout).to_string()
     }
 
-    /// **中途取消，用户那些没提交的文件必须回到工作区**（2026-10-08 那条真缺陷）。
+    /// 断言消息里只放**尾部**那么长：偶发那条红要能自己报出成因，
+    /// 而整份日志里前头全是 pull 的输出，pop 那句在最后一行
+    fn tail_of(s: &str) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let take = chars.len().min(400);
+        chars[chars.len() - take..].iter().collect()
+    }
+
+    /// 轮询用的"只看一眼"：读不到就返回 `None`，**绝不当成红**。
+    ///
+    /// `local` 那条在 git 非零退出时 panic，而这里读的正是一个**正在被写**的仓库
+    /// （`stash push` 期间 refs 与 index 都在动），偶尔失败一次属于正常时序。
+    /// 判据是"等到它成功为止"，所以失败必须是一次普通的循环而不是整条用例炸掉
+    fn peek(dir: &std::path::Path, args: &[&str]) -> Option<String> {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .ok()?;
+        if !o.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&o.stdout).to_string())
+    }
+
+    /// **停止键落在拉取链上哪一点都不许丢东西**（2026-10-08 与 2026-10-10 两条真缺陷）。
     ///
     /// 这条测的是**接线**：机制那一层由 `git::an_essential_command_ignores_the_cancel_flag`
     /// 钉着，但**机制对、调用点写回 `run_local` 一样会丢文件**——而丢的是用户的东西。
-    /// 原缺陷的实测症状就是这一句：拉取被按停 ⇒ `stash pop` 被同一个标记带倒 ⇒
-    /// 未跟踪文件留在 stash 里，界面还报「拉取完成，但恢复暂存变更时冲突」
     ///
-    /// 时序：远端指向**本机一个连得上、但 accept 之后一个字节都不回**的地址
-    /// （`git::hanging_url()`，理由写在那儿——黑洞地址 `10.255.255.1` 靠的是
-    /// "本机网络栈会把这条连接挂着"，2026-10-09 它 0 毫秒就拒绝，前提就没了）⇒
-    /// 后台跑 `do_pull`，1500ms 后按停。断言三件事，**顺序按重要性排**：
-    /// ① 那个未跟踪文件与那处修改**都还在工作区里**；② stash 是空的；
-    /// ③ 结论是「拉取已取消」。
+    /// 三档取消时刻 = 这条链上三种"按停"的位置：
+    /// ① 立刻按（`stash push` 之前）② 150ms 后按（多半落在 push 里面）
+    /// ③ **观测到「stash 里已经有那一条」之后再按**（push 正在收尾）——
+    /// 第三档就是 10-10 那条偶发红指出的位置：`stash push` 那时还是可取消的
+    /// `run_local`，被 kill 在"文件已经收进 stash、工作区还没清理完"中间 ⇒
+    /// `stashed` 留 false ⇒ 收尾那句 pop 根本不跑 ⇒ 文件既不在工作区、
+    /// 界面也一个字不提"还压在暂存里"
     ///
-    /// ⚠️ 整段持 `GIT_TEST_LOCK` **写锁**独占——它会动那个进程级取消标记，
-    /// 放着不管会连坐别的测试正在跑的 git（表现为"没有退出码、stderr 为空"）
+    /// ⚠️ **第三档靠观测，不靠"睡到某个毫秒数"**。原来只睡 1500ms，赌的是
+    /// "那一刻 push 早完了"——而这条前提是 **CPU 给的**：同一份代码在全量并行的
+    /// `cargo test` 里六轮红三轮，单独聚焦跑十轮全绿，红与不红只取决于当时有多少
+    /// 别的使用者在抢时间片。**测试的前提不能外包给环境**（AGENTS 明写），
+    /// 所以这里改成"看到它真的发生了才动手"
+    ///
+    /// 远端 = 本机一个 accept 之后**一个字节都不回**的监听（`git::hanging_url()`）
+    /// ⇒ pull 一定还挂着，三档都由这条链自己造出来，不猜外部网络会怎么反应
+    ///
+    /// ⚠️ 32-8 起这条**只持读锁**：三档各用自己那一份 `qbg-cancel-{pid}-{n}-{档}`
+    /// 路径，而取消标记按仓库带地址 ⇒ 隔壁测试读的是另一个键，杀不到。
+    /// **这正是这次下沉买到的东西**，所以把它写成锁的档位，让降级本身成为一条
+    /// 可回归的判据（`git.rs` 那两条仍要写锁，因为它们共用 `.`）
     #[test]
     fn a_cancelled_pull_still_returns_the_stashed_files() {
-        let _exclusive = crate::git::GIT_TEST_LOCK
-            .write()
+        let _shared = crate::git::GIT_TEST_LOCK
+            .read()
             .unwrap_or_else(|e| e.into_inner());
         static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("qbg-cancel-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        local(&root, &["init", "-q", "--initial-branch=main", "repo"]);
-        let repo = root.join("repo");
-        // ⚠️ **身份必须配进这个仓库的 config，不能只在 commit 时用 `-c` 传**：
-        // `git stash push` 自己也要建一个 commit，没身份就整个失败 ⇒
-        // 那句「暂存本地变更失败，已取消拉取」会把这条测试引到别处去（第一次跑就是这么红的）
-        local(&repo, &["config", "user.email", "t@t"]);
-        local(&repo, &["config", "user.name", "t"]);
-        std::fs::write(repo.join("tracked.txt"), "原始\n").unwrap();
-        local(&repo, &["add", "tracked.txt"]);
-        local(&repo, &["commit", "-q", "-m", "base"]);
-        // 远端 = 本机那个"不回话"的监听。listener 交给 `hold_the_connection` 握着，
-        // **不能就地 drop**（一 drop 端口没人听，连接立刻被拒 ⇒ 前提没了）
+        // 那个不回话的监听整条测试共用一个就够。listener 交给 `hold_the_connection`
+        // 握着，**不能就地 drop**（一 drop 端口没人听，连接立刻被拒 ⇒ 前提没了）
         let (remote_url, listener) = crate::git::hanging_url();
         crate::git::hold_the_connection(listener);
-        local(&repo, &["remote", "add", "origin", &remote_url]);
-        local(&repo, &["config", "branch.main.remote", "origin"]);
-        local(&repo, &["config", "branch.main.merge", "refs/heads/main"]);
-        // 用户没提交的两样东西：`stash push -u` 会把它们**一起**收走，
-        // 所以收尾那一步没跑的话，两样都会从工作区消失
-        std::fs::write(repo.join("tracked.txt"), "改了没提交\n").unwrap();
-        std::fs::write(repo.join("untracked.txt"), "别丢\n").unwrap();
 
-        crate::git::clear_cancel();
-        let path = repo.to_string_lossy().to_string();
-        let t = std::thread::spawn(move || do_pull(&path, true, None));
-        // ⚠️ **取消要落在网络那一步，不能落在 `stash push` 期间**：
-        // 前面那几道本地 git（`read_status` + `rev-parse`）加起来就要几百毫秒，
-        // 400ms 会正好撞在 push 上——第一次跑就是这么红的，那一次报的是
-        // 「暂存本地变更失败」（跟"收尾没跑"是两件事，验不到这条链的重点）。
-        // 1.5 秒时 push 早已完成、pull 还挂在那条不回话的连接上（`NET_TIMEOUT` 是 300 秒）
-        std::thread::sleep(Duration::from_millis(1500));
-        crate::git::request_cancel();
-        let r = t.join().expect("do_pull  panicked");
-        crate::git::clear_cancel();
+        for stage in 0..3 {
+            let root = std::env::temp_dir().join(format!("qbg-cancel-{}-{n}-{stage}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            local(&root, &["init", "-q", "--initial-branch=main", "repo"]);
+            let repo = root.join("repo");
+            // ⚠️ **身份必须配进这个仓库的 config，不能只在 commit 时用 `-c` 传**：
+            // `git stash push` 自己也要建一个 commit，没身份就整个失败 ⇒
+            // 那句「暂存本地变更失败，已取消拉取」会把这条测试引到别处去（第一次跑就是这么红的）
+            local(&repo, &["config", "user.email", "t@t"]);
+            local(&repo, &["config", "user.name", "t"]);
+            std::fs::write(repo.join("tracked.txt"), "原始\n").unwrap();
+            local(&repo, &["add", "tracked.txt"]);
+            local(&repo, &["commit", "-q", "-m", "base"]);
+            local(&repo, &["remote", "add", "origin", &remote_url]);
+            local(&repo, &["config", "branch.main.remote", "origin"]);
+            local(&repo, &["config", "branch.main.merge", "refs/heads/main"]);
+            // 用户没提交的两样东西：`stash push -u` 会把它们**一起**收走，
+            // 所以收尾那一步没跑的话，两样都会从工作区消失
+            std::fs::write(repo.join("tracked.txt"), "改了没提交\n").unwrap();
+            std::fs::write(repo.join("untracked.txt"), "别丢\n").unwrap();
 
-        let got = std::fs::read_to_string(repo.join("untracked.txt"))
-            .unwrap_or_default()
-            .trim_end()
-            .to_string();
-        assert_eq!(
-            got, "别丢",
-            "取消之后那个未跟踪文件没回到工作区（它多半还压在 stash 里）；结论那句是「{}」",
-            r.message
-        );
-        assert_eq!(
-            std::fs::read_to_string(repo.join("tracked.txt"))
-                .unwrap()
-                .trim_end(),
-            "改了没提交",
-            "取消之后那处修改没回来；结论那句是「{}」",
-            r.message
-        );
-        assert!(
-            local(&repo, &["stash", "list"]).trim().is_empty(),
-            "stash 里还留着东西 ⇒ 收尾那一步没跑完：{}",
-            local(&repo, &["stash", "list"])
-        );
-        assert!(!r.ok);
-        assert_eq!(r.message, "拉取已取消", "取消那一次界面说的是：{}", r.message);
-        let _ = std::fs::remove_dir_all(&root);
+            // 取消标记按仓库带地址（32-8）⇒ 这里先定下 path，再拿它清/打
+            let path = repo.to_string_lossy().to_string();
+            crate::git::clear_cancel_for(&path);
+            let t = {
+                let path = path.clone();
+                std::thread::spawn(move || do_pull(&path, true, None))
+            };
+            match stage {
+                // ① 什么都不等：停止键按在链的最前面
+                0 => {}
+                // ② 给前面那几道本地 git 一点时间，多半正好按进 push
+                1 => std::thread::sleep(Duration::from_millis(150)),
+                // ③ **等它真的把条目写进 stash** 再按——这一档才是缺陷所在的那个位置
+                _ => {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                    loop {
+                        let parked =
+                            peek(&repo, &["stash", "list"]).is_some_and(|s| !s.trim().is_empty());
+                        if parked {
+                            break;
+                        }
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "第 ③ 档 20 秒都没等到「stash 里出现那一条」⇒ 这条测试要的前提\
+                             没造出来，取消落在哪一段是不可知的。红在这里报，\
+                             别让下一次侥幸绿蒙过去"
+                        );
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+            }
+            crate::git::request_cancel_for(&path);
+            let r = t.join().expect("do_pull panicked");
+            // 生产里"把残留的取消意图清掉"由 `begin_user_op` 负责（它刚拿到这颗仓库的槽）；
+            // 这条测试直接调 `do_pull`，不经过入口，所以自己清 —— **别把它当冗余删掉**：
+            // 标记留在 `path` 上，下一个用同一份夹具的用例就会莫名其妙地被取消
+            crate::git::clear_cancel_for(&path);
+
+            let got = std::fs::read_to_string(repo.join("untracked.txt"))
+                .unwrap_or_default()
+                .trim_end()
+                .to_string();
+            assert_eq!(
+                got, "别丢",
+                "第 {stage} 档取消之后那个未跟踪文件没回到工作区（它多半还压在 stash 里）；\
+                 结论那句是「{}」\n收尾日志（push / pull / pop 各说了什么）：{}",
+                r.message,
+                tail_of(&r.output),
+            );
+            assert_eq!(
+                std::fs::read_to_string(repo.join("tracked.txt"))
+                    .unwrap()
+                    .trim_end(),
+                "改了没提交",
+                "第 {stage} 档取消之后那处修改没回来；结论那句是「{}」",
+                r.message
+            );
+            assert!(
+                local(&repo, &["stash", "list"]).trim().is_empty(),
+                "第 {stage} 档 stash 里还留着东西 ⇒ 收尾那一步没跑完：{}",
+                local(&repo, &["stash", "list"])
+            );
+            assert!(!r.ok, "第 {stage} 档");
+            assert_eq!(
+                r.message,
+                "拉取已取消",
+                "第 {stage} 档取消那一次界面说的是：{}",
+                r.message
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 }

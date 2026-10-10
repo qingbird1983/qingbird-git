@@ -12,11 +12,17 @@
 //! ——收 `&AppConfig` 返 `AppConfig`，落盘由调用方做。这样"结果写回配置"这条路径
 //! 也能被单测盖到，而旧版它只能在真跑一次网络操作之后才被验证到。
 //!
-//! ## 互斥
+//! ## 互斥（32-8 起按仓库分）
 //!
-//! 调用方（GUI 侧定时器）必须**在 [`run_one`] 外层持有 [`sync::try_begin_op`]**。
-//! 拿不到就跳过本轮，不排队也不等待：用户正在操作时后台就该让路。
-//! 反过来用户操作会先 `request_cancel` 再等锁，所以后台跑一半被中断是正常路径。
+//! 调用方（GUI 侧定时器）必须**在 [`run_one`] 外层持有 [`sync::try_begin_op(path)`]**。
+//! 拿不到就跳过**那一颗**仓库，不排队也不等待：用户正在操作它时后台就该让路。
+//! 反过来用户操作会先 `git::request_cancel_for(同一个路径)` 再等槽，
+//! 所以后台跑一半被中断是正常路径。
+//!
+//! ⚠️ 作用域从"全应用"收成"单仓库"之后，**跨仓库并发变成允许的了**，
+//! 于是原本被全局锁顺带挡住的一层露出来：多处"读配置 → 改 → 写回"可以同时在跑
+//! （这里的 `record_result` 落盘、`net.rs` 那两处代理写回）。
+//! 那一条由 `store::save` 自己管（一把写锁 + 临时文件改名替换），不在这里加第二层。
 
 use crate::repos;
 use crate::store::{self, AppConfig, RepoEntry};
@@ -257,11 +263,13 @@ pub fn display_name(e: &RepoEntry) -> String {
     }
 }
 
-/// 对单个仓库跑一次自动同步。**调用方必须已经持有 `sync::try_begin_op()`**
+/// 对单个仓库跑一次自动同步。**调用方必须已经持有 `sync::try_begin_op(&entry.path)`**
 ///
 /// 这里调的是 [`sync::do_check`] / [`sync::do_pull`] 而不是
-/// `check_update` / `pull_repo`——后两个自己会去拿 `begin_user_op()`，
-/// 而调用方已经拿着锁了，再去拿会死等 10 秒然后失败
+/// `check_update` / `pull_repo`——后两个会自己去拿 `begin_user_op(同一个路径)`，
+/// 而调用方已经占着**这颗仓库**的槽了，再去拿就是等满 10 秒然后失败
+/// （⚠️ 32-8 之前那条理由写作"锁被自己占住"，作用域是整个应用；
+/// 现在它只挡同一颗仓库——**换句话说别的仓库再也不会被这里跳过了**）
 pub fn run_one(entry: &RepoEntry) -> AutoSyncResult {
     let path = entry.path.clone();
     let name = display_name(entry);

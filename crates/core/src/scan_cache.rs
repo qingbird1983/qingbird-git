@@ -137,14 +137,51 @@ CREATE TABLE IF NOT EXISTS op_history (
 CREATE INDEX IF NOT EXISTS idx_op_history_path ON op_history(path, id DESC);
 ";
 
+/// 并发写这张表时，让第二个连接**等多久**再放弃（毫秒）。
+///
+/// ⚠️ 这一档在 32-9 之前一直是空转的：那颗全局 `OP_LOCK` 让同一时刻只有一个忙操作，
+/// 而 `record_op` 又跑在主线程 ⇒ 两个连接从没同时写过。**批量并发之后**
+/// "多路各开一个连接、各写一行"变成常态 ⇒ 抢不到写锁的那个连接直接 `SQLITE_BUSY`，
+/// 而这一层的约定是「写失败返回 false、绝不 panic」（它是加速器）
+/// ⇒ 症状是**操作历史静默少几条**：check 零错、单测全绿、界面上一点看不出来
+/// （D73 同族——断点不在逻辑里，在"没人报"这件事上）。
+///
+/// 取 5 秒：一行 `INSERT` 持写锁的时间是毫秒级，5 秒足够排完一整批（上限 4 路 ×
+/// 十几个仓库），而真出磁盘故障时它也不会把界面拖住太久
+///
+/// ⚠️ **`rusqlite` 0.40.2 自己在建连接时就把这一档设成了 5000**
+/// （`inner_connection.rs:118` 的 `sqlite3_busy_timeout(db, 5000)`）。所以：
+/// ① **这一句在当前依赖版本下与上游默认同值**，删掉它**不会有任何行为变化**，
+/// 于是"把那句删掉"这种变异**打不红任何用例**——本轮实测正是如此；
+/// ② 上游那个数是**实现细节不是契约**（它不在 `Connection::open` 的文档里，
+/// 也没有任何版本号钉着），把它写成我们自己的常量就是不打算赌它；
+/// ③ ⇒ 能证伪的判据不是"有没有那一句"，是**这一档是不是 0**：
+/// `a_contended_write_waits_and_does_not_vanish` 把 `BUSY_TIMEOUT_MS` 设成 0
+/// 会当场红（真实变异验证过），而它测的是"抢锁那一次到底记没记上"。
+const BUSY_TIMEOUT_MS: u64 = 5000;
+
 /// 打开并确保表结构。**打不开返回 None**——调用方照常走全量扫描。
 fn open() -> Option<rusqlite::Connection> {
-    let path = db_path()?;
+    open_at(&db_path()?)
+}
+
+/// [`open`] 的实现，**库文件路径由调用方给**。
+///
+/// 拆这一层跟 `store::save_to` 同一个理由：`db_path()` 读的是 `APPDATA`，
+/// 而单测不许 `set_var` 那个进程级全局 ⇒ 「busy_timeout 到底设没设」这种判据
+/// 不拆出来就**一条用例都写不了**，只能靠注释信一句
+pub(crate) fn open_at(path: &std::path::Path) -> Option<rusqlite::Connection> {
     if let Some(dir) = path.parent() {
         // 目录不存在（首次运行）就建一个；建不出来也是 None，不硬撑
         std::fs::create_dir_all(dir).ok()?;
     }
     let conn = rusqlite::Connection::open(path).ok()?;
+    // ⚠️ **必须排在 `execute_batch(SCHEMA)` 之前**：那两条
+    // `CREATE TABLE IF NOT EXISTS` 在并发首次启动时**自己就要抢写锁**——
+    // 建表抢不到就直接 `None`，等于"缓存今天没工作"，而它报不出来
+    conn
+        .busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))
+        .ok()?;
     conn.execute_batch(SCHEMA).ok()?;
     Some(conn)
 }
@@ -192,7 +229,22 @@ pub fn drop_cache(repo_path: &str) -> bool {
 /// 跨过秒边界就对不上——刚跑完显示「3 分钟前」、重启后又变成「刚刚」。
 /// 返回 `None` = 没记上，调用方不必在意。
 pub fn record_op(repo_path: &str, op: &str, ok: bool, detail: &str) -> Option<u64> {
-    let conn = open()?;
+    record_op_at(&db_path()?, repo_path, op, ok, detail)
+}
+
+/// [`record_op`] 的实现，**库文件路径由调用方给**。
+///
+/// 拆法与 `open_at` / `store::save_to` 同一个理由：「并发写不丢记录」这条判据
+/// 要在**同一个沙箱库文件**上开两个连接跑，而单测不许 `set_var` 那个进程级
+/// `APPDATA` ⇒ 不拆就只能在真实配置目录上做实验。
+pub(crate) fn record_op_at(
+    db: &std::path::Path,
+    repo_path: &str,
+    op: &str,
+    ok: bool,
+    detail: &str,
+) -> Option<u64> {
+    let conn = open_at(db)?;
     let ts = crate::store::now_secs();
     conn.execute(
         "INSERT INTO op_history (ts, path, op, ok, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -406,5 +458,81 @@ mod tests {
         assert!(!save_cache("F:\\whatever", &sample("F:\\whatever")));
         assert_eq!(record_op("F:\\whatever", "pull", true, ""), None);
         assert!(op_history("F:\\whatever", 5).is_empty());
+    }
+
+    /// 这一档必须是**我们写的那个值**——但它**证明不了"那一句 busy_timeout 有没有执行"**。
+    ///
+    /// ⚠️ 如实登记（本轮变异验证撞出来的）：`rusqlite` 0.40.2 建连接时自己就设了
+    /// 5000（`inner_connection.rs:118`），所以**把 `open_at` 里那三行整个删掉，
+    /// 这条照样绿**——M4 实测"跑了 1 条、失败 0 条"。它的价值只剩"钉住数值本身"：
+    /// 万一上游那个实现细节变了，这条会红。**能证伪这一层保护的只有下面那条**。
+    #[test]
+    fn the_busy_timeout_is_actually_set_on_a_new_connection() {
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qbg-cache-busy-{}-{n}", std::process::id()));
+        let file = dir.join("cache.db");
+        let conn = open_at(&file).expect("临时库该打得开");
+        let ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            ms,
+            BUSY_TIMEOUT_MS as i64,
+            "这一档不是我们说的那个值 ⇒ 并发写要么白等要么直接放弃，\
+             而这一层不会报，只会静默少记一条"
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **抢不到写锁的那一次必须记上，不是静默消失**——32-9 批量并发之后
+    /// "多路各开一个连接、各写一行"变成常态，这条才是那一层保护的行为判据。
+    ///
+    /// 判据取**末端拿没拿到那条数**，不取"代码里有没有那句 `busy_timeout`"
+    /// （后者正是本项目反复交学费的那类自查）。变异把 `BUSY_TIMEOUT_MS` 设成 0
+    /// ⇒ 等待那一路当场红：这一条是**有证明力的**。
+    ///
+    /// 不需要 `APPDATA_LOCK`：全程只碰这一个沙箱文件，`record_op_at` 的路径是参数。
+    #[test]
+    fn a_contended_write_waits_and_does_not_vanish() {
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qbg-cache-contend-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("cache.db");
+
+        // 先把表建好，免得"等锁"与"等建表"混成一件事
+        drop(open_at(&file).expect("临时库该打得开"));
+
+        // 占住写锁：一条真 `INSERT` 挂在没提交的事务上
+        let holder = open_at(&file).expect("占锁的连接该打得开");
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        holder
+            .execute(
+                "INSERT INTO op_history (ts, path, op, ok, detail) VALUES (1, 'holder', 'pull', 1, '')",
+                [],
+            )
+            .unwrap();
+
+        // 另一路同时来写——它只能等，等不到就**什么都不报**地丢掉
+        let waiter_file = file.clone();
+        let waiter = std::thread::spawn(move || record_op_at(&waiter_file, "waiter", "pull", true, "拉到 2 个提交"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        holder.execute_batch("COMMIT").unwrap();
+        let ts = waiter.join().unwrap();
+
+        assert!(
+            ts.is_some(),
+            "被抢锁的那一次没记上 ⇒ 等待时间形同 0，\
+             而这一层是加速器、它不报错，界面上永远看不出来"
+        );
+        // 两条都得在：占锁那条与等待那条，一个都不能少
+        let rows: i64 = open_at(&file)
+            .expect("复查的连接该打得开")
+            .query_row("SELECT COUNT(*) FROM op_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "并发写丢记录：历史里少一条 = 用户看不见那次操作");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

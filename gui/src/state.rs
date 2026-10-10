@@ -23,6 +23,7 @@ use qingbird_core::history::{CommitDetail, CommitPatch, CommitSummary};
 use qingbird_core::repos::{self, ActivityDay, ChangeEntry, LangStat};
 use qingbird_core::run_cmd::{self, Slot};
 use qingbird_core::space;
+use qingbird_core::sync;
 use qingbird_core::stash::StashEntry;
 use qingbird_core::store::{self, CloseAction, RepoEntry};
 use qingbird_core::types::{ForkInfo, RepoStatus, UpdateChanges};
@@ -828,6 +829,15 @@ pub(crate) struct Shell {
     /// 批量同步的进度与结论；None = 本会话还没跑过批量。
     /// 入口是 ⌘K 的三条固定命令（Q3）。汇总落在 `app_log` 而不是某一个仓库
     pub(crate) batch: Option<BatchRun>,
+    /// 批量跑完那一句**通知**的一次性标记，由 `render` 消费。
+    ///
+    /// 为什么不走 `this.win` + `cx.update_window` 那条现成的路：并发之后
+    /// "最后一个完成"的那颗**可能是同步结清的脏跳过**（它一秒都不跑，
+    /// 不占并发位），那条路是在主线程的 `update` 闭包里走到的——正是
+    /// 「窗口已被 `update_window_id` take 走，`cx.update_window` 把整个闭包
+    /// 静默丢掉」那一档（AGENTS 记过两次，症状都是"点了完全没反应"）。
+    /// 两条路共用这一个出口，就不用去判断"我是从哪条路收尾的"
+    pub(crate) pending_batch_note: Option<String>,
     /// 应用级日志。**只有跨仓库的批次往这里写**——按仓库存的那份在 `logs`，
     /// 一条都不该混进这个槽
     pub(crate) app_log: LogState,
@@ -1276,6 +1286,15 @@ pub(crate) struct CloneDialog {
     pub(crate) progress: CloneProgress,
     /// 失败的一句中文结论 + git 原始 stderr
     pub(crate) error: Option<String>,
+    /// **本次克隆那个 git 进程实际的 `-C` 地址**（目标父目录）。
+    ///
+    /// 取消标记按仓库带地址之后（路线表 32-8），「取消克隆」必须打在这一个串上。
+    /// ⚠️ 它是**起跑那一刻定死的**，不是取消时再去读输入框：克隆要几分钟，
+    /// 期间那个框里的字可能被改、被粘贴、被用户清了重写，照着"此刻框里是什么"
+    /// 去取消 = 按下去什么都不发生。
+    /// 判据同那条老账：**「用户看不见的状态」要在界面上说出来**反过来的那一半——
+    /// **「操作自己的输入要在操作起跑时固化，不能在结束时重新问一遍」**
+    pub(crate) cloning_into: String,
 }
 
 /// 克隆进行时要上屏的四档。
@@ -1390,12 +1409,29 @@ impl BatchKind {
 ///
 /// 规则：**跳过 / 失败为 0 时那一段整个不出现**（旧 React 版就钉过这条，
 /// `pnpm test:web` 里的「不写『跳过 0 个』这种废话」）。顺序固定在成功之后。
-pub(crate) fn batch_summary(kind: BatchKind, done: usize, total: usize, ok: usize, skipped: usize, failed: usize) -> String {
+pub(crate) fn batch_summary(
+    kind: BatchKind,
+    done: usize,
+    total: usize,
+    ok: usize,
+    skipped: usize,
+    failed: usize,
+    running: &[String],
+) -> String {
     if done < total {
-        return format!(
-            "{} · {done}/{total}",
-            kind.label()
-        );
+        // ⚠️ 32-9 起必须把**正在跑哪几颗**说出来。以前那句只有「批量拉取 · 3/17」，
+        // 串行时"3/17"顺带就回答了"现在在第几颗"；并发之后完成顺序是乱的，
+        // 数字只回答"完了几个"、**不回答"现在在跑谁"**——那是 D73 的同一种形状：
+        // 信息在换写法的那一步被悄悄丢掉，界面看着还挺对。
+        // 状态条那一格只给短句（完整解释在 `app_log` 与跑完的通知里），
+        // 所以三颗以上收成「等 N 颗」，不把名字一路铺下去把路径挤出可视区
+        let head = format!("{} · {done}/{total}", kind.label());
+        return match running.len() {
+            0 => head,
+            1 => format!("{head} · 正在跑 {}", running[0]),
+            n if n <= 2 => format!("{head} · 正在跑 {}", running.join("、")),
+            n => format!("{head} · 正在跑 {} 等 {n} 颗", running[0]),
+        };
     }
     let mut s = format!("{} · {ok} 成功", kind.label());
     if skipped > 0 {
@@ -1407,14 +1443,37 @@ pub(crate) fn batch_summary(kind: BatchKind, done: usize, total: usize, ok: usiz
     s
 }
 
+/// 批量调度那一问的**纯函数**版：还能不能再发一颗。
+///
+/// ⚠️ 为什么不直接写在 `Shell::batch_take_next` 里：`Shell` 带着 gpui 上下文，
+/// **构造不出来** ⇒ "上限有没有生效"这条判据一条单测都写不了，
+/// 而它恰恰是这一批最容易被改坏的一处（把 `<` 改成 `<=`、把常量抄成 100，
+/// check 零错、界面看着也还在跑）。抽出来之后变异能红在它身上
+/// （AGENTS：凡是要靠 `&self` 才能调的判据，抽成纯函数再单测）
+pub(crate) fn batch_can_launch_more(running: bool, in_flight: usize, queued: usize) -> bool {
+    running && in_flight < sync::MAX_CONCURRENT_OPS && queued > 0
+}
+
 /// 批量同步的进度与结论。入口在 ⌘K（Q3），**界面上的复选框与批量条在阶段 6 已删**。
 ///
 /// 汇总写进 `Shell::app_log`（全局槽）而不是某个仓库的日志：这一批横跨多个
 /// 仓库，记到"当前选中"名下会让人以为只动了一个
+///
+/// ⚠️ 32-9 起它是**一个自己数着并发位的调度器**，不再是一条按顺序走的队列：
+/// `queue` 是还没发的，`running_now` 是正在发的（最多 `sync::MAX_CONCURRENT_OPS` 颗）。
+/// 调度为什么放在界面这一层而不是"17 个任务一起丢给 core 排队"——
+/// gpui 那个后台执行器是**共享线程池**，全堵在额度等待里会把扫描、克隆进度这些
+/// 别的活儿饿死；而按固定批数分批又有"一批里一颗挂死、整批等它"的队头阻塞。
+/// 自己数着"完成一颗补一颗"两样都躲开
 pub(crate) struct BatchRun {
     pub(crate) kind: BatchKind,
-    /// 队列里的仓库路径，顺序即执行顺序
+    /// 这一批全部的目标，顺序即**入队**顺序（执行顺序并发之后就不固定了）
     pub(crate) paths: Vec<String>,
+    /// 还没发出去的
+    pub(crate) queue: Vec<String>,
+    /// 正在跑的这几颗（路径）。状态条那句"正在跑 甲、乙"读它，
+    /// **不是从 `done` 反推的**——并发之后"第几个"这个说法已经不成立了
+    pub(crate) running_now: Vec<String>,
     pub(crate) done: usize,
     pub(crate) ok: usize,
     /// 拉取时脏工作区跳过的个数（推送与检测没有这条路，恒 0）
@@ -1733,16 +1792,16 @@ mod tests {
     #[test]
     fn batch_summary_omits_the_zero_parts() {
         assert_eq!(
-            batch_summary(BatchKind::Pull, 3, 3, 3, 0, 0),
+            batch_summary(BatchKind::Pull, 3, 3, 3, 0, 0, &[]),
             "批量拉取 · 3 成功"
         );
         assert_eq!(
-            batch_summary(BatchKind::Push, 2, 2, 1, 1, 0),
+            batch_summary(BatchKind::Push, 2, 2, 1, 1, 0, &[]),
             "批量推送 · 1 成功 · 1 跳过",
             "顺序固定在成功之后"
         );
         assert_eq!(
-            batch_summary(BatchKind::Check, 4, 4, 1, 0, 3),
+            batch_summary(BatchKind::Check, 4, 4, 1, 0, 3, &[]),
             "批量检测 · 1 成功 · 3 失败"
         );
     }
@@ -1752,14 +1811,82 @@ mod tests {
     #[test]
     fn batch_summary_distinguishes_stopped_from_finished() {
         assert_eq!(
-            batch_summary(BatchKind::Pull, 2, 5, 2, 0, 1),
+            batch_summary(BatchKind::Pull, 2, 5, 2, 0, 1, &[]),
             "批量拉取 · 2/5",
             "还在跑 / 被停：报进度"
         );
         assert_eq!(
-            batch_summary(BatchKind::Push, 2, 2, 2, 0, 0),
+            batch_summary(BatchKind::Push, 2, 2, 2, 0, 0, &[]),
             "批量推送 · 2 成功",
             "done == total 就是跑完了，哪怕 running 是 false"
+        );
+    }
+
+    /// 并发之后**光有 `2/5` 已经回答不了"现在在跑谁"**——串行时那个数字
+    /// 顺带就是答案（第 3 颗在跑），并发之后完成顺序是乱的，
+    /// 从"完了几个"推不出"现在在跑哪几个"。
+    /// 这一族是 D73 的同型：**信息不是被截断的，是被一种新写法悄悄顶掉的**
+    #[test]
+    fn batch_progress_names_what_is_running_now() {
+        let a = "甲".to_string();
+        let b = "乙".to_string();
+        let c = "丙".to_string();
+        let d = "丁".to_string();
+        assert_eq!(
+            batch_summary(BatchKind::Pull, 2, 6, 2, 0, 0, &[a.clone()]),
+            "批量拉取 · 2/6 · 正在跑 甲"
+        );
+        assert_eq!(
+            batch_summary(BatchKind::Pull, 2, 6, 2, 0, 0, &[a.clone(), b.clone()]),
+            "批量拉取 · 2/6 · 正在跑 甲、乙",
+            "两颗都点名"
+        );
+        // 三颗以上收成"等 N 颗"：状态条那一格只给短句，
+        // 把四个名字一路铺下去会把中间那格撑走、路径被挤出可视区
+        assert_eq!(
+            batch_summary(BatchKind::Pull, 2, 6, 2, 0, 0, &[a.clone(), b.clone(), c.clone()]),
+            "批量拉取 · 2/6 · 正在跑 甲 等 3 颗"
+        );
+        assert_eq!(
+            batch_summary(
+                BatchKind::Push,
+                0,
+                6,
+                0,
+                0,
+                0,
+                &[a.clone(), b.clone(), c.clone(), d.clone()]
+            ),
+            "批量推送 · 0/6 · 正在跑 甲 等 4 颗",
+            "一颗都没完时也要说得出在跑谁"
+        );
+    }
+
+    /// 并发上限这一问的四种组合逐一钉住。
+    ///
+    /// 把它抽成纯函数只为这一条：`Shell` 带着 gpui 上下文**构造不出来**，
+    /// 不抽出来"上限有没有生效"就只能靠抓帧看——而抓帧恰恰看不出
+    /// "本该发第 5 颗却没发"这种事（画面上一切正常）。
+    /// 最后那条区间断言是防"把上限写成 `usize::MAX`"：那种改法上面几条**全绿**，
+    /// 而"限流"这件事已经整条没了
+    #[test]
+    fn the_batch_gate_opens_only_within_the_limit() {
+        let max = sync::MAX_CONCURRENT_OPS;
+        assert!(batch_can_launch_more(true, 0, 1), "有空位又有排队就该发");
+        assert!(batch_can_launch_more(true, max - 1, 9), "只差一个空位也要发");
+        assert!(
+            !batch_can_launch_more(true, max, 9),
+            "满了还许发 ⇒ 上限形同虚设，批量会一次开十几个 git 进程去撞远端限流"
+        );
+        assert!(
+            !batch_can_launch_more(true, 0, 0),
+            "队列空了不许发（那样会 panic 在 `first()` 上）"
+        );
+        assert!(!batch_can_launch_more(false, 0, 5), "这一批已收尾，不许再发");
+        assert!(
+            (2..=8).contains(&max),
+            "并发上限取 {max} 路：再高撞远端限流、再低批量就没意义，\
+             这个区间是 Q28 定下来的口径"
         );
     }
 

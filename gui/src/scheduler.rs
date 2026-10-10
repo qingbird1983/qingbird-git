@@ -14,11 +14,18 @@
 //! 还活着，两者缺一不可——**没有托盘就别设 `QuitMode::Explicit`**，那会让应用变成
 //! 一个没有任何入口的幽灵进程。
 //!
-//! ## 互斥
+//! ## 互斥（32-8 起是**按仓库**的）
 //!
-//! 每跑一个仓库前先 [`sync::try_begin_op`]：拿不到就跳过本轮，**不排队也不等待**。
-//! 反向是用户操作优先——`begin_user_op` 会先 `git::request_cancel` 打断后台，
-//! 再等锁。抢不到锁就跳过的语义与旧 Tauri 版一致。
+//! 每跑一个仓库前先 [`sync::try_begin_op(&path)`]：那颗仓库正被用户操作就跳过它，
+//! **不排队也不等待**，别的仓库照跑。反向是用户操作优先——`begin_user_op(path)`
+//! 会先 `git::request_cancel_for(path)` 打断**同一颗仓库**的后台操作，再等槽。
+//!
+//! ⚠️ 以前这两个函数都是一把进程级 `Mutex<()>`，所以"后台跑的时候用户什么都别动"
+//! 是结构给的、不是设计要的。现在按仓库分了，**跨仓库的并发是允许的**，
+//! 于是有一件以前被全局锁顺带挡住的事露了出来：**配置文件的并发写**
+//! （`net.rs` 那两处"上次成功代理"写回 + 这里下面那个 `persist`）。
+//! 落法在 `store::save` 那一层——一把写锁 + 临时文件再改名替换，
+//! 理由与判据都写在那条注释里。
 
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::WindowExt as _;
@@ -72,8 +79,10 @@ async fn tick(cx: &mut AsyncApp) {
         if !scheduler::is_enabled(&entry) {
             continue; // 用户刚关了。**两种模式都要认**——见 core 的 is_enabled
         }
-        // 拿不到操作锁说明用户正在操作（或上一轮还没跑完），跳过本轮，下个 tick 再试
-        let Some(_guard) = sync::try_begin_op() else {
+        // 拿不到**这一颗仓库**的槽说明用户正在操作它（或上一轮还没跑完），
+        // 跳过这一轮，下个 tick 再试。⚠️ 32-8 起它是按仓库分的：隔壁仓库正在
+        // 被用户操作**不再**让这一轮跳过——那条限制以前是进程级锁给的，不是需求
+        let Some(_guard) = sync::try_begin_op(&entry.path) else {
             continue;
         };
         let e = entry.clone();

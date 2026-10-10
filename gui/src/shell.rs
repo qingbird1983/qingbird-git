@@ -68,6 +68,11 @@ impl Render for Shell {
                 FolderPick::AddRepo => self.pick_repo_path_folder(window, cx),
             }
         }
+        // 批量跑完那一句通知，同样在这一帧兑现。为什么不走后台任务里那条
+        // `win` + `update_window` 的老路，理由写在 `Shell::pending_batch_note` 上
+        if let Some(note) = self.pending_batch_note.take() {
+            window.push_notification(note, cx);
+        }
         // 关窗询问面板（阶段 22）。同样在 render 里兑现：
         // `on_window_should_close` 的回调跑在 Win32 的 `WM_CLOSE` 处理过程中，
         // 在那儿拉模态浮层等于消息循环嵌套，而它还必须同步返回一个值
@@ -1382,6 +1387,7 @@ impl Shell {
             reveal: None,
             pending_reveal: None,
             pending_folder: None,
+            pending_batch_note: None,
             // 关窗那三档**只在构造期读一次**：`on_window_should_close` 的回调
             // 每次点 X 都会跑，而那个回调在消息处理里，多一次 `store::load()`
             // 就是一次同步读盘。改档的地方（面板 / 设置）会同步更新这个字段
