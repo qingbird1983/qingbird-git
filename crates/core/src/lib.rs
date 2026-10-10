@@ -22,6 +22,7 @@ pub mod run_cmd;
 pub mod scan_cache;
 pub mod scheduler;
 pub mod space;
+pub mod stash;
 pub mod store;
 pub mod sync;
 pub mod types;

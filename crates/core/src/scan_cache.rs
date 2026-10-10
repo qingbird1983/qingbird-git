@@ -289,6 +289,7 @@ mod tests {
                 has_upstream: true,
                 upstream: "origin/main".into(),
                 remote_url: "https://example/x.git".into(),
+                stash_count: 0,
             },
             changed: 3,
             last_commit_ts: 1_700_000_000,

@@ -485,7 +485,21 @@ impl Shell {
 }
 
 
-/// 仓库名后面那颗**感叹号该不该出现、气泡里说什么**。
+/// 头卡那颗告警点的**一次判据**：说不说、说什么、点了开哪儿。
+///
+/// 为什么两格要并成一个结构体而不是返回 `Option<String>`：32-2 之后
+/// 「气泡里提到了暂存」与「点它会打开暂存清单」**必须是同一件事**——
+/// 分成两处判（一处读 `stash_count`、一处也读 `stash_count`）迟早漂成
+/// "气泡说有三份、点下去开的却是检测" 或反过来。**一条规则两个出口**
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct HeadAlert {
+    /// 气泡正文（官方 tooltip 收纯文本，不走 markdown）
+    pub bubble: String,
+    /// 点这颗要不要开「收起来的改动」清单
+    pub opens_stash: bool,
+}
+
+/// 仓库名后面那颗**感叹号该不该出现、气泡里说什么、点它去哪儿**。
 ///
 /// 2026-10-08 之前它是 `sync_readout`，**同时**出"同步卡上那句状态话"和这条告警，
 /// 为的是让两处不会各写一套判据（屏上会同时出现「与云端已同步」与一颗
@@ -502,24 +516,37 @@ impl Shell {
 /// `RepoView::has_status`）。没读过 ⇒ **不给告警**：那时连"这是不是仓库"都还不知道，
 /// 点一颗感叹号说"这个文件夹里没有 .git"等于凭空定罪。做成必填而不是默认值，
 /// 判据与 D78 同一条——**让"忘"没有选项**，漏传编译不过
-pub(crate) fn sync_alert(s: &RepoStatus, read: bool) -> Option<String> {
+pub(crate) fn sync_alert(s: &RepoStatus, read: bool) -> Option<HeadAlert> {
     // ⚠️ **这一臂必须排在 `!s.is_repo` 前面**（顺序错了就永远走不到，
     // 而 `cargo check` 与单测都不报）。触发场景是实的：刚添加的仓库、
     // 撤销移除之后那份空 `view`、切仓库后刷新在途的那几百毫秒
     if !read {
         return None;
     }
-    if !s.is_repo {
-        return Some("这个文件夹里没有 .git，同步三键都不会有结果。".into());
+    // 一段一段攒：**几条同时成立时全部说出来**，不是挑一条说。
+    // 32-2 之前这里每档各 `return`，"有份数没取回"与"没有上游"同时成立时
+    // 只会看见后者，而**前者才是会丢文件的那一件**
+    let mut parts: Vec<String> = Vec::new();
+    if s.stash_count > 0 {
+        parts.push(format!(
+            "有 {} 份改动被收起来，还没取回。点这颗打开「收起来的改动」清单。",
+            s.stash_count
+        ));
     }
-    if !s.has_upstream {
-        return Some(
+    if !s.is_repo {
+        parts.push("这个文件夹里没有 .git，同步三键都不会有结果。".into());
+    } else if !s.has_upstream {
+        parts.push(
             "当前分支没有上游，拉取会失败。可以先设置远端，\
              或直接用「推送」把本地分支推上去建立 origin/分支名。"
                 .into(),
         );
     }
-    None
+    (!parts.is_empty()).then(|| HeadAlert {
+        bubble: parts.join(" "),
+        // 点它开清单的判据**就是上面那一段出现的判据**，同一个数、同一个臂
+        opens_stash: s.stash_count > 0,
+    })
 }
 
 // （这里原来挂着 `third_bits(..)`——第三方那一屏并进状态句的补充段
@@ -746,6 +773,7 @@ mod tests {
             has_upstream: !upstream.is_empty(),
             upstream: upstream.into(),
             remote_url: String::new(),
+            stash_count: 0,
         }
     }
 
@@ -772,7 +800,8 @@ mod tests {
     #[test]
     fn a_repo_that_was_read_and_is_not_a_repo_says_so() {
         let alert = sync_alert(&RepoStatus::default(), true).expect("真不是仓库要点感叹号");
-        assert!(alert.contains(".git"), "要说清缺的是哪一样，实际是：{alert}");
+        assert!(alert.bubble.contains(".git"), "要说清缺的是哪一样，实际是：{}", alert.bubble);
+        assert!(!alert.opens_stash, "不是仓库 ⇒ 没有清单可开");
     }
 
     /// **落后 / 待推送不是告警**。它们是"该做什么"，由三键里那颗 primary 与侧栏
@@ -782,6 +811,38 @@ mod tests {
     fn behind_and_ahead_are_not_alerts() {
         assert_eq!(sync_alert(&st(0, 4, "origin/main"), true), None);
         assert_eq!(sync_alert(&st(3, 0, "origin/main"), true), None);
+    }
+
+    /// 32-2 那一档：**有份数没取回**要抬头说话，而且点它必须真的能开清单。
+    ///
+    /// ⚠️ 两条断言钉的是同一件事的两半：只说话不给入口 = 用户看见了却无处可去；
+    /// 给了入口却不说 = 那颗点永远不出现，入口等于不存在
+    #[test]
+    fn parked_changes_raise_the_dot_and_it_opens_the_list() {
+        let mut s = st(0, 0, "origin/main");
+        s.stash_count = 3;
+        let a = sync_alert(&s, true).expect("有三份没取回必须点感叹号");
+        assert!(a.bubble.contains("3 份"), "要把数说出来：{}", a.bubble);
+        assert!(a.bubble.contains("收起来的改动"), "要说出点开是什么：{}", a.bubble);
+        assert!(a.opens_stash);
+        // 一条都没有 ⇒ 这颗点压根不出现（不是"出现了但点了没反应"）
+        assert_eq!(sync_alert(&st(0, 0, "origin/main"), true), None);
+    }
+
+    /// **两条同时成立时两句都要说**，不许挑一条。
+    ///
+    /// 原来每一档各 `return`，"有三份没取回"与"没有上游"同时成立时只会看见后者——
+    /// 而**前者才是会丢文件的那一件**。这一条钉的是"多档并存不许互相盖"
+    #[test]
+    fn two_alerts_at_once_say_both_and_the_stash_one_leads() {
+        let mut s = st(0, 0, "");
+        s.stash_count = 1;
+        let a = sync_alert(&s, true).unwrap();
+        assert!(a.bubble.contains("1 份"), "{}", a.bubble);
+        assert!(a.bubble.contains("没有上游"), "{}", a.bubble);
+        // 顺序也要钉：暂存那句在前。它是可动手的那一件，且点这颗就去清单
+        assert!(a.bubble.starts_with("有 1 份"), "暂存那条要排在前面：{}", a.bubble);
+        assert!(a.opens_stash);
     }
 
     /// ⚠️ **「没扫过」这一档全站只许有一个说法**：⌘K、总览「状态」列、

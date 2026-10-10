@@ -116,6 +116,10 @@ pub fn read_status(repo_path: &str) -> RepoStatus {
         .stdout
         .trim()
         .to_string();
+    // 有几条暂存。**就是 `stash::list` 的长度**，不另起一条数行数的命令——
+    // 界面上那颗感叹号说的数，必须和点开后的清单**同一个出处**，
+    // 否则会出现「说有三份、点开只有两份」这种当场打脸的不一致（32-2）
+    st.stash_count = crate::stash::count(repo_path);
     st
 }
 

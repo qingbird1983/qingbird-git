@@ -15,6 +15,7 @@ use qingbird_core::repos::{self};
 use qingbird_core::run_cmd::{self, Slot};
 use qingbird_core::scan_cache;
 use qingbird_core::space;
+use qingbird_core::stash;
 use qingbird_core::store;
 use qingbird_core::sync;
 use qingbird_core::types::ProgressEvent;
@@ -1088,6 +1089,98 @@ impl Shell {
                 lg.ts = store::now_secs();
                 // 清理完工作区变了，侧栏徽标 / 总览「状态」列都靠它
                 this.refresh_status(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 点「丢掉」：**先要一次确认**，这一步只把哪一条标成"等确认"。
+    ///
+    /// 存的是（序号 + 消息原文）两样，不是"那一条的下标"——见 `state::StashDialog`
+    pub(crate) fn ask_stash_drop(&mut self, index: u32, expect: &str, cx: &mut Context<Self>) {
+        let Some(d) = self.stash_dlg.as_mut() else {
+            return;
+        };
+        d.confirm = Some((index, expect.to_string()));
+        cx.notify();
+    }
+
+    /// 反悔。确认框收掉，清单一个字都不动
+    pub(crate) fn cancel_stash_drop(&mut self, cx: &mut Context<Self>) {
+        if let Some(d) = self.stash_dlg.as_mut() {
+            d.confirm = None;
+        }
+        cx.notify();
+    }
+
+    /// 32-2：取回某一条（`apply`，放回后仍留在清单里）
+    pub(crate) fn run_stash_apply(&mut self, index: u32, expect: &str, cx: &mut Context<Self>) {
+        self.stash_op(index, expect, false, cx);
+    }
+
+    /// 32-2：丢掉某一条。**不可逆**，所以走到这里之前必须已经点过「确认丢掉」
+    pub(crate) fn run_stash_drop(&mut self, index: u32, expect: &str, cx: &mut Context<Self>) {
+        self.stash_op(index, expect, true, cx);
+    }
+
+    /// 取回与丢掉**共用这一条**：两者只差"调哪个 core 函数"与那句动词。
+    ///
+    /// ⚠️ 为什么不写成两份：这两份的其余每一行（防连点、后台跑、结论落哪个日志槽、
+    /// 跑完重读清单、刷新状态）都必须**逐字相同**，其中"跑完重读清单"那一行漏掉
+    /// 一份，另一份就会拿着旧序号继续让用户点——而 `drop` 之后序号整体前移。
+    ///
+    /// ⚠️ **为什么整段在后台线程**：`stash::apply_one` 要先拿操作锁，撞锁时它会
+    /// 等最多十秒（`begin_user_op`）。在 UI 线程上等那十秒就是把整个界面冻住
+    pub(crate) fn stash_op(&mut self, index: u32, expect: &str, destructive: bool, cx: &mut Context<Self>) {
+        let Some(d) = self.stash_dlg.as_mut() else {
+            return;
+        };
+        if d.busy {
+            // 正在跑就不接第二下。**不给按钮加 `.loading(..)`**：那颗键自己就是
+            // 这一步的执行者，而 D64 那条纪律是"终止手段不许用 loading"——
+            // 这里同理，用 `disabled(busy)` 表达"这一下还没跑完"
+            return;
+        }
+        d.busy = true;
+        d.confirm = None;
+        let path = d.path.clone();
+        let expect = expect.to_string();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let p = path.clone();
+            let r = cx
+                .background_executor()
+                .spawn(async move {
+                    if destructive {
+                        stash::drop_one(&p, index, &expect)
+                    } else {
+                        stash::apply_one(&p, index, &expect)
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                {
+                    // 结论落进**这个仓库自己的**日志槽（`log_of`）——只写在对话框上，
+                    // 关掉那一屏就什么痕迹都没有了。
+                    // ⚠️ 这一行**不再自己写动词**：`r.message` 自己就是
+                    // 「已取回…」/「已丢掉…」，前面再拼一个"取回"就成了
+                    // 「取回收起来的改动：已取回…」——帧上实测第一版就是这样，
+                    // 一句话说两遍（阶段 16 那句「拉取成功 · 拉取成功」的同款）
+                    let lg = this.log_of(&path);
+                    lg.lines.push(format!("· 收起来的改动：{}", r.message));
+                    lg.verdict = Some((r.ok, r.message.clone()));
+                    lg.ts = store::now_secs();
+                }
+                // **重读清单**：丢掉之后序号全变了，旧的那份一张都不能留
+                if let Some(d) = this.stash_dlg.as_mut() {
+                    d.busy = false;
+                    d.entries = stash::list(&path);
+                }
+                // 工作区被改过了：感叹号上那个数、侧栏徽标、总览「状态」列都要跟上。
+                // 只刷这一个仓库（`refresh_one`），不必整表重扫
+                this.refresh_one(path.clone(), cx);
                 cx.notify();
             })
             .ok();

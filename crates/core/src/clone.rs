@@ -78,9 +78,9 @@ pub fn clone_repo(
         Some(&forward),
         Some(url),
         CLONE_TIMEOUT,
-        // **必须 false**：并行的两条路会同时写同一个目标目录，
-        // 那是 git 明确不支持的（`allow_race` 的注释就写着这条）
-        false,
+        // 这里没有"要不要并行赛跑"的开关了：`clone` 会写本地目录，
+        // `net::writes_the_repo` 认它 ⇒ 天然串行。以前它是一个手写 `false` 的实参，
+        // 而同一个理由（两条路同时写同一处）在 `pull` 那三处被漏掉了（32-1）
         Some(&stage),
         mode,
     );

@@ -23,6 +23,7 @@ use qingbird_core::history::{CommitDetail, CommitPatch, CommitSummary};
 use qingbird_core::repos::{self, ActivityDay, ChangeEntry, LangStat};
 use qingbird_core::run_cmd::{self, Slot};
 use qingbird_core::space;
+use qingbird_core::stash::StashEntry;
 use qingbird_core::store::{self, CloseAction, RepoEntry};
 use qingbird_core::types::{ForkInfo, RepoStatus, UpdateChanges};
 use std::collections::{HashMap, HashSet};
@@ -850,6 +851,10 @@ pub(crate) struct Shell {
     /// **只给第三方**（17-4）：自己的仓库要做这件事有正经工具链，
     /// 在这里给一条「一键丢工作区」的路是帮倒忙
     pub(crate) purge_dlg: Option<PurgeDialog>,
+    /// 「收起来的改动」清单（32-2 的那个出口）；None = 未打开。
+    /// 入口是仓库名后面那颗橙色三角，而它出现的判据是 `RepoStatus::stash_count > 0`
+    /// （判据在 `panels::sync_alert`，**不在这里再判一遍**）
+    pub(crate) stash_dlg: Option<StashDialog>,
     /// 克隆对话框；None = 未打开。**与添加/编辑仓库那个 `dlg` 分开**：
     /// 那个是"把已经在磁盘上的目录登记进来"，克隆是"先从网络取回来"，
     /// 两者字段几乎不重叠，挤在一个结构体里只会让两处各自判有没有
@@ -912,8 +917,35 @@ pub(crate) struct PurgeDialog {
     pub(crate) picked: HashSet<String>,
 }
 
+/// 「收起来的改动」清单（32-2）。
+///
+/// ## 为什么每行自带动作、不给 footer 那颗统一执行键
+///
+/// `dialogs/purge.rs` 那套是"勾选 + footer 执行"，而它的 footer **定不住
+/// "一个都没勾"那一档**（官方 `Dialog::footer` 收的是构建好的元素，不是每帧重调的
+/// 闭包，见那文件的注释）。这一屏动的是"取回/丢掉"，其中**丢掉不可逆**——
+/// 出现"点了没反应"或"不知道点的是哪条"都是不可接受的。⇒ 动作与对象并在同一行，
+/// 结构上就没有"选了却没处执行"和"执行了却不知道选的是哪条"这两种状态（D78 同形）
+///
+/// ## 二次确认存的是（序号 + 消息原文），不是"那一条"
+///
+/// `drop` 之后所有序号整体前移。core 那层动手前会**当场重读清单比对原文**
+/// （`stash::resolve`），对不上就一条都不动 ⇒ 这里必须把原文一起带上，
+/// **序号只是定位用，身份是消息**
+#[derive(Clone)]
+pub(crate) struct StashDialog {
+    pub(crate) path: String,
+    /// 打开那一刻、以及**每次动手之后**重读的清单
+    pub(crate) entries: Vec<StashEntry>,
+    /// 正在等二次确认的那一条：（序号，消息原文）。None = 没有
+    pub(crate) confirm: Option<(u32, String)>,
+    /// 有一步正在跑。**防连点**，也防"确认框还挂着、清单已经被换掉"
+    pub(crate) busy: bool,
+}
+
 /// 提交并推送对话框的状态
-pub(crate) struct CommitDialog {    pub(crate) path: String,
+pub(crate) struct CommitDialog {
+    pub(crate) path: String,
     /// 提交信息输入框。**打开时已预填上次提交标题**（`InputState::set_value`）
     pub(crate) message: Entity<InputState>,
     /// ☐ 提交后拉取
@@ -1542,6 +1574,7 @@ pub(crate) static EMPTY_VIEW: RepoView = RepoView {
         has_upstream: false,
         upstream: String::new(),
         remote_url: String::new(),
+        stash_count: 0,
     },
     changed: 0,
     // 「没读过」——总览那一行兜底用的就是这一格，所以它显示「待扫描」而不是
@@ -1623,6 +1656,10 @@ mod tests {
             has_upstream: true,
             upstream: String::new(),
             remote_url: String::new(),
+            // **测试夹具一律 0**：这些用例判的是同步卡与感叹号那几档，
+            // 暂存那一档要它非零的用例在 `panels` 里单独造（写在这里会让
+            // 所有既有断言一起变红，而红的原因不是缺陷）
+            stash_count: 0,
         }
     }
 

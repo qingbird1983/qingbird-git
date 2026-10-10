@@ -18,6 +18,14 @@ pub struct RepoStatus {
     /// （判断 `has_upstream`），那时候把 stdout 留下来即可
     pub upstream: String,
     pub remote_url: String,
+    /// 有几条暂存（`git stash list` 的行数）。32-2 的那个出口靠它决定
+    /// 仓库名字后面那颗橙色三角要不要出现。
+    ///
+    /// ⚠️ **`#[serde(default)]` 不是模板话**：这份结构会进 `scan_cache` 的 JSON，
+    /// 老库里存的没有这一格 ⇒ 没有 default 就是**整条缓存反序列化失败**，
+    /// 后果不是少一个数，是每个人的秒开缓存集体作废
+    #[serde(default)]
+    pub stash_count: usize,
 }
 
 /// 拉取/克隆时推送给前端的进度事件

@@ -80,7 +80,6 @@ pub fn do_check(path: &str, on_progress: Option<&dyn Fn(&ProgressEvent)>) -> OpR
         Some(&forward),
         None,
         CHECK_TIMEOUT,
-        true,
         Some(&stage),
         NetMode::Auto,
     );
@@ -183,7 +182,7 @@ pub fn do_pull(
     if stash && status_before.dirty {
         let s = run_local(
             path,
-            &["stash", "push", "-u", "-m", "qingbird-git auto stash"],
+            &["stash", "push", "-u", "-m", crate::stash::MSG_PULL],
         );
         log.push_str(&combined(&s));
         if !s.success {
@@ -206,7 +205,6 @@ pub fn do_pull(
         Some(&forward),
         None,
         NET_TIMEOUT,
-        true,
         Some(&forward_stage),
         NetMode::Auto,
     );
@@ -256,6 +254,17 @@ pub fn do_pull(
     }
 }
 
+/// 「替你收起来的改动没放回去」那一句追加话。**三档共用一份**（取消 / 拉取失败 /
+/// 拉取完成但 pop 冲突），所以它是常量而不是某一句的一部分——
+/// 写在句子里的那个版本只会出现在第三档，前两档"忘了说"正是 32-2 查实的那条静默档。
+///
+/// ⚠️ **它指的路必须真的存在**：那句"点仓库名字后面那颗橙色三角"说的是
+/// `gui/src/widgets.rs::warn_dot` 挂的头卡告警点，而它出现的判据是
+/// `RepoStatus::stash_count > 0`（`repos::read_status` 里读 `stash::count`）。
+/// ⇒ 这三处是**同一件事的三个环节**，改任何一处要回头对另外两处
+const PARKED_TAIL: &str = " 另外：替你先收起来的改动没能放回去，还压在暂存里——\
+                            点仓库名字后面那颗橙色三角，打开「收起来的改动」清单取回。";
+
 /// 拉取收尾那句话的**唯一出处**：`(成功?, 面向用户的一句话)`。
 ///
 /// 四档判据的**顺序就是这条链上最容易做反的东西**，所以逐档钉在单测里：
@@ -268,6 +277,10 @@ pub fn do_pull(
 ///    而"拉取成功"四个字会把这件事完全盖掉
 /// ④ 全好
 ///
+/// ⚠️ ①②③ 三档**都要拼 [`PARKED_TAIL`]**（`pop_ok == Some(false)` 时）。
+/// 原来只有③拼，于是"拉取失败 × pop 也失败"这一档只说"拉取失败"——
+/// **那一档里用户丢的是文件，不是面子**
+///
 /// ⚠️ `ssh_hint` 与 `log_state_line` 的 `past` 是同一条手法：**要读配置的那个
 /// 判据留在调用方，纯函数只收算好的值**——`pubkey_path()` 会去读
 /// `%APPDATA%` 下那份真配置，留在函数里就没法单测（也测不稳）
@@ -278,11 +291,16 @@ fn pull_verdict(
     pop_ok: Option<bool>,
     ssh_hint: Option<&str>,
 ) -> (bool, String) {
-    if pull_out.stderr.contains(git::CANCELLED_MSG) {
-        return (false, "拉取已取消".to_string());
-    }
-    if !pull_out.success {
-        let message = if pull_out.stderr.contains("no tracking information") {
+    // ⚠️ **三档结论各算自己的那半句，最后统一拼 `PARKED_TAIL`**。
+    // 以前是"取消"与"失败"两档**先 return**、只有第三档提 stash ⇒
+    // 「拉取失败或被取消」×「pop 又没成功」这个组合下，界面只说"拉取失败"，
+    // **一个字都不提那些文件还压在暂存里**（32-2 查实的那条静默档：
+    // 补二十一修的是"pop 必达"，这一档是必达了但没成功，文件照样不在工作区）。
+    // 拼在最后的结构让"忘了提"没有选项
+    let head = if pull_out.stderr.contains(git::CANCELLED_MSG) {
+        "拉取已取消".to_string()
+    } else if !pull_out.success {
+        if pull_out.stderr.contains("no tracking information") {
             "当前分支没有上游分支，无法拉取".to_string()
         } else if let Some(h) = ssh_hint {
             h.to_string()
@@ -292,21 +310,20 @@ fn pull_verdict(
             "拉取失败：无法连接远端，且未找到可用代理".to_string()
         } else {
             "拉取失败".to_string()
-        };
-        return (false, message);
-    }
-    if pop_ok == Some(false) {
-        return (
-            false,
-            "拉取完成，但恢复暂存变更时冲突，请在终端执行 git stash pop 处理".to_string(),
-        );
-    }
-    let message = if used_proxy.is_some() {
-        "拉取成功（已自动通过代理完成）".to_string()
+        }
+    } else if pop_ok == Some(false) {
+        "拉取完成，但恢复暂存变更时冲突".to_string()
+    } else if used_proxy.is_some() {
+        return (true, "拉取成功（已自动通过代理完成）".to_string());
     } else {
-        "拉取成功".to_string()
+        return (true, "拉取成功".to_string());
     };
-    (true, message)
+    // ⚠️ **只有"真的收起来过、又没放回去"才拼那一句**。`None` = 压根没 stash 过，
+    // `Some(true)` = 已经放回去了 ⇒ 这两种情况下拼上就是**凭空定罪**
+    // （对着一个从没暂存过的仓库说"你的改动还压在暂存里"）。
+    // 判据收成一处，三档共用
+    let tail = matches!(pop_ok, Some(false)).then_some(PARKED_TAIL).unwrap_or("");
+    (false, head + tail)
 }
 
 /// 对比拉取前的 HEAD，提取本次拉下来的提交列表与文件变更摘要
@@ -412,7 +429,7 @@ fn do_push(path: &str) -> OpResult {
     } else {
         vec!["push", "--progress", "--set-upstream", "origin", "HEAD"]
     };
-    let (push_out, used_proxy) = run_net_op(path, &args, None, None, NET_TIMEOUT, true, None, NetMode::Auto);
+    let (push_out, used_proxy) = run_net_op(path, &args, None, None, NET_TIMEOUT, None, NetMode::Auto);
     let status = read_status(path);
     touch_repo(path);
 
@@ -628,9 +645,13 @@ mod tests {
         let cancelled = out(false, git::CANCELLED_MSG);
         let (ok, msg) = pull_verdict(&cancelled, None, None, Some(false), None);
         assert!(!ok);
-        assert_eq!(msg, "拉取已取消");
+        assert!(msg.starts_with("拉取已取消"), "{msg}");
         assert!(!msg.contains("完成"), "取消那一次不许出现「完成」：{msg}");
         assert!(!msg.contains("冲突"), "取消那一次也不是 stash 冲突：{msg}");
+        // ⚠️ **这一条断言改的就是 32-2 查实的那条静默档**。旧写法是
+        // `assert_eq!(msg, "拉取已取消")`——它把"取消时只字不提 stash"钉成了
+        // 期望行为，而那一档里用户丢的是文件。**旧断言不是被改坏的，是被改对的**
+        assert!(msg.contains("还压在暂存里"), "取消 × pop 失败要说清文件在哪儿：{msg}");
 
         // ② 公钥提示排在分叉**前面**：两样都给时用前者。
         //    分叉那档给的是"可以用下面的方式合流"，而公钥失败压根没拉到东西
@@ -642,7 +663,10 @@ mod tests {
         // ③ 拉取成功但 stash 没恢复：**这算失败**，用户文件还压在 stash 里
         let (ok, msg) = pull_verdict(&out(true, ""), None, None, Some(false), None);
         assert!(!ok);
-        assert!(msg.contains("git stash pop"), "{msg}");
+        assert!(msg.starts_with("拉取完成，但恢复暂存变更时冲突"), "{msg}");
+        // 原来这一档说的是「请在终端执行 git stash pop 处理」——**那是没有清单时
+        // 给的话**。32-2 把清单做出来了，还让人去终端等于入口白开
+        assert!(msg.contains("收起来的改动"), "要指到界面上的清单：{msg}");
 
         // ④ 全好：没 stash 过（`None`）与恢复成功（`Some(true)`）是同一档
         for pop in [None, Some(true)] {
@@ -683,6 +707,34 @@ mod tests {
         let (ok, msg) = pull_verdict(&out(false, net), None, Some("127.0.0.1:7897"), None, None);
         assert!(!ok);
         assert_eq!(msg, "拉取失败");
+    }
+
+    /// 「文件还压在暂存里」那一句**在三档失败上都要出现，在两档没压上时都不许出现**。
+    ///
+    /// 这是 32-2 查实的那条静默档的回归钉子：旧代码里取消与失败两档**先 return**，
+    /// 于是"拉取失败 × pop 也失败"这一组合只说"拉取失败"，用户以为只是没拉到东西，
+    /// 而他那些没提交的文件已经不在工作区里了。
+    ///
+    /// ⚠️ 反向那两条同样要钉：`None`（压根没暂存过）与 `Some(true)`（放回去了）
+    /// 时若也拼这句，就是**对着一个没暂存过的仓库说"你的改动还压在暂存里"**——
+    /// 凭空定罪和只字不提是同一个缺陷的两个方向
+    #[test]
+    fn the_parked_files_are_named_on_every_failing_arm() {
+        let cancelled = || out(false, git::CANCELLED_MSG);
+        let pull_failed = || out(false, "fatal: Not possible to fast-forward");
+        let pull_ok = || out(true, "");
+
+        for pull in [cancelled(), pull_failed(), pull_ok()] {
+            let (_, msg) = pull_verdict(&pull, None, None, Some(false), None);
+            assert!(msg.contains("还压在暂存里"), "{msg}");
+            assert!(msg.contains("收起来的改动"), "要指到清单，不让人去终端：{msg}");
+        }
+        for pop in [None, Some(true)] {
+            for pull in [cancelled(), pull_failed(), pull_ok()] {
+                let (_, msg) = pull_verdict(&pull, None, None, pop, None);
+                assert!(!msg.contains("暂存"), "{msg} 里不该提暂存（{pop:?}）");
+            }
+        }
     }
 
     /// 测试里派生 git 子进程要走的本地跑法（与 `git::run_git` 不同：

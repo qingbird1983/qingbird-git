@@ -447,6 +447,46 @@ fn race_direct_vs_proxy(
     }
 }
 
+/// 这条 git 子命令会不会往**本地仓库**写东西（refs / FETCH_HEAD / objects / 工作区）。
+///
+/// 判据不放调用方而放这里，是因为「会不会写」由**命令自己**决定，不由调用方决定。
+/// 以前它是 `run_net_op` 的一个 `bool` 参数，四个调用点里三个传 `true`
+/// （`sync.rs` 的检测/拉取/推送、`fork.rs` 的变基拉取），只有克隆传 `false`——
+/// 而克隆那条理由（「并行的两条路会同时写同一个目录」）**对 pull 一字不改地成立**。
+/// ⇒ D78 的又一处：**必填信息没进签名 ⇒ 每条路径都得自己记得，其中一条一定漏**。
+///
+/// **实测（2026-10-10，`file://` 远端 + 沙箱配置把 `last_good_proxy` 写成死端口，
+/// 两路都会起跑）**：赛跑时同一秒里有两条 `git pull --ff-only` 在写同一个 `.git`，撞出来的是
+/// `error: cannot lock ref 'refs/remotes/origin/main': is at X but expected Y`
+/// 紧跟 `fatal: Cannot fast-forward to multiple branches.`，而第三次串行兜底会成功
+/// ⇒ 症状正是「每次拉取日志里先撞两行墙再说成功」（路线表 31.4 补二十⑥ 登记的那条）。
+///
+/// 命名：答的是**事实**（会不会写），不是推论（该不该赛跑）。⚠️ **这颗公开函数别改名成
+/// `may_race`** ——`edge()` 那条教训（注释把用途写死，第二个用途来了就另起一个名字，
+/// 同一个值于是长出两个名字）说的就是这件事。
+/// 函数里那个局部 `may_race` 是它的**推论**，推论名挂在局部没问题。
+pub fn writes_the_repo(args: &[&str]) -> bool {
+    // 第一个不是选项的位置参数才是子命令；`-c k=v` 的值是**下一个参数**，要一起跳过
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        if a == "-c" {
+            i += 2;
+            continue;
+        }
+        if a.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    let sub = args.get(i).copied().unwrap_or("");
+    // **安全侧在"算会写"这一边**：只有明确列出的只读命令才允许并行，
+    // 认不出来的（含空参数）一律不赛跑。宁可少跑一次赛跑，不可多撞一次墙——
+    // 前者最坏是慢几秒，后者是往用户日志里塞两行 fatal
+    !matches!(sub, "ls-remote")
+}
+
 /// 网络路线：Auto=直连优先失败转代理（默认）；DirectOnly=只直连；ProxyOnly=只走代理
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NetMode {
@@ -466,11 +506,13 @@ impl NetMode {
 }
 
 /// 网络型 git 操作的统一入口：直连优先，失败且判定为网络问题时自动探测代理重试。
-/// 已有验证可用的代理（last_good_proxy）时，直连与该代理并行赛跑取先成功者。
+/// **只有不写本地仓库的命令（`writes_the_repo`）才并行赛跑**——会写的命令
+/// （fetch / pull / push / clone）**一律串行**：赛跑是同一次调用里并发起两条
+/// 一模一样的 git 进程，让它们同时写同一个 `.git` 会撞 ref 锁（实测撞出
+/// `fatal: Cannot fast-forward to multiple branches.`，详见那颗函数的注释）。
 /// 代理只注入到当次 git 子进程的环境变量，结束即失效，不改系统代理。
 /// auth_url 为参与认证判定的远端地址；None 时取 repo 的 origin。
 /// git_config / ssh 为按平台令牌认证配置（见 build_net_auth）。
-/// allow_race 为 false 时不做并行赛跑（clone 会同时写同一目标目录，必须串行）。
 /// on_stage 在"直连 / 某代理"尝试切换时回调，供前端展示当前走的网络路径。
 #[allow(clippy::too_many_arguments)]
 pub fn run_net_op(
@@ -479,7 +521,6 @@ pub fn run_net_op(
     on_line: Option<&dyn Fn(&str)>,
     auth_url: Option<&str>,
     timeout: Duration,
-    allow_race: bool,
     on_stage: Option<&dyn Fn(&str)>,
     mode: NetMode,
 ) -> (git::GitOutput, Option<String>) {
@@ -510,8 +551,10 @@ pub fn run_net_op(
     // 赛跑对手：缓存优先，其次系统代理（`proxy::race_candidate` 里有"为什么要
     // 加系统代理这一档"的完整理由——冷启动缓存为空时，串行直连会被卡满
     // NET_TIMEOUT 300 秒，因为低速让位机制在 TLS/HTTP 响应那一步还没进传输循环）
+    // 赛跑与否由**命令自己**决定（见 `writes_the_repo`），不给调用方一个可以传错的布尔
+    let may_race = !writes_the_repo(args);
     let mut raced: Option<String> = None;
-    if allow_race && mode == NetMode::Auto {
+    if may_race && mode == NetMode::Auto {
         if let Some(race_with) = proxy::race_candidate(&cfg.settings, &cfg.last_good_proxy) {
             if let Some(cb) = on_stage {
                 // **文案里带上地址**：这个赛跑对手可能是缓存、也可能是系统代理，
@@ -572,11 +615,17 @@ pub fn run_net_op(
         proxy::gather_candidates(&cfg.settings, &cfg.last_good_proxy)
     };
     for candidate in candidates {
-        // 仅当赛跑真的跑过才跳过重复候选（`raced` 为 None 就是没跑过）；
-        // clone 等禁用赛跑的操作若也跳过，last_good 代理就永远没机会被尝试。
+        // 只跳过**真的赛跑过**的那个对手。
+        // 判据原来是 `allow_race`——那是"允许赛跑"，比"跑过"宽一档：`mode != Auto` 时
+        // 赛跑压根不起跑（下面那个 `if` 进不去），而它仍然是 `true`，于是
+        // `last_good_proxy` 那一档会被当成"已经试过"而**永远跳过**。
+        // ⚠️ **但这一档当前不可达**：界面只传 `NetMode::Auto`（`dialogs/clone.rs:215` 那一条），
+        // `NetMode::parse` 认的 "direct"/"proxy" 两个值**零调用方** ⇒
+        // **这条不是"修掉了一个用户碰到的 bug"，是把判据换成不需要再补条件的形状**
+        // （路线表 D74 的前置教训：现象与缺陷要分清，否则下一个人会以为这里曾经坏过）。
         // **两个都要跳**：赛跑对手可能是缓存、也可能是系统代理，
         // 少跳一个就是同一个地址连试两遍
-        if allow_race
+        if raced.is_some()
             && (Some(&candidate) == cfg.last_good_proxy.as_ref()
                 || Some(&candidate) == raced.as_ref())
         {
@@ -658,6 +707,65 @@ pub fn run_net_op(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 32-1 的判据：**会不会写本地仓库**决定能不能并行赛跑。
+    /// 钉的不是"赛跑快不快"，是"两条一模一样的 git 会不会同时写同一个 `.git`"——
+    /// 实测那样做会撞出 `cannot lock ref` + `fatal: Cannot fast-forward to
+    /// multiple branches.`（`fetch`/`pull`/`push`/`clone` 全都会撞上）。
+    #[test]
+    fn only_an_op_that_lands_nothing_locally_may_run_in_parallel() {
+        // 会写的一律不许并行（四个真实调用点的参数形状，逐条钉住）
+        for args in [
+            vec!["fetch", "--all", "--prune", "--progress"],
+            vec!["pull", "--ff-only", "--progress"],
+            vec!["pull", "--rebase", "--progress"],
+            vec!["push", "--progress"],
+            vec!["push", "--progress", "--set-upstream", "origin", "HEAD"],
+            vec!["clone", "--progress", "https://github.com/u/r.git", "r"],
+        ] {
+            assert!(writes_the_repo(&args), "{args:?} 会写本地仓库，判成了只读");
+        }
+        // 只落远端答复、不碰本地的才可以并行
+        for args in [vec!["ls-remote"], vec!["ls-remote", "--heads", "origin"]] {
+            assert!(!writes_the_repo(&args), "{args:?} 不落地，却被判成会写");
+        }
+    }
+
+    /// **安全侧要落在哪一边**：认不出来的子命令一律算"会写"（即不赛跑）。
+    /// 反过来判的话，将来新增一条没列进表里的写命令就会**默认拿到赛跑**——
+    /// 那正是 32-1 要消灭的那种"每条路径都得自己记得"。
+    #[test]
+    fn an_unrecognised_subcommand_is_treated_as_a_write() {
+        assert!(writes_the_repo(&[]), "空参数应当算会写");
+        assert!(writes_the_repo(&["--version"]), "认不出的子命令应当算会写");
+        assert!(writes_the_repo(&["rebase", "--continue"]), "没列进表里的写操作应当算会写");
+    }
+
+    /// 子命令是"**第一个不是选项的位置参数**"，不是"永远是 args[0]"：
+    /// `-c k=v` 那对要一起跳过（它的值是下一个参数），`run_net_op` 自己插的 `--ipv4`
+    /// 在 index 1，也靠这一条判据才不会被当成子命令。
+    #[test]
+    fn leading_global_options_do_not_hide_the_subcommand() {
+        assert!(writes_the_repo(&["-c", "http.proxy=", "pull", "--ff-only"]));
+        assert!(!writes_the_repo(&["-c", "http.proxy=", "ls-remote"]));
+        assert!(writes_the_repo(&["--ipv4", "fetch", "--all"]));
+    }
+
+    /// 签名形状本身也钉住：**「要不要赛跑」不许再回到参数表里**。
+    /// 这条断言不判运行结果，它判"这个函数能不能被那样调用"——
+    /// 谁再加回一个 `bool`，这里就编译不过（D78：让「忘」没有选项，靠编译器不靠记性）。
+    #[test]
+    fn the_race_switch_is_not_a_caller_supplied_boolean() {
+        let _entry: fn(
+            &str,
+            &[&str],
+            Option<&dyn Fn(&str)>,
+            Option<&str>,
+            std::time::Duration,
+            Option<&dyn Fn(&str)>,
+            NetMode,
+        ) -> (git::GitOutput, Option<String>) = run_net_op;
+    }
 
     #[test]
     fn progress_lines_are_parsed() {

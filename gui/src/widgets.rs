@@ -367,6 +367,14 @@ pub(crate) fn card_split(t: &Theme) -> Div {
         .child(div().h(px(1.0)).w_full().flex_shrink_0().bg(track(t)))
 }
 
+/// `warn_dot` 那颗点的点击回调类型。
+///
+/// 写成 `Rc<dyn Fn>` 而不是 `impl Fn`：调用方要给的是**"可能没有"**
+/// （`Option<impl Fn>` 里的 `impl` 在传 `None` 时没法写类型），
+/// 而 `Rc` 让这颗点在 `when_some` 那层被 clone 一次也不重新构造闭包。
+/// 签名与 `Button::on_click` 那一档一致（`button.rs:443`），中间不再包一层
+pub(crate) type DotClick = std::rc::Rc<dyn Fn(&gpui_kit::ClickEvent, &mut Window, &mut App)>;
+
 /// 行内告警点：**一颗 `warn` 色的告警图标 + 官方 tooltip 气泡**（v4 §7「告警」行）。
 ///
 /// ⛔ 它替代的是"整块 wash 横贯全宽"那种告警条。一条提示的优先级**不该抬到
@@ -380,20 +388,45 @@ pub(crate) fn card_split(t: &Theme) -> Div {
 /// （`attachment.rs:305` 那个是附件条自己的）。要底块就得自绘一颗假按钮 +
 /// 自己管浮层——**那正是 v4 §6 禁止的"手拼会漂的假提示"**。
 /// ⇒ 取"官方 tooltip + 无底块"，舍"底块 + 自绘浮层"。
-/// 副作用：ghost 档带一点悬停面，看着略微像可点；它不给 `on_click`，点了什么都不发生。
+///
+/// ## `on_click`：为什么"进清单"挂在这颗点上，而不是挂在气泡里那颗键
+///
+/// 32-2 的形态（甲）本来画的是"气泡里给一颗「看清单」"。**读基座源码后否掉了**：
+/// 气泡的显示/隐藏由**触发元素自己的 `on_hover`** 驱动
+/// （`gpui-component/tooltip.rs:259`），而 `TooltipOverlay::request_hide`
+/// （`gpui-base/tooltip.rs:177`）的宽限期只有 **300ms**（`GRACE_PERIOD`），
+/// 气泡本身**不回请求"我还被悬停着"** ⇒ 鼠标从这颗点移进气泡那一路，
+/// 气泡在 300ms 后自己就没了。里面放一颗要点中的键，等于放一颗**每次都要抢**的键。
+/// （`SHOW_DELAY` 还是 500ms——这两档合起来说明它是**说明性浮层**，不是操作区。）
+/// ⇒ 键落在这颗点上，气泡只说事实。形态没变（还是"只在出事那一格说话"），
+/// 变的只是"点哪儿"。
+///
+/// ⚠️ 另一条实测前的疑点也一并记着：官方气泡底色读的是 `tokens.popover`
+/// （`tooltip.rs:114`），而 `theme.json` 把 `popover.background` 归并到了**卡面白**
+/// ⇒ 它是白底深字，**不是 v4 §7 契约写的墨底**。这一处偏离 v4 已经很久了，
+/// 本轮不动它（要动就得连 `info_dot` 那几颗一起对），登记在路线表
 pub(crate) fn warn_dot(
     id: &'static str,
     text: impl Into<gpui_kit::SharedString>,
     t: &Theme,
-    cx: &gpui_kit::App,
+    cx: &App,
+    on_click: Option<DotClick>,
 ) -> AnyElement {
-    Button::new(id)
+    let msg = text.into();
+    let b = Button::new(id)
         .icon(icon_sm(gpui_kit::assets::IconName::TriangleAlert).text_color(orange(t)))
         .custom(ghost_variant(cx))
         .with_size(Size::Small)
-        .tooltip(text)
-        .accessibility_label("这个仓库有一条需要注意的提示")
-        .into_any_element()
+        .tooltip(msg.clone())
+        // ⚠️ **读屏标签就是气泡那句话**：原来这里写死一句"有一条需要注意的提示"，
+        // 而这颗点现在**有了动作**（点开清单）——标签却说什么都不许做，
+        // 那是给读屏用户的一句假话。同一句话两个出口迟早漂
+        .accessibility_label(msg);
+    match on_click {
+        // 有键可点与没键可点**共用上面那一副形状**，不在这里画第二颗
+        Some(f) => b.on_click(move |ev, window, app| f(ev, window, app)).into_any_element(),
+        None => b.into_any_element(),
+    }
 }
 
 /// 卡头右上的 ⓘ 那颗：一句**不该常驻在界面上**的说明收进气泡里。

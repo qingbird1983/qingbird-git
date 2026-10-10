@@ -35,8 +35,9 @@ pub struct RebaseOutcome {
 /// 变基备份分支。单一名、每次覆盖到"变基前"的位置：不用时间戳是为了不让 refs 越堆越多，
 /// 固定名字也方便用户在自己的 git 工具里一眼找到
 pub const BACKUP_BRANCH: &str = "backup/qingbird-git";
-/// 自动暂存的说明，用户 `git stash list` 时能认出是谁存的
-pub const STASH_MSG: &str = "qingbird-git: 变基前自动暂存";
+// （这里原来挂着 `pub const STASH_MSG`——变基前自动暂存的那句说明。32-2 起
+// 它和拉取侧那句一起收进 `crate::stash`：**"这条是不是青鸟藏的"只能有一份判据**，
+// 而两条路各写一句措辞正是它长不出来的原因。**不留转发层**）
 /// 提交列表最多列几条：分叉几百个提交时不该把整页撑爆
 const MAX_LISTED: usize = 20;
 
@@ -195,7 +196,7 @@ pub fn rebase_core(
                     "工作区有未提交变更，变基前需要先暂存（不会丢掉，变基后自动恢复）".to_string(),
                 );
             }
-            let s = local(&["stash", "push", "-u", "-m", STASH_MSG]);
+            let s = local(&["stash", "push", "-u", "-m", crate::stash::MSG_REBASE]);
             log.push_str(&combined(&s));
             if !s.success {
                 break 'seq (false, "暂存本地变更失败，已取消变基（历史未改动）".to_string());
@@ -269,7 +270,6 @@ pub fn rebase_fork(
             Some(&forward),
             None,
             NET_TIMEOUT,
-            true,
             Some(&stage),
             NetMode::Auto,
         )
@@ -717,7 +717,9 @@ mod fork_tests {
 
     #[test]
     fn stash_message_is_recognizable() {
-        // 用户 `git stash list` 时要能认出是谁存的
-        assert!(STASH_MSG.starts_with("qingbird-git:"));
+        // 用户 `git stash list` 时要能认出是谁存的。**判据不在这条测试里自己写**
+        // （原来这里断的是 `STASH_MSG.starts_with("qingbird-git:")`——一个和
+        // `stash::is_auto` 并行的第二判据，措辞一改它就漂），改成直接问那颗谓词
+        assert!(crate::stash::is_auto(crate::stash::MSG_REBASE));
     }
 }

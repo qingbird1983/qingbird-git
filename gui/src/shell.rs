@@ -1421,6 +1421,7 @@ impl Shell {
             commit_dlg: None,
             clean_dlg: None,
             purge_dlg: None,
+            stash_dlg: None,
             clone_dlg: None,
             cmd_dlg: None,
             settings_dlg: None,

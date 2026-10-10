@@ -43,7 +43,7 @@ use crate::panels::sync_alert;
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::ghost_variant;
-use crate::widgets::{pill, warn_dot};
+use crate::widgets::{pill, warn_dot, DotClick};
 
 /// 复制成功后那颗对号停留多久（秒）。
 ///
@@ -70,6 +70,19 @@ impl Shell {
         // 整行取消之后只剩这一处读者。⚠️ **要往同步卡加回状态话，先回去和它合成一个函数**
         // （两处各 `if` 一遍迟早漂成"卡里说已同步、名字后面挂着未配置上游的感叹号"）
         let alert = sync_alert(&status, self.status_read(path));
+        // 32-2 的甲方案：这颗点**只在"有份数没取回"时才是键**（其余告警纯说明）。
+        // 为什么键挂在这颗点上、不挂进气泡里那颗「看清单」：
+        // 气泡的显隐由触发元素的 `on_hover` 驱动，官方宽限期只有 300ms，
+        // 而气泡自己不会回请求"我还被悬停着" ⇒ 鼠标移过去它就消失了
+        // （机制与证据写在 `widgets::warn_dot` 的注释里）
+        let stash_click = alert
+            .as_ref()
+            .filter(|a| a.opens_stash)
+            .map(|_| {
+                std::rc::Rc::new(cx.listener(|this, _, window, cx| {
+                    this.open_stash_dlg(window, cx)
+                })) as DotClick
+            });
 
         v_flex()
             .w_full()
@@ -95,8 +108,8 @@ impl Shell {
                     // 出现个感叹号鼠标触发气泡提示就行了」）。位置紧贴名字、
                     // 在归属徽标**之前**——它说的是"这个名字背后有点问题"，
                     // 插在归属后面会读成"归属有问题"
-                    .when_some(alert.clone(), |row, text| {
-                        row.child(warn_dot("repo-warn", text, t, cx))
+                    .when_some(alert.clone(), |row, a| {
+                        row.child(warn_dot("repo-warn", a.bubble.clone(), t, cx, stash_click.clone()))
                     })
                     // 归属徽标常驻：这是"这个仓库我该不该改"的第一个判断依据，
                     // 藏在别处就得多点一次才知道
