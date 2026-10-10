@@ -70,9 +70,6 @@ pub struct RepoEntry {
     /// 上次自动同步结果摘要（"ok:…" / "behind:…" / "skip:…" / "err:…"）
     #[serde(default)]
     pub last_auto_result: String,
-    /// 用户置顶：排在列表最前（其余按 last_used 自动靠前）
-    #[serde(default)]
-    pub pinned: bool,
     /// 第三方仓库（别人的项目：关注简介/技术栈/活跃度/透明拉取）；
     /// false = 我自己的仓库（关注快捷命令/磁盘清理）。侧栏分组与页面路由都看它
     #[serde(default)]

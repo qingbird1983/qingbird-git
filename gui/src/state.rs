@@ -62,8 +62,6 @@ pub(crate) struct RepoView {
     /// 一条 `git status --porcelain`（`changed_files` 跑的是同一条命令，
     /// 换过去等于白赚一份文件名列表，不多派生任何子进程）
     pub(crate) changes: Vec<ChangeEntry>,
-    /// 最后一次提交的秒级时间戳，0 = 从没提交过（仓库头那一行）
-    pub(crate) last_commit_ts: u64,
     /// 自动识别出来的四条命令：仓库没存命令时拿来预填
     pub(crate) detected: run_cmd::CmdDetect,
 }
@@ -76,10 +74,47 @@ impl RepoView {
             has_status: false,
             changed: 0,
             changes: Vec::new(),
-            last_commit_ts: 0,
             detected: run_cmd::CmdDetect::default(),
         }
     }
+}
+
+/// 「这一份是**真问过 git** 的读数吗」——**库里那一版**的那个事实。
+///
+/// 与 `Shell::status_read(path)` 是同一个事实的两个出处（一个问内存视图、
+/// 一个问库里的行），32-10 起界面上不再有任何地方拿 `RepoCache` 的**内容**
+/// 去反推它：`is_repo`、有没有提交、命令空不空——都不回答"这一份是谁写的"
+/// （31.4 补十五给 `RepoStatus` 补 `status_read` 那格是同一条纪律）
+pub(crate) fn cache_git_was_asked(c: &core_cache::RepoCache) -> bool {
+    c.status_read
+}
+
+/// 这一份自动识别出来的快捷命令**是不是真认出来的**：四条全空 = 没认出来。
+///
+/// 它挡的是"把空的一份写进库、盖掉库里那份好的"——空 detected 的两种来源：
+/// `RepoView::blank()`（视图还没建起来）与启动时 `detect_cmds` 真没认出任何东西
+pub(crate) fn recognised_commands_are_present(d: &run_cmd::CmdDetect) -> bool {
+    !(d.test_cmd.is_empty()
+        && d.build_cmd.is_empty()
+        && d.dev_cmd.is_empty()
+        && d.install_cmd.is_empty())
+}
+
+/// 缓存里那一份 `detected`（自动识别出来的快捷命令）**能不能灌进界面**。
+///
+/// ⛔ 这条判据以前写在 `apply_view_cache` 里，是 `c.last_commit_ts > 0`——那颗字段
+/// 与"有没有识别到命令"没有半点因果关系。它**恰好**挡住了真正要挡的那种行
+/// （只写体积那一路建出来的行 `last_commit_ts` 也是 0，那份 `detected` 是空的，
+/// 灌进去会把 `Shell::new` 刚现算出来的好的一份盖掉），于是它的"对"是巧合，
+/// 而它的"错"是必然：**一颗刚 `git init`、还没有提交的仓库，扫描那一路照样
+/// 把识别好的命令写进了库，却永远读不回来**（32-10 砍 `last_commit_ts` 时撞见）。
+///
+/// ⚠️ **这一格只有下面那两个调用点，而它们在 `Shell` 的方法里，一条单测都写不了**
+/// （Windows 没有窗口级单测，路线表 D40）。所以下面那两条真值表钉住的是
+/// **这颗函数本身**，"函数真的被挂在了那一格上"由**帧**负责——本轮的落法是
+/// 造一颗**有 package.json 但没有一次提交**的仓库，重启后快捷命令仍然预填
+pub(crate) fn cache_detected_is_trustworthy(c: &core_cache::RepoCache) -> bool {
+    cache_git_was_asked(c) && recognised_commands_are_present(&c.detected)
 }
 
 /// 三键的顺序：**拉取 · 推送 · 检测**。
@@ -1719,7 +1754,6 @@ pub(crate) fn readme_note(loading: bool, scanning: bool, scanned_at: u64) -> Str
 
 /// 空视图：仓库还没有被扫到时（首帧、扫描中）给总览行兜底
 pub(crate) static EMPTY_VIEW: RepoView = RepoView {
-    last_commit_ts: 0,
     status: RepoStatus {
         is_repo: false,
         branch: String::new(),
@@ -2246,5 +2280,91 @@ mod tests {
             chip_label(true, 0),
             "「不知道」与「零颗」写成同一句 ⇒ 那一档的保护整个失效"
         );
+    }
+
+    /// 32-10：那一格闸门的真值表。**两行各挡一个方向**，因为旧判据
+    /// （`last_commit_ts > 0`）的错法有两种，而且它恰好把第一种挡住了
+    #[test]
+    fn a_space_only_row_does_not_clobber_the_recognised_commands() {
+        // 只写体积那一路建的行：`status` 全空、`detected` 也是空的，
+        // 但库里可能带着一份昨天识别好的命令 —— 这种行不许灌进界面，
+        // 否则 `Shell::new` 刚现算出来的好的一份会被空的一份盖掉
+        let c = core_cache::RepoCache {
+            status_read: false,
+            status: RepoStatus {
+                is_repo: true,
+                ..RepoStatus::default()
+            },
+            detected: run_cmd::CmdDetect {
+                test_cmd: "pnpm test".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            !cache_detected_is_trustworthy(&c),
+            "没读过 git 的那一行，缓存里的命令不是可信的一份"
+        );
+    }
+
+    #[test]
+    fn a_repo_with_no_commits_still_gets_its_commands_back() {
+        // 刚 `git init`、一次提交都没有的仓库：旧判据在这种行上恒假 ⇒
+        // 识别好的命令永远进不了缓存。这一行必须是真
+        let c = core_cache::RepoCache {
+            status_read: true,
+            // ⚠️ 故意留 `RepoStatus::default()`（`is_repo = false`）与 `changed = 0`：
+            // 谁把判据换成"从内容反推"（认 `is_repo`、认有没有提交、认 detected
+            // 非空），这一条就当场红——那些内容都不回答"这一份是谁写的"
+            changed: 0,
+            detected: run_cmd::CmdDetect {
+                build_cmd: "cargo build".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            cache_detected_is_trustworthy(&c),
+            "扫描那一路写下的行，识别好的命令必须读得回来——有没有提交不算条件"
+        );
+    }
+
+    /// 空的一份 detected（四条全空）**既不落库也不灌进界面**：它在库里存在的
+    /// 唯一作用就是把 `Shell::new` 现算出来的那份好的盖掉
+    #[test]
+    fn four_blank_commands_are_not_a_value() {
+        let blank = run_cmd::CmdDetect::default();
+        assert!(
+            !recognised_commands_are_present(&blank),
+            "四条全空 = 没认出来，不是「认出来四条空的」"
+        );
+        // 只认出一条也算认出来了——这条钉住那个 `&&` 串（改成 `||` 当场红）
+        for d in [
+            run_cmd::CmdDetect {
+                test_cmd: "cargo test".into(),
+                ..Default::default()
+            },
+            run_cmd::CmdDetect {
+                build_cmd: "cargo build".into(),
+                ..Default::default()
+            },
+            run_cmd::CmdDetect {
+                dev_cmd: "cargo run".into(),
+                ..Default::default()
+            },
+            run_cmd::CmdDetect {
+                install_cmd: "cargo fetch".into(),
+                ..Default::default()
+            },
+        ] {
+            assert!(recognised_commands_are_present(&d), "四条里任意一条有值都算认出来");
+        }
+        // 读过的行 + 空命令 ⇒ 不可信（不然是旧判据 `last_commit_ts > 0` 也放行的一种）
+        let c = core_cache::RepoCache {
+            status_read: true,
+            detected: blank,
+            ..Default::default()
+        };
+        assert!(!cache_detected_is_trustworthy(&c), "空的一份不该盖掉现算的那份");
     }
 }

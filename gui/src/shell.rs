@@ -1788,9 +1788,6 @@ impl Shell {
                                         // 只把结果数了一下行——提交对话框与检视抽屉要的
                                         // 变更清单就是这批输出的另一半，等于白丢
                                         repos::changed_entries(p),
-                                        // `git log -1` 只读 HEAD 不走历史，O(1)，
-                                        // 放在状态扫描这一轮里顺手算，不另开一趟
-                                        repos::last_commit_ts(p),
                                     )
                                 })
                             })
@@ -1799,7 +1796,7 @@ impl Shell {
                             .into_iter()
                             .map(|h| {
                                 h.join().unwrap_or_else(|_| {
-                                    (String::new(), RepoStatus::default(), Vec::new(), 0)
+                                    (String::new(), RepoStatus::default(), Vec::new())
                                 })
                             })
                             .collect::<Vec<_>>()
@@ -1809,9 +1806,9 @@ impl Shell {
                     let fork = sel.as_ref().and_then(|sel_path| {
                         results
                             .iter()
-                            .find(|(p, _, _, _)| p == sel_path)
-                            .filter(|(_, st, _, _)| st.ahead > 0 && st.behind > 0)
-                            .and_then(|(p, st, _, _)| {
+                            .find(|(p, _, _)| p == sel_path)
+                            .filter(|(_, st, _)| st.ahead > 0 && st.behind > 0)
+                            .and_then(|(p, st, _)| {
                                 fork::fork_info(p, st, &|args: &[&str]| net::run_local(p, args))
                             })
                     });
@@ -1831,7 +1828,7 @@ impl Shell {
                 if all {
                     this.last_scan_ts = qingbird_core::store::now_secs();
                 }
-                for (path, status, changes, last_commit) in scan {
+                for (path, status, changes) in scan {
                     let v = this.views.entry(path.clone()).or_insert_with(RepoView::blank);
                     v.status = status;
                     // 问过 git 了，答案就在这上面 ⇒ 「待扫描」那一档到此结束。
@@ -1842,7 +1839,6 @@ impl Shell {
                     v.has_status = true;
                     v.changed = changes.len() as u32;
                     v.changes = changes;
-                    v.last_commit_ts = last_commit;
                     // **扫完就落库**（阶段 16）。刷新过的那个仓库状态一定是最新的，
                     // 不落库的话下次启动又要从头问一遍 git
                     this.persist_view_cache(&path);

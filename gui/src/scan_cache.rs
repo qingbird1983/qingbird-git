@@ -77,10 +77,14 @@ impl Shell {
         // 与它要修的那条（把没有说成有）同样是假话。
         // ⚠️ 反过来，光看「有没有这条缓存」也不行：只写体积那一路会先建一条
         // `status` 全空的记录，那时真就是没读过。判据写在 `RepoCache::status_read`
-        v.has_status = c.status_read;
+        // 读侧**只经这一颗函数**问"这一份是不是真读过 git"——库里那一版的事实
+        // 有两个出处的话，"把内容当证据"就会从另一处钻回来（见函数注释）
+        v.has_status = crate::state::cache_git_was_asked(c);
         v.changed = c.changed;
-        v.last_commit_ts = c.last_commit_ts;
-        if c.last_commit_ts > 0 {
+        // `detected` 这一格的闸门。**为什么判据是 `status_read`、为什么不能改成
+        // 任何"从内容反推"的东西**（有没有提交、命令空不空），理由整段写在
+        // `state::cache_detected_is_trustworthy` 上——一条规则只许有一个家
+        if crate::state::cache_detected_is_trustworthy(c) {
             v.detected = c.detected.clone();
         }
         // `changes`（未提交文件名）**不进缓存**：那是"此刻"的状态，
@@ -157,8 +161,11 @@ impl Shell {
         // 只剩一份分不清来源的读数（`status_read` 的注释写了为什么不能靠内容猜）
         c.status_read = true;
         c.changed = v.changed;
-        c.last_commit_ts = v.last_commit_ts;
-        if v.last_commit_ts > 0 {
+        // `detected` 只在**真认出来**的时候才落库：空的一份不覆盖库里那份好的。
+        // 这一路以前套的是 `if v.last_commit_ts > 0`——那是把"有没有提交"当成
+        // "有没有识别到命令"的代理，代理迟早失效（理由整段写在
+        // `state::cache_detected_is_trustworthy` 上，一条规则只许有一个家）
+        if crate::state::recognised_commands_are_present(&v.detected) {
             c.detected = v.detected.clone();
         }
         c.scanned_at = qingbird_core::store::now_secs();

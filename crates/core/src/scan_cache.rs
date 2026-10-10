@@ -64,9 +64,6 @@ pub struct RepoCache {
     /// 未提交文件数
     #[serde(default)]
     pub changed: u32,
-    /// 最后一次提交的秒级时间戳
-    #[serde(default)]
-    pub last_commit_ts: u64,
     /// 自动识别出来的四条命令
     #[serde(default)]
     pub detected: CmdDetect,
@@ -491,7 +488,16 @@ mod tests {
                 stash_count: 0,
             },
             changed: 3,
-            last_commit_ts: 1_700_000_000,
+            // ⚠️ 这两格是 32-10 补进样例的：GUI 那一侧「缓存里的快捷命令能不能
+            // 灌进界面」现在**只认 `status_read`**，所以"这一份能不能活过一次
+            // 序列化"就是那条闸门的地基。以前样例里两者都不填（都落
+            // `..Default::default()`），于是往返测试压根没验过它们
+            status_read: true,
+            detected: CmdDetect {
+                test_cmd: "cargo test".into(),
+                build_cmd: "cargo build --release".into(),
+                ..Default::default()
+            },
             langs: vec![LangStat {
                 language: "Rust".into(),
                 percent: 100.0,
@@ -520,6 +526,12 @@ mod tests {
         let back = load_cache("F:\\a\\b").expect("刚写的却读不到");
         assert_eq!(back.status.behind, 2);
         assert_eq!(back.changed, 3);
+        assert!(
+            back.status_read,
+            "「这份 status 是真读出来的」必须活过一次序列化——GUI 的 detected 闸门认的就是它"
+        );
+        assert_eq!(back.detected.test_cmd, "cargo test");
+        assert_eq!(back.detected.build_cmd, "cargo build --release");
         assert_eq!(back.langs.len(), 1);
         assert_eq!(
             back.readme_text.as_deref(),

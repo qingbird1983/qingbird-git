@@ -548,19 +548,6 @@ fn bucket_days(log_out: &str) -> Vec<ActivityDay> {
     days
 }
 
-/// 最近一次提交的 Unix 时间戳（秒）。没有提交 / 不是仓库时返回 0，
-/// 调用方用「0 = 从没提交过」这个约定渲染占位。
-pub fn last_commit_ts(repo_path: &str) -> u64 {
-    if !valid_repo(repo_path) {
-        return 0;
-    }
-    run_local(repo_path, &["log", "-1", "--format=%ct"])
-        .stdout
-        .trim()
-        .parse()
-        .unwrap_or(0)
-}
-
 /// 项目语言构成（类似 GitHub 语言条）：按扩展名统计代码文件字节占比。
 /// 用 `git ls-files -co --exclude-standard` 取文件列表，自动跳过 .gitignore 忽略的文件。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -1065,7 +1052,6 @@ mod tests {
             auto_pull: false,
             last_auto_check: 0,
             last_auto_result: String::new(),
-            pinned: false,
             is_third_party: false,
         }
     }
@@ -1368,7 +1354,6 @@ mod activity_tests {
 
         // 没有提交的仓库：空数组，调用方自己补 0 高度的柱子
         assert!(commit_activity(root.to_str().unwrap(), 30).is_empty());
-        assert_eq!(last_commit_ts(root.to_str().unwrap()), 0);
 
         // 连续三次提交必然落在同一天：断言计数等于 3，不去猜是哪一天
         for i in 0..3 {
@@ -1382,13 +1367,10 @@ mod activity_tests {
         assert_eq!(days[0].count, 3);
         assert_eq!(days[0].date.len(), 10, "YYYY-MM-DD，实际 {:?}", days[0].date);
 
-        assert!(last_commit_ts(path) > 0, "有提交后时间戳必须非零");
-
         // 非仓库目录：安静返回空，不报错
         let not_repo = root.join("nope");
         std::fs::create_dir_all(&not_repo).unwrap();
         assert!(commit_activity(not_repo.to_str().unwrap(), 30).is_empty());
-        assert_eq!(last_commit_ts(not_repo.to_str().unwrap()), 0);
 
         drop(repo);
     }
