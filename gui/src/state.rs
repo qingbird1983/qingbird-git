@@ -1236,6 +1236,24 @@ pub(crate) struct CloneDialog {
     pub(crate) parent: Entity<InputState>,
     /// 正在克隆（按钮转圈、防连点）
     pub(crate) running: bool,
+    /// 进度四档。⚠️ **单拆成 `CloneProgress` 而不是摊在这一层**：`CloneDialog`
+    /// 带着两颗 `Entity<InputState>`，脱离 gpui 上下文**根本构造不出来** ⇒
+    /// 「克隆进行中就该拿到阶段/网速/百分比」这条判据一条单测都写不了，
+    /// 而它恰恰是 2026-10-10 那条缺陷（全程只显示"准备中…"）的落点。
+    /// 拆成纯数据之后搬运规则才进得了单测（AGENTS：能抽纯函数就抽）
+    pub(crate) progress: CloneProgress,
+    /// 失败的一句中文结论 + git 原始 stderr
+    pub(crate) error: Option<String>,
+}
+
+/// 克隆进行时要上屏的四档。
+///
+/// ⚠️ **与 `LogState` 的 `stage` / `detail` / `percent` 是同一套语义**——
+/// 那边是拉取/一键命令的日志卡，这边是克隆弹窗。两条链路都必须**在操作还在跑
+/// 的时候就逐批拿到值**，不是等命令返回（D73 的同族：断点在 GUI 的搬运层，
+/// 不在 core）。三档的更新判据两处一样，见 `dialogs::clone` 的 `pump` 注释。
+#[derive(Default, Clone)]
+pub(crate) struct CloneProgress {
     /// 当前阶段词（"接收对象" / "正在取消…" …）。
     /// **路径标签已经拼在里面**（`接收对象（经代理 127.0.0.1:7897）`），同 `LogState::stage`
     pub(crate) stage: String,
@@ -1245,8 +1263,6 @@ pub(crate) struct CloneDialog {
     pub(crate) percent: Option<f32>,
     /// 实时输出（只留文字变了的那些行）
     pub(crate) output: Vec<String>,
-    /// 失败的一句中文结论 + git 原始 stderr
-    pub(crate) error: Option<String>,
 }
 
 /// 初始化向导的状态：顶层目录清单 + 勾选的排除项

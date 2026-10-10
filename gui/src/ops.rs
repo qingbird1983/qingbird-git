@@ -26,6 +26,19 @@ use std::time::Duration;
 use crate::state::*;
 use crate::widgets::auto_sync_text;
 
+/// 进度搬运的轮询间隔：后台线程把 git 的事件攒在共享缓冲里，主线程每隔这一档
+/// 取走一批、更新状态、`notify` 重绘。
+///
+/// ⚠️ **这一档只许有一个出处**（2026-10-10）：原先只有 `run_slot` 与拉取那两条
+/// 循环各写一个字面 120，而**克隆弹窗压根没有这条循环**——事件全在后台缓冲里
+/// 攒着，直到 `clone_repo` 整个返回才搬一次（那一刻对话框已经要关了）。
+/// 用户看到的是"进度条一直在滑，文字永远停在准备中…"，百分比 / 网速 /
+/// 直连还是代理**一个都上不了屏**。现在三条链路共用这一颗常量。
+///
+/// 120ms 是"看着连续、又不刷爆重绘"的一档：git 的进度行一秒刷十几条，
+/// 每 120ms 搬一批 ≈ 一秒重绘八次。
+pub(crate) const PROGRESS_POLL: Duration = Duration::from_millis(120);
+
 /// 后台线程往共享缓冲里放的两种东西：输出一行，或者报一次进度。
 ///
 /// 分成两种是因为进度**不上屏**：它只更新状态行与进度条。
@@ -107,9 +120,7 @@ impl Shell {
         let ui_done = Arc::clone(&done);
         let ui_path = path.clone();
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(120))
-                .await;
+            cx.background_executor().timer(PROGRESS_POLL).await;
             let batch = {
                 let mut g = ui_buf.lock().unwrap_or_else(|e| e.into_inner());
                 std::mem::take(&mut *g)
@@ -250,9 +261,7 @@ impl Shell {
         let ui_done = Arc::clone(&done);
         let ui_path = path.clone();
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(120))
-                .await;
+            cx.background_executor().timer(PROGRESS_POLL).await;
             let batch = {
                 let mut g = ui_buf.lock().unwrap_or_else(|e| e.into_inner());
                 std::mem::take(&mut *g)

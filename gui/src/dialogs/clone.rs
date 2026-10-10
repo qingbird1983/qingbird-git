@@ -9,6 +9,12 @@
 //!
 //! **失败时对话框不关**：地址还留在输入框里，用户改完就能重试；
 //! 关掉的话他得把刚才那串地址重新敲一遍。
+//!
+//! **进度是「边跑边搬」的**：git 的事件由后台线程攒进 `ProgressSink`，主线程
+//! 每 `ops::PROGRESS_POLL` 取一批倒进 `CloneProgress`（与拉取/一键命令那条链路
+//! 同一套写法）。克隆是分钟级操作，"等命令返回再搬"等于全程不搬——
+//! 2026-10-10 就是这么挂的：进度条滑、文字停在「准备中…」、百分比与网速和
+//! 直连/代理一样都不出现。
 
 use gpui_kit::component::button::ButtonCustomVariant;
 use gpui_kit::base::{h_flex, v_flex};
@@ -22,12 +28,16 @@ use gpui_kit::{
     Focusable as _, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
 use qingbird_core::clone;
 use qingbird_core::git;
 use qingbird_core::net::NetMode;
 use qingbird_core::repos;
 use qingbird_core::types::ProgressEvent;
 
+use crate::ops::PROGRESS_POLL;
 use crate::state::*;
 use crate::widgets::{ghost_variant, progress_readout, progress_text, sunken_box};
 use crate::tokens::*;
@@ -69,10 +79,7 @@ impl Shell {
             url,
             parent: parent_input,
             running: false,
-            stage: String::new(),
-            detail: String::new(),
-            percent: None,
-            output: Vec::new(),
+            progress: CloneProgress::default(),
             error: None,
         });
         self.build_clone_dlg(window, cx);
@@ -171,38 +178,84 @@ impl Shell {
 
         if let Some(d) = self.clone_dlg.as_mut() {
             d.running = true;
-            d.stage = "准备中…".into();
-            d.detail.clear();
-            d.percent = None;
-            d.output.clear();
+            // "准备中…"只是起跑与第一条 git 输出之间那一小段的占位。
+            // **它必须由下面那条轮询循环被真实阶段换掉**——2026-10-10 那条缺陷
+            // 的症状就是这句话挂满整个克隆过程
+            d.progress.stage = "准备中…".into();
+            d.progress.detail.clear();
+            d.progress.percent = None;
+            d.progress.output.clear();
             d.error = None;
         }
         cx.notify();
 
         // 进度回调跑在后台线程上。**不要在后台线程里 `Entity::update`**：
         // core 不认识 gpui，界面状态也不该跨线程被改。这里用一个
-        // `Arc<Mutex<..>>` 把事件攒起来，由主线程一次性倒进状态
-        let sink = std::sync::Arc::new(std::sync::Mutex::new(ProgressSink::default()));
-        let sink2 = sink.clone();
-        cx.spawn(async move |this, cx| {
-            let r = cx
-                .background_executor()
-                .spawn(async move {
-                    let on_progress = |ev: &ProgressEvent| {
-                        if let Ok(mut s) = sink2.lock() {
-                            s.push(ev);
-                        }
+        // `Arc<Mutex<..>>` 把事件攒起来，由主线程**每 `PROGRESS_POLL` 取走一批**
+        // 倒进对话框。
+        //
+        // ⚠️ **这条轮询循环就是这一整段曾经缺的东西**（2026-10-10 实机）：
+        // 原先只有"等 `clone_repo` 返回之后一次性倒进去"，而克隆是分钟级的操作 ⇒
+        // 整个过程中界面停在「准备中…」、进度条走不定态流光，百分比 / 网速 /
+        // 直连还是代理**一样都不上屏**；等真倒进来时成功分支已经把对话框关了，
+        // 那一批等于从没画过。拉取与一键命令那条链路（`ops::run_slot_at`）
+        // 一直有这个循环，这里**没抄**——断点完全在 GUI 的搬运层，
+        // core 与 git 那两头事件一直都在发（D73 的同族第三处）。
+        let sink = Arc::new(Mutex::new(ProgressSink::default()));
+        let done = Arc::new(AtomicBool::new(false));
+
+        let sink_bg = sink.clone();
+        let done_bg = done.clone();
+        let runner = cx.background_executor().spawn(async move {
+            let on_progress = |ev: &ProgressEvent| {
+                if let Ok(mut s) = sink_bg.lock() {
+                    s.push(ev);
+                }
+            };
+            let r = clone::clone_repo(&url, &parent, NetMode::Auto, third, Some(&on_progress));
+            // 事件全在 `clone_repo` 返回之前 push 完，所以标记放在它后面，
+            // 就不存在"标记已真、缓冲里还有货"的窗口
+            done_bg.store(true, Ordering::SeqCst);
+            r
+        });
+
+        // 搬运循环：与 `ops.rs` 那两条**同一套写法**（同一个 `PROGRESS_POLL`、
+        // 同样"锁内 take 增量 → 更新状态 → 有内容才 notify"）。
+        // 退出条件有两条，缺一不可：
+        // ① `done` —— 命令正常结束；
+        // ② 对话框没了 —— 用户取消或关掉时 `clone_dlg` 置成 None 了，而 git
+        //    还在后台跑、`done` 不会来，再转下去就是给一个不存在的界面空转。
+        //    这条靠 `update` 闭包的返回值传出来，不在闭包里 break（那里 break 不了）
+        let sink_ui = sink.clone();
+        let done_ui = done.clone();
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(PROGRESS_POLL).await;
+            let finished = done_ui.load(Ordering::SeqCst);
+            let gone = this
+                .update(cx, |this, cx| {
+                    let Some(d) = this.clone_dlg.as_mut() else {
+                        return true;
                     };
-                    clone::clone_repo(&url, &parent, NetMode::Auto, third, Some(&on_progress))
-                })
-                .await;
-            let win = this.update(cx, |this, _| this.win).ok();
-            let sink3 = sink.clone();
-            this.update(cx, |this, cx| {
-                if let Ok(s) = sink3.lock() {
-                    if let Some(d) = this.clone_dlg.as_mut() {
-                        s.drain_into(d);
+                    if pump(&sink_ui, &mut d.progress) {
+                        cx.notify();
                     }
+                    false
+                })
+                .unwrap_or(true);
+            if gone || finished {
+                break;
+            }
+        })
+        .detach();
+
+        // 收尾：等命令返回，把可能还剩的最后一批搬完，再落成功/失败结论
+        let sink_fin = sink.clone();
+        cx.spawn(async move |this, cx| {
+            let r = runner.await;
+            let win = this.update(cx, |this, _| this.win).ok();
+            this.update(cx, |this, cx| {
+                if let Some(d) = this.clone_dlg.as_mut() {
+                    pump(&sink_fin, &mut d.progress);
                 }
                 match r {
                     Ok(out) => this.finish_clone(out, win, cx),
@@ -280,7 +333,7 @@ impl Shell {
         }
         git::request_cancel();
         if let Some(d) = self.clone_dlg.as_mut() {
-            d.stage = "正在取消…".into();
+            d.progress.stage = "正在取消…".into();
         }
         cx.notify();
     }
@@ -306,10 +359,9 @@ pub(crate) struct CloneView {
     url: Option<Entity<InputState>>,
     parent: Option<Entity<InputState>>,
     running: bool,
-    stage: String,
-    detail: String,
-    percent: Option<f32>,
-    output: Vec<String>,
+    /// 进度四档的快照。⚠️ **四档不在这里重摊一遍**：它们的定义与搬运规则
+    /// 只有 `CloneProgress` 一个出处，这里只是拿来画（同一属性两个名字 = 会漂）
+    progress: CloneProgress,
     error: Option<String>,
 }
 
@@ -320,20 +372,14 @@ impl Shell {
                 url: Some(d.url.clone()),
                 parent: Some(d.parent.clone()),
                 running: d.running,
-                stage: d.stage.clone(),
-                detail: d.detail.clone(),
-                percent: d.percent,
-                output: d.output.clone(),
+                progress: d.progress.clone(),
                 error: d.error.clone(),
             },
             None => CloneView {
                 url: None,
                 parent: None,
                 running: false,
-                stage: String::new(),
-                detail: String::new(),
-                percent: None,
-                output: Vec::new(),
+                progress: CloneProgress::default(),
                 error: None,
             },
         }
@@ -364,7 +410,7 @@ fn clone_body(this: &Entity<Shell>, gv: ButtonCustomVariant, t: &Theme, st: &Clo
         })
         .child(hint(t))
         .when(
-            st.running || !st.output.is_empty() || st.error.is_some(),
+            st.running || !st.progress.output.is_empty() || st.error.is_some(),
             |b| b.child(progress_block(t, st)),
         )
         .when_some(st.error.clone(), |b, e| {
@@ -457,7 +503,7 @@ fn progress_block(t: &Theme, st: &CloneView) -> Div {
     .id("clone-out")
     .overflow_y_scroll();
 
-    if st.output.is_empty() {
+    if st.progress.output.is_empty() {
         log = log.child(
             div()
                 .text_size(px(fs_meta()))
@@ -469,7 +515,7 @@ fn progress_block(t: &Theme, st: &CloneView) -> Div {
                 }),
         );
     } else {
-        for line in &st.output {
+        for line in &st.progress.output {
             // 只给**前缀**标色，不整段染红——理由同 `log.rs::output_stream`：
             // 整段红会把输出变成一片警示墙，真正要看的报错那几行反而被淹掉
             let (mark, color) = match line.chars().next() {
@@ -516,18 +562,26 @@ fn progress_block(t: &Theme, st: &CloneView) -> Div {
     // 两处渲染却不一样（2026-10-05 收到一个函数里）。
     // 顺带统一了一处配色：原先"正在跑"用 `body(t)`、"已结束"用 `tier4(t)`，
     // 现在两处进度读数都用 `tier3(t)`，跑完那句话不再单独暗一档
+    // ⚠️ 这三样（阶段 / 网速 / 百分比）在跑的时候**必须有值**，靠的是 `run_clone`
+    // 里那条轮询循环。2026-10-10 那条缺陷不出在这里——这里画得一直对，
+    // 是上游那一层一个字节都没搬过来，于是这一行永远只剩「准备中…」
     let text = if st.running {
-        progress_text(&st.stage, &st.detail)
-    } else if st.stage.is_empty() {
+        progress_text(&st.progress.stage, &st.progress.detail)
+    } else if st.progress.stage.is_empty() {
         "已结束".to_string()
     } else {
-        format!("{}（已结束）", st.stage)
+        format!("{}（已结束）", st.progress.stage)
     };
 
     v_flex()
         .w_full()
         .gap(px(GAP))
-        .child(progress_readout(t, "clone-progress", &text, st.percent))
+        .child(progress_readout(
+            t,
+            "clone-progress",
+            &text,
+            st.progress.percent,
+        ))
         .child(log)
 }
 
@@ -576,25 +630,39 @@ fn clone_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
 
 // ================= 后台进度汇聚 =================
 
-/// 后台线程把 `ProgressEvent` 攒在这里，主线程一次性取走。
+/// 把后台缓冲里"这一批"倒进界面上的进度四档，返回这一批**有没有内容**。
+///
+/// ⚠️ **它是"什么时候能看到进度"这件事的唯一出处**：轮询那一轮、收尾那一次
+/// 都走这一颗，所以不存在"只在结束时才搬"的第二条路径（2026-10-10 那条缺陷
+/// 就是只有第二条路径）。写成对 `&mut CloneProgress` 而不是 `&mut CloneDialog`
+/// 操作，是为了它进得了单测——`CloneDialog` 带 `Entity<InputState>`，
+/// 没有 gpui 上下文就构造不出来。
+///
+/// 锁中毒时退成"这一批没搬动"（下一轮再搬），不 panic：一次克隆中间断一帧
+/// 进度，比让界面整个带着 panic 栈掉下去轻得多。
+fn pump(sink: &Arc<Mutex<ProgressSink>>, p: &mut CloneProgress) -> bool {
+    let mut s = sink.lock().unwrap_or_else(|e| e.into_inner());
+    s.drain_into(p)
+}
+
+/// 后台线程把 `ProgressEvent` 攒在这里，主线程每 `PROGRESS_POLL` 取走一批。
 #[derive(Default)]
 struct ProgressSink {
-    /// `(阶段, 网速, 展示文本)` 成对存。**不要靠 `split_once(" · ")` 从展示
+    /// `(阶段, 网速, 百分比, 展示文本)` 成对存。**不要靠 `split_once(" · ")` 从展示
     /// 文本里反解阶段**——展示文本换成 git 原文之后那个分隔符就不存在了，
     /// 阶段会整个退化成整行原文（2026-10-05 改输出为原文时踩到）。
     ///
-    /// 网速单独一栏：它要上进度条旁边那行可见文字（`已传输 1.21 MiB · 56.00 KiB/s`），
-    /// 而展示文本那一列是 git 原文，从那里拆不出速度
-    events: Vec<(String, String, String)>,
+    /// ⚠️ **`percent` 逐条存，不在 sink 上记一个"最后已知的百分比"**：
+    /// 那样百分比只增不清，进入一个 git 没报百分比的阶段（`开始克隆` / `解包对象`）
+    /// 时进度条还挂在旧数字上。`ops.rs` 的 `LogEvent::Stage` 分支判据是
+    /// "这一档没有百分比就回到不定态"，同一个数在两条链路必须同一个来路。
+    events: Vec<(String, String, Option<f32>, String)>,
+    /// 上一条上屏的文字。git 的进度行按 `\r` 反复刷新同一句，用它滤掉重复
     last: String,
-    percent: Option<f32>,
 }
 
 impl ProgressSink {
     fn push(&mut self, ev: &ProgressEvent) {
-        // git 的进度行按 \r 反复刷新同一句（"接收对象 42%" → "43%" → …），
-        // 全攒下来能把输出区刷爆。只在**文字真的变了**时记一条
-        //
         // **优先用 git 原文**（用户要的是"像终端那样"），raw 为空
         // ——也就是我们自己发的阶段提示——才退回中文转述。
         let text = if !ev.raw.is_empty() {
@@ -604,34 +672,180 @@ impl ProgressSink {
         } else {
             format!("{} · {}", ev.stage, ev.detail)
         };
+        // 只在**文字真的变了**时记一条：一次大克隆能刷出上千行，
+        // 全攒下来能把输出区刷爆
         if text != self.last {
             self.last = text.clone();
-            self.events.push((ev.stage.clone(), ev.detail.clone(), text));
-        }
-        if let Some(p) = ev.percent {
-            self.percent = Some(p);
+            self.events
+                .push((ev.stage.clone(), ev.detail.clone(), ev.percent, text));
         }
     }
 
-    fn drain_into(&self, d: &mut CloneDialog) {
-        for (stage, detail, text) in &self.events {
-            // 阶段词取最后一条非空的：它才是"现在在干什么"。
-            // 空 stage = 认不出的原文行，不该把上一次的阶段冲掉
+    /// 取走**增量**并落地；返回这一批有没有内容。
+    ///
+    /// 三档的更新判据与 `ops.rs` 里 `LogEvent::Stage` 那一支**逐条对齐**
+    /// （那里有同三条注释）：
+    /// - 空 `stage` = core 没认出这一行（只有 git 原文），不冲掉上一次的阶段
+    /// - 空 `detail` = 这一行没有速度信息，不清掉上一条网速（否则数字在闪）
+    /// - `percent` **每条都落**：没有百分比的阶段就回到不定态，不挂旧数字
+    fn drain_into(&mut self, p: &mut CloneProgress) -> bool {
+        let batch = std::mem::take(&mut self.events);
+        if batch.is_empty() {
+            return false;
+        }
+        for (stage, detail, percent, text) in batch {
             if !stage.is_empty() {
-                d.stage = stage.clone();
+                p.stage = stage;
             }
-            // 网速同理：没有速度的行（`remote: Enumerating…`）不该把上一条清掉
             if !detail.is_empty() {
-                d.detail = detail.clone();
+                p.detail = detail;
             }
-            d.output.push(text.clone());
+            p.percent = percent;
+            p.output.push(text);
         }
-        if d.output.len() > OUT_MAX_LINES {
-            let drop = d.output.len() - OUT_MAX_LINES;
-            d.output.drain(..drop);
+        // 只留尾巴：用户要看的"刚才发生了什么"在那儿
+        if p.output.len() > OUT_MAX_LINES {
+            let drop = p.output.len() - OUT_MAX_LINES;
+            p.output.drain(..drop);
         }
-        if let Some(p) = self.percent {
-            d.percent = Some(p);
-        }
+        true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 造一条 core 送过来的进度事件。`to_log` 在这一层没用过（弹窗的输出区
+    /// 是"只留文字变了的行"，不是日志那条白名单），一律给 true
+    fn ev(stage: &str, detail: &str, percent: Option<f32>, raw: &str) -> ProgressEvent {
+        ProgressEvent {
+            stage: stage.into(),
+            detail: detail.into(),
+            percent,
+            raw: raw.into(),
+            to_log: true,
+        }
+    }
+
+    fn sink_with(events: &[ProgressEvent]) -> Arc<Mutex<ProgressSink>> {
+        let sink = Arc::new(Mutex::new(ProgressSink::default()));
+        {
+            let mut s = sink.lock().unwrap();
+            for e in events {
+                s.push(e);
+            }
+        }
+        sink
+    }
+
+    /// **这条钉的就是 2026-10-10 用户报的那件事**：克隆全程进度条在滑、文字停在
+    /// 「准备中…」、没有百分比、没有网速、没有直连/代理。
+    ///
+    /// 单测测不到 `cx.spawn` 那条循环（Windows 上没有 `VisualTestContext`），
+    /// 能测的是它依赖的那半件事：**事件一到 sink、下一次搬运就把它落进四档**，
+    /// 中间不需要命令返回。旧写法里搬运只发生在 `clone_repo` 返回之后，
+    /// 所以"跑到一半"这个状态在旧代码里根本不存在。
+    #[test]
+    fn progress_lands_while_the_clone_is_still_running() {
+        let sink = sink_with(&[
+            ev("正在尝试直连…", "", None, ""),
+            ev(
+                "接收对象（直连）",
+                "已传输 1.2 MiB · 2.3 MiB/s",
+                Some(45.0),
+                "Receiving objects:  45% (123/273), 1.2 MiB | 2.3 MiB/s",
+            ),
+        ]);
+        // 起跑时那句占位（run_clone 里设的就是它）
+        let mut p = CloneProgress {
+            stage: "准备中…".into(),
+            ..Default::default()
+        };
+        assert!(pump(&sink, &mut p), "第一批就该搬动");
+        assert_eq!(p.stage, "接收对象（直连）", "阶段词必须换掉「准备中…」");
+        assert_eq!(p.detail, "已传输 1.2 MiB · 2.3 MiB/s");
+        assert_eq!(p.percent, Some(45.0));
+        // 路径标签是 core 拼在 stage 里的，走到这里一个字都不能少
+        assert!(p.stage.contains("直连"), "用户要看的「是代理还是直连」在这格");
+    }
+
+    /// 轮询每 `PROGRESS_POLL` 调一次，所以 `drain_into` **只能取增量**。
+    /// 取走不清空就是同一行反复上屏；返回"有没有内容"是为了没内容时不重绘。
+    #[test]
+    fn each_pump_takes_only_the_new_events() {
+        let sink = sink_with(&[ev("统计对象", "", None, "Enumerating objects: 5")]);
+        let mut p = CloneProgress::default();
+        assert!(pump(&sink, &mut p));
+        assert!(!pump(&sink, &mut p), "第二批是空的，不该报「有内容」");
+        assert_eq!(p.output.len(), 1, "同一行不许灌第二遍");
+        assert_eq!(p.stage, "统计对象", "空批次也不该把阶段冲掉");
+
+        sink.lock().unwrap().push(&ev("压缩对象", "", None, "Compressing objects: 1"));
+        assert!(pump(&sink, &mut p));
+        assert_eq!(p.output.len(), 2, "新事件才该被搬进来");
+        assert_eq!(p.output[1], "Compressing objects: 1");
+    }
+
+    /// 与 `ops.rs` 同一判据：这一条没有百分比 ⇒ 回到不定态，不挂上一个阶段的旧数。
+    #[test]
+    fn a_stage_without_a_percent_returns_the_bar_to_indeterminate() {
+        let sink = sink_with(&[ev("接收对象", "已传输 6 MiB", Some(100.0), "Receiving objects: 100%")]);
+        let mut p = CloneProgress::default();
+        pump(&sink, &mut p);
+        assert_eq!(p.percent, Some(100.0));
+
+        sink.lock().unwrap().push(&ev("解包对象", "", None, "Unpacking objects: done."));
+        pump(&sink, &mut p);
+        assert_eq!(p.percent, None, "新阶段没有百分比，条不能假装还是 100%");
+        assert_eq!(p.stage, "解包对象");
+    }
+
+    /// 认不出来的 git 原文行（`stage` / `detail` 都空）照常上屏，
+    /// 但不许把上一次认出来的阶段与网速冲掉。
+    #[test]
+    fn unparsable_lines_keep_the_previous_stage_and_speed() {
+        let sink = sink_with(&[ev("接收对象", "已传输 1 MiB · 2 MiB/s", Some(30.0), "Receiving objects: 30%")]);
+        let mut p = CloneProgress::default();
+        pump(&sink, &mut p);
+
+        sink.lock()
+            .unwrap()
+            .push(&ev("", "", None, "warning: 目录不是标准布局"));
+        pump(&sink, &mut p);
+        assert_eq!(p.stage, "接收对象");
+        assert_eq!(p.detail, "已传输 1 MiB · 2 MiB/s");
+        assert_eq!(p.output.last().map(String::as_str), Some("warning: 目录不是标准布局"));
+    }
+
+    /// 一次大克隆刷几千行，输出区只留尾巴；阶段与网速取的仍是最新那批。
+    #[test]
+    fn output_is_capped_and_keeps_the_tail() {
+        let sink = Arc::new(Mutex::new(ProgressSink::default()));
+        for i in 0..(OUT_MAX_LINES + 50) {
+            sink.lock()
+                .unwrap()
+                .push(&ev("接收对象", "", Some(i as f32), &format!("Receiving objects: {i}")));
+        }
+        let mut p = CloneProgress::default();
+        pump(&sink, &mut p);
+        assert_eq!(p.output.len(), OUT_MAX_LINES);
+        assert_eq!(p.output.first().map(String::as_str), Some("Receiving objects: 50"));
+        assert_eq!(p.output.last().map(String::as_str), Some("Receiving objects: 249"));
+    }
+
+    /// 同一句被 `\r` 反复刷新时只记一条：这是 `last` 那一道滤，
+    /// 少了它输出区会被上千行重复刷屏
+    #[test]
+    fn repeated_identical_lines_are_filtered_once() {
+        let sink = sink_with(&[
+            ev("接收对象", "", Some(1.0), "Receiving objects:   1%"),
+            ev("接收对象", "", Some(1.0), "Receiving objects:   1%"),
+            ev("接收对象", "", Some(1.0), "Receiving objects:   1%"),
+        ]);
+        let mut p = CloneProgress::default();
+        pump(&sink, &mut p);
+        assert_eq!(p.output.len(), 1);
+    }
+}
+
