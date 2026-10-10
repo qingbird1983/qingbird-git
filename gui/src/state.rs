@@ -21,6 +21,10 @@ use gpui_kit::component::Theme;
 use gpui_kit::{AnyWindowHandle, Entity, FocusHandle, Hsla, ScrollHandle, SharedString, Task};
 use qingbird_core::history::{CommitDetail, CommitPatch, CommitSummary};
 use qingbird_core::repos::{self, ActivityDay, ChangeEntry, LangStat};
+// ⚠️ **取别名而不是直接 `scan_cache`**：本 crate 自己也有一份 `scan_cache`
+// （界面侧那条接线，`gui/src/scan_cache.rs`），两个同名搁在同一个文件里
+// 会让人读错——而读错的那一处编译器不会报，它只会挑中另一个
+use qingbird_core::scan_cache as core_cache;
 use qingbird_core::run_cmd::{self, Slot};
 use qingbird_core::space;
 use qingbird_core::sync;
@@ -109,6 +113,24 @@ pub(crate) enum Op {
 }
 
 impl Op {
+    /// 全部变体。**只有一条用处**：那条"每个落库的键都被归过类"的测试要遍历它。
+    ///
+    /// 为什么用一份清单而不是让编译器逼出来：新增一种操作时 `key()` 那个 match
+    /// **加一条臂就编译过了**，而"它算不算和云端交换过"没人想过 ⇒
+    /// 「久未同步」那片默默漏掉它。判错的两个方向都不报错，所以只能这样钉
+    ///
+    /// `#[cfg(test)]` 而不是 `#[allow(dead_code)]`：它**真的只活在测试里**。
+    /// 留一条 allow 等于允许生产代码里也有人来读它、并误以为那是一份可用的清单
+    #[cfg(test)]
+    pub(crate) const ALL: [Op; 7] = [
+        Op::Cmd(Slot::Test),
+        Op::Pull,
+        Op::Push,
+        Op::Check,
+        Op::Rebase(true),
+        Op::UndoRebase,
+        Op::Commit,
+    ];
     /// 落进 `op_history` 表的**稳定键**（英文小写）。
     /// **`None` = 这一类不进操作历史**。
     ///
@@ -411,6 +433,13 @@ pub(crate) struct OvRow {
     /// 最后一次用这个仓库的秒级时间戳（`RepoEntry::last_used` 原样搬过来）。
     /// **表格排序要读它**——排序档「按最后使用」是原型卡头右上那颗键的默认档
     pub(crate) last_used: u64,
+    /// 这一行属于「久未同步」四档里的哪一档。
+    ///
+    /// ⚠️ **存算好的档位而不是那个时间戳**：表格里没有"上次同步"这一列,
+    /// 这一格唯一的读者是那颗筛选片与它上面的计数。存时间戳的话，
+    /// "多久算久"这条规则会在过滤处再写一遍（两份迟早漂），
+    /// 而界面哪天要加那一列，多存一个字段比少存一个便宜
+    pub(crate) sync_age: core_cache::SyncAge,
 }
 
 /// 总览页「全部仓库」那张卡的行序（原型 `.card-head .btn` 那两档）。
@@ -442,6 +471,60 @@ impl OvSort {
             OvSort::Name => OvSort::LastUsed,
         }
     }
+}
+
+/// 这一行要不要出现在表里。**收成一颗纯函数**的理由：那颗片上的计数与点进去的
+/// 过滤读的是同一个判断——两处各写一份，就会出现"片上写 3、点开只有 2 行"，
+/// 而那种不一致会被当成"数据没刷新"放过去（本项目为"同一属性两个出处"交过四次学费）
+pub(crate) fn ov_row_shows(age: core_cache::SyncAge, stale_only: bool) -> bool {
+    !stale_only || core_cache::sync_age_is_stale(age)
+}
+
+/// 那颗片**能不能用**：读得出来才能用。
+///
+/// 为什么把一句 `is_some()` 抽出来：它是这一整格唯一挡住"一屏假话"的闸——
+/// 表读不出来时如果片还能按，点下去 `Unknown` 那一档就会把每颗仓库都说成
+/// 三个月没同步。留在 `render` 里它就只能靠抓帧看，抽出来它才**能被变异打红**
+/// （AGENTS：凡是靠 `&self` 才能调的显示判据，先抽成纯函数再单测）
+pub(crate) fn sync_table_is_readable(times: &Option<HashMap<String, u64>>) -> bool {
+    times.is_some()
+}
+
+/// 那颗片上写的字。
+///
+/// ⛔ **读不出来时不许写 0**。上一版是 `久未同步 {n}`，而 `n` 在 `None` 那一路
+/// 天然是 0 ⇒ 帧上拍出来是"一颗灰掉的键写着「久未同步 0」"，读的人得到的是
+/// **一句有值的结论**："一颗都没有"。这正是 `Unknown` 那一档存在的全部理由，
+/// 而它漏在了末端这一格上（2026-10-11 取证时才看见——单测钉住了计数与筛选，
+/// 没有一句钉住"读不出来时那颗键上写什么"，所以这条判据抽成函数并补了单测）。
+///
+/// 空值记号用 `–`，与同一屏表格里"没有这个数"那几列**同一个记号**
+pub(crate) fn chip_label(readable: bool, n: usize) -> String {
+    if readable {
+        format!("久未同步 {n}")
+    } else {
+        "久未同步 –".to_string()
+    }
+}
+
+/// 那颗片上的两个数：`(超过 90 天没交换的, 没有一次成功同步记录的)`。
+///
+/// ⚠️ **必须在过滤之前统计**：筛完之后 `Never` 那一档只剩… 不，它还在，
+/// 但一旦有人以为"数应该跟着当前可见的行走"，第二个数就会随点击漂。
+/// 固定在过滤前算，它就是一个与开关无关的事实。
+/// ⚠️ `Unknown` 两档都不进——它不是"没同步"，是"这张表我读不出来"，
+/// 那一档的落法是**把片禁用**，见 `overview_page` 里那一句
+pub(crate) fn stale_counts(rows: &[OvRow]) -> (usize, usize) {
+    let mut over = 0usize;
+    let mut none = 0usize;
+    for r in rows {
+        match r.sync_age {
+            core_cache::SyncAge::Stale => over += 1,
+            core_cache::SyncAge::Never => none += 1,
+            core_cache::SyncAge::Recent | core_cache::SyncAge::Unknown => {}
+        }
+    }
+    (over, none)
 }
 
 /// 导航轨指向的页面
@@ -814,6 +897,19 @@ pub(crate) struct Shell {
     /// 那张卡的行序（卡头右上那颗键切它）。**不跨会话记**：
     /// 它是一屏的读法而不是偏好，切错了再点一次就是，落盘反而多一份要同步的状态
     pub(crate) ov_sort: OvSort,
+    /// 每颗仓库**最后一次成功与云端交换**的时间（键是归一后的路径）。
+    ///
+    /// ⚠️ `None` = 那张表**读不出来**，而**不是**"所有仓库都没有同步记录"。
+    /// 这两件事在界面上必须是两个样子：混起来的后果不是少一个数，
+    /// 而是那颗筛选片一点下去，整张表看起来"全都三个月没同步"
+    /// （31.4 补十五给 `RepoStatus` 补的 `status_read` 是同一族）。
+    /// ⇒ 读不出来时那颗片**禁用**并把原因说出来，不猜
+    pub(crate) last_sync: Option<std::collections::HashMap<String, u64>>,
+    /// 那颗「久未同步」片按下去没有。一屏的读法，不跨会话记（同 `ov_sort`）
+    pub(crate) ov_stale_only: bool,
+    /// 片上那两个数：`(超过 90 天没交换的, 没有一次成功同步记录的)`。
+    /// 由 `sync_ov_rows` 在**过滤之前**算好存进来，render 只读
+    pub(crate) ov_stale_counts: (usize, usize),
     /// 全仓库合并的近 14 天提交数（后端只给有提交的日子）
     pub(crate) ov_activity: Vec<ActivityDay>,
     /// 活跃度扫描的代数：过期结果不许覆盖新结果
@@ -2007,6 +2103,36 @@ mod tests {
         );
     }
 
+    /// 每个落库的操作键都必须被 core 那一档**明确归类**：要么在"算同步"清单里，
+    /// 要么在"不算"清单里，两边都不在就是没人想过。
+    ///
+    /// 编译器在这里逼不出来——新增一种操作时 `key()` 那个 match 加一条臂就过了，
+    /// 而"它算不算和云端交换过"没人答 ⇒ 「久未同步」那片默默漏掉它。
+    /// 判错的两个方向都不报错：多算让那条问句永远空，少算把正常的仓库说成三个月没动
+    /// （D78 的同型：**让"忘"没有选项**，只是这一档的闸只能落在测试上）
+    #[test]
+    fn every_op_key_is_classified_as_sync_or_not() {
+        use qingbird_core::scan_cache as sc;
+        for op in Op::ALL {
+            // `Cmd` 压根不落库（`key()` 是 `None`），不在这条的范围内
+            let Some(key) = op.key() else { continue };
+            assert!(
+                sc::SYNC_OP_KEYS.contains(&key) || sc::NON_SYNC_OP_KEYS.contains(&key),
+                "操作键「{key}」既不在「算同步」也不在「不算」的清单里 ⇒ \
+                 「哪几个三个月没同步」对它是个盲区"
+            );
+            assert_eq!(
+                sc::is_sync_op(key),
+                sc::SYNC_OP_KEYS.contains(&key),
+                "{key}：两份清单与那颗谓词说的不是同一件事"
+            );
+        }
+        // 两份清单不许交叉：一个键既算又不算，取到哪一份就取决于谁先读
+        for k in sc::SYNC_OP_KEYS {
+            assert!(!sc::NON_SYNC_OP_KEYS.contains(&k), "「{k}」同时被归进两边");
+        }
+    }
+
     /// 命令槽位**不落 op_history**，而认不出来的键有个说人话的兜底。
     ///
     /// 兜底这条是给**上一个版本写下的键**留的：那时没有这一类，
@@ -2021,5 +2147,104 @@ mod tests {
         );
         assert_eq!(Op::label_of_key("pinned:0"), "某项操作");
         assert_eq!(Op::label_of_key(""), "某项操作");
+    }
+
+    /// 只填判据用得着的字段。`OvRow` 十个字段全写一遍会让这条测试变成
+    /// 对字段清单的抄写——新增一格时它编译不过（这是好事），但每次都要补十行
+    /// 会让下一个人选择跳过这条测试
+    fn row_with(age: core_cache::SyncAge) -> OvRow {
+        OvRow {
+            path: String::new(),
+            name: String::new(),
+            third: false,
+            branch: String::new(),
+            bucket: Bucket::Synced,
+            status: String::new(),
+            behind: 0,
+            ahead: 0,
+            changed: 0,
+            last_used: 0,
+            sync_age: age,
+        }
+    }
+
+    /// 那颗片的**开关 × 四档**真值表，八组逐一钉住。
+    ///
+    /// 只钉"筛出来那两组"是不够的：`&&` 写成 `||`、或者"片没按下时也走筛选臂"，
+    /// 都只会让某一格错。⚠️ `Unknown` 在开关按下时**也不该出现**——
+    /// 那时那颗片本身是禁用的（读不出来），这条把那条界面判据的另外一半钉住了
+    #[test]
+    fn the_chip_shows_everything_when_off_and_only_two_tiers_when_on() {
+        use core_cache::SyncAge as A;
+        for age in [A::Unknown, A::Never, A::Recent, A::Stale] {
+            assert!(
+                ov_row_shows(age, false),
+                "{age:?}：片没按下时任何一档都不该被藏起来"
+            );
+        }
+        assert!(ov_row_shows(A::Stale, true));
+        assert!(ov_row_shows(A::Never, true));
+        assert!(!ov_row_shows(A::Recent, true));
+        assert!(
+            !ov_row_shows(A::Unknown, true),
+            "读不出来那一档被当成「久未同步」筛出来 ⇒ 整张表都说成三个月没动"
+        );
+    }
+
+    /// 片上那两个数与点进去的行数必须对得上——**这条就是那个"对不上"的闸**
+    #[test]
+    fn the_numbers_on_the_chip_match_the_rows_it_filters_to() {
+        use core_cache::SyncAge as A;
+        let rows = vec![
+            row_with(A::Stale),
+            row_with(A::Stale),
+            row_with(A::Never),
+            row_with(A::Recent),
+            row_with(A::Recent),
+            row_with(A::Unknown),
+        ];
+        let (over, none) = stale_counts(&rows);
+        assert_eq!((over, none), (2, 1), "Unknown 两档都不进：它不是「没同步」，是「不知道」");
+        // 片上的数是两个之和，可见行数也必须等于那个和
+        let shown = rows.iter().filter(|r| ov_row_shows(r.sync_age, true)).count();
+        assert_eq!(
+            shown,
+            over + none,
+            "片上写 {} 而点进去 {shown} 行 ⇒ 计数与筛选两处各写了一份规则",
+            over + none
+        );
+    }
+
+    /// 表读不出来时那颗片必须**不可用**，而不是"可用但显示 0"。
+    /// 后者是这一格里最坏的那种错：数字看着正常，点下去整张表变成"全都三个月没同步"
+    #[test]
+    fn an_unreadable_table_disables_the_chip_instead_of_showing_zero() {
+        assert!(
+            !sync_table_is_readable(&None),
+            "读不出来被当成可用 ⇒ 那一档会开始给结论"
+        );
+        let mut m = HashMap::new();
+        m.insert("f:/a".to_string(), 1u64);
+        assert!(sync_table_is_readable(&Some(m)));
+        // ⚠️ **一张读得出来的空表是可用的**：那时"0 颗久未同步"是真话。
+        // 把它和读不出来混成一档，才是 core 那边 `Unknown` 存在的理由的反面
+        assert!(sync_table_is_readable(&Some(HashMap::new())));
+    }
+
+    /// 那颗键上到底写什么。**"零颗"与"不知道"必须是两句话**。
+    ///
+    /// 上一版的错就藏在这里看不见的地方：禁用态已经做对了，可 label 仍然写
+    /// 「久未同步 0」——灰掉的键配一个 0，读的人得到的是"一颗都没有"这句假话。
+    /// 这条判据当时只存在于 render 的字符串拼接里，所以单测一条都抓不到它
+    #[test]
+    fn zero_and_unknown_are_two_different_sentences() {
+        assert_eq!(chip_label(true, 0), "久未同步 0", "读得出来、确实一颗都没有");
+        assert_eq!(chip_label(true, 3), "久未同步 3");
+        assert_eq!(chip_label(false, 0), "久未同步 –", "读不出来时那个记号不是数字");
+        assert_ne!(
+            chip_label(false, 0),
+            chip_label(true, 0),
+            "「不知道」与「零颗」写成同一句 ⇒ 那一档的保护整个失效"
+        );
     }
 }

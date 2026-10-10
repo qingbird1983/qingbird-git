@@ -21,7 +21,15 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::chart::AreaChart;
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyHeader, EmptyTitle};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
-use gpui_kit::component::{ActiveTheme, Sizable, Size, Theme};
+// `.when(..)` 来自 gpui 的 `FluentBuilder`（`util.rs:21`），不在 Button 的任何一个
+// trait 上——少了这一行的报错是"no method named when"，看着像官方没有这个能力
+use gpui_kit::prelude::FluentBuilder as _;
+// 这三个 `as _` 各管一颗键上的一段：`Selectable` 给 `.selected(..)`（`button.rs:538`）、
+// `Disableable` 给 `.disabled(..)`，而 `.when(..)` 在 gpui 的 `FluentBuilder`（`util.rs:21`）。
+// ⚠️ 官方 `Button` 的 builder 方法**散在四个 trait 上**（还有一个 `ButtonVariants`），
+// 少导入哪一个，报错都写成"no method named …"——看着像官方没这个能力，
+// 其实只是这个文件没把那条 trait 拿进来。抄样板时**连导入一起抄**
+use gpui_kit::component::{ActiveTheme, Disableable as _, Selectable as _, Sizable, Size, Theme};
 use gpui_kit::{
     div, px, AnyElement, App, Context, DefiniteLength, Div, Entity, FontWeight, IntoElement,
     ParentElement, Styled, Window,
@@ -31,6 +39,7 @@ use qingbird_core::repos::ActivityDay;
 
 use crate::sidebar::BadgeKind;
 use crate::state::*;
+use qingbird_core::store;
 use crate::tokens::*;
 use crate::widgets::*;
 
@@ -453,6 +462,9 @@ impl Shell {
     /// 而"只在变化时更新"要自己判断什么算变化——判断错了就是表格少一行，
     /// 而少一行是那种用户不会报、只会自己绕开的 bug
     pub(crate) fn sync_ov_rows(&mut self) {
+        // ⚠️ **整批用同一个 `now`**：逐颗取时钟的话，一帧里跨过一次秒界就会让
+        // 90 天边界那一档在同一张表里给出两个答案（片上的数与点进去的行对不上）
+        let now = store::now_secs();
         let mut rows: Vec<OvRow> = self
             .repos
             .iter()
@@ -475,9 +487,23 @@ impl Shell {
                     ahead: v.status.ahead,
                     changed: v.changed,
                     last_used: e.last_used,
+                    sync_age: qingbird_core::scan_cache::sync_age(
+                        &self.last_sync,
+                        &e.path,
+                        now,
+                        qingbird_core::scan_cache::STALE_DAYS,
+                    ),
                 }
             })
             .collect();
+        // 片上那两个数**必须在过滤之前算**（`stale_counts`），而且存进 `Shell`
+        // 让 render 只读不算：留在 render 里现算就得再拿一份行集合，
+        // 而那份与过滤后的那份迟早会漂
+        self.ov_stale_counts = stale_counts(&rows);
+        // 「久未同步」那片按下去就只剩那一档（判据在 `ov_row_shows`，
+        // 与片上那两个数同一颗函数——两处各写一份会出现"片上写 3、点开两行"）
+        let stale_only = self.ov_stale_only;
+        rows.retain(|r| ov_row_shows(r.sync_age, stale_only));
         // 行序由卡头那颗键定（两档，见 `OvSort`）。**名称那一档不区分大小写**——
         // 仓库名里拉丁与中文混着，直接 `cmp` 会把大写全排到小写前面，看着像没排
         match self.ov_sort {
@@ -591,6 +617,43 @@ impl Shell {
                 head,
             )
         } else {
+            // 「久未同步」那片（32-11）。它是**这张表的一个读法**，所以跟排序那颗键
+            // 同挂卡头右上、不另起一行浮在外面；选中面沿用侧栏那颗筛选键那一套
+            // （`ghost` + `selected` + `wash`，D60 同一个），不自立第三种
+            let (over, none) = self.ov_stale_counts;
+            // ⛔ **读不出来时这一档不可用，而不是"零颗"**：那时整张表对"上次同步"
+            // 没有任何知识，一片下去会把每一颗都说成三个月没同步——那不是少一个数，
+            // 是一屏假话（`SyncAge::Unknown` 那一档就是为了这一格存在的）
+            let unreadable = !sync_table_is_readable(&self.last_sync);
+            let chip = Button::new("ov-filter-stale")
+                // ⛔ 读不出来时这颗键上**不写 0**（判据与理由在 `chip_label`）
+                .label(chip_label(!unreadable, over + none))
+                .custom(ghost_variant(cx))
+                .with_size(Size::Small)
+                .selected(self.ov_stale_only && !unreadable)
+                .when(self.ov_stale_only && !unreadable, |b| b.bg(wash(t)))
+                .disabled(unreadable)
+                .tooltip(if unreadable {
+                    "同步记录读不出来，这一档暂时用不了".to_string()
+                } else {
+                    format!(
+                        "只看这 {} 颗：{over} 颗超过 90 天没和云端交换过 · \
+                         {none} 颗从没有过成功的同步记录",
+                        over + none
+                    )
+                })
+                .accessibility_label("只看久未同步的仓库")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    // 禁用态官方已经不吃点击，这里再挡一次是防"哪天改成不禁用"
+                    // 时把读不出来那一档当成"零颗"筛（同 32-8 那颗停止键的写法）
+                    if !sync_table_is_readable(&this.last_sync) {
+                        return;
+                    }
+                    this.ov_stale_only = !this.ov_stale_only;
+                    this.sync_ov_rows();
+                    cx.notify();
+                }))
+                .into_any_element();
             let sort_btn = Button::new("ov-sort")
                 .icon(icon_sm(AssetIcon::ListFilter).text_color(tier3(t)))
                 .label(self.ov_sort.label())
@@ -606,6 +669,28 @@ impl Shell {
                 .into_any_element();
             // 官方 `DataTable` 同样没有 `Styled`，撑高交给外层
             (
+                // ⚠️ **被那片筛空了这一格要自己说话**。`repos` 非空而 `ov_rows` 空
+                // 只有这一个原因（筛没了），而官方 `DataTable` 在这种时候给一句
+                // "No data"——英文、且读起来像表格坏了。
+                // **新增一档状态，先问"没数据那一档显示什么"**（AGENTS 那条）
+                if self.ov_rows.is_empty() {
+                    list_box(v_flex().w_full().flex_1().min_h_0(), t)
+                        .child(
+                            Empty::new()
+                                .border_0()
+                                .header(
+                                    EmptyHeader::new()
+                                        .title(EmptyTitle::new().child("没有久未同步的仓库")),
+                                )
+                                .content(EmptyContent::new().child(
+                                    div()
+                                        .text_size(px(fs_meta()))
+                                        .text_color(tier4(t))
+                                        .child("再点一次上面那颗「久未同步」，回到全部仓库"),
+                                )),
+                        )
+                        .into_any_element()
+                } else {
                 list_box(div().w_full().flex_1().min_h_0(), t)
                     // `overflow_hidden` 不进 `list_box`：它是这一格**特有**的
                     // （`DataTable` 自己画方角的行底与表头，不裁就顶出圆角），
@@ -630,8 +715,9 @@ impl Shell {
                                 .stripe(true),
                         ),
                     )
-                    .into_any_element(),
-                head.right(sort_btn),
+                    .into_any_element()
+                },
+                head.right(chip).right(sort_btn),
             )
         };
         let table = card(t).flex_1().min_h_0().child(head.build(t)).child(body);

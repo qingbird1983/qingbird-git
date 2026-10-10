@@ -1413,6 +1413,12 @@ impl Shell {
             ov_table,
             ov_rows: Vec::new(),
             ov_sort: crate::state::OvSort::LastUsed,
+            // ⚠️ `None` 的意思是**还没读过这张表 / 读不出来**，与"读出来是空的"
+            // 是两件事（判据见 `Shell::last_sync` 那段）。启动到这里为止那颗片是
+            // 禁用的 ⇒ 不会出现"刚打开就把整张表说成全都久未同步"那一格假话
+            last_sync: None,
+            ov_stale_only: false,
+            ov_stale_counts: (0, 0),
             ov_activity: Vec::new(),
             ov_seq: 0,
             ov_task: None,
