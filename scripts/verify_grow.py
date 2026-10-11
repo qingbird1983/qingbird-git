@@ -3,7 +3,30 @@
 判据全部落在帧上量的数（窗口客户区宽、左栏白面宽、再加两个**逐项地标**），
 不是"跑起来没报错"。
 
-五跑八腿五十一判据（每跑各写一份 config 再启动，**状态走配置**；八腿走鼠标）：
+五跑八腿五十七判据（每跑各写一份 config 再启动，**状态走配置**；八腿走鼠标）：
+
+  P **压窄探针**（2026-10-12，路线表 32-27；A / B 两跑各三条 ⇒ 共 6 条）：
+                        用 `SetWindowPos` 把窗口**强行压窄** 250（压完仍高于 `WIN_MIN_W`，
+                        现读），量三个数：
+                          · `r1` —— 压完**立刻**读 `GetClientRect`（不抓帧）⇒ 前提
+                            "压窄真的进去了"；
+                          · `w2` —— 等 1.6s 之后的宽 ⇒ **「被压窄之后要撑回算式给的数」**；
+                          · `s2` —— 撑回来那一下的左栏白面 ⇒ 不许拿侧栏垫。
+                        为什么要有这一档：32-26 把 `NAV_W`（加分界）与 `GAP` 各钉了一格像素地标，
+                        而第三个固定项 `MAIN_MIN_W` **没有属于自己的地标**——中间那一列的宽是
+                        **余数**（容器减掉左右两栏与两侧固定项之后剩下的）。
+                        ⇒ 它在帧上唯一能被读出来的形态就是"**被压窄之后撑回哪**"，
+                        判的是那条规则**会不会兑现**，不是宽度算式。
+                        ⛔ 不写成算术版（"中间列白面 == 950"）：那一格的期望要再抄一次
+                        **卡间那道 6** ⇒ 就是 32-25 花一整轮拆掉的"第二个出处"；行为版零新常数。
+                        ⚠️ 这一步会往 `shell_grown_w` 那本账记一段"不是我们自己撑的"宽
+                        （`shell.rs:1019-1022` 自己写了这是已知不完美）⇒ **只能放在这一跑的最后**，
+                        之后一个数都不许再比。
+                        ⚠️ **前提那条第一次上岗就抓出一次空跑**：第一版 `SetWindowPos` 的标志位
+                        写成 `0x1`（那是 `SWP_NOSIZE`，宽高**整个被忽略**），API 返回成功而窗口
+                        一个像素没动 ⇒ 「撑回来 == 目标」**照样绿**（它本来就一直等于目标），
+                        **红的只有前提那一条**。⇒ 抓帧做不了这个前提：`PrintWindow` 一次 30–80ms，
+                        应用下一帧就撑回来了——"没压进去"与"压进去又撑回来了"在帧上**一模一样**。
 
   O **逐项地标**（32-26 那一档，2026-10-12；每一跑两条 ⇒ 共 10 条）：
                         撑宽算式进判据的一直是**项之和**（`41 + 8 + 侧栏 + 950`），
@@ -221,6 +244,17 @@ F–M 八腿走的就是那颗键（点下去 → 量 → 点回来 → 量，�
         ⇒ 还原的核对**只打印、不改判据**；判据的成败只在 `try` 里定一次。
       ③ 反过来也记一笔：`--parse-only` 自己那条"覆盖后 == 现值 + 8"的自证在**变异态**下
         必然不成立（它报 1），这种 1 是预期的 ⇒ **别把"退出码非 0"一律读成"这一条不成立"**。
+  · **G5 把撑宽那一次 `window.resize` 换成空操作**（整条规则不发出去）⇒ 红 **10** 条：
+    2 条是新的「被压窄之后要撑回算式给的数」（A 量到 1629 / B 量到 1088），
+    另外 8 条是 A/B/D/E 的「宽 == 算式」那几组——**那是这条变异应有的样子，不是判据不精确**，
+    ⚠️ 是**我把它预期成"只红 2 条"**：启动撑宽走的就是同一行 `resize`，关掉它整个规则就没了。
+    ⇒ 要证"压窄探针这一档有别人没有的牙"，得掐**只影响第二次同目标**的那一格：
+  · **G5b 掐掉 `shell_grow_pending` 的「兑现了就清」**（`shell.rs:1033-1038`，注释明写它挡的
+    就是"用户自己把窗口拖窄之后该再撑回去，却被上一次的目标挡住"）⇒ 启动撑宽、抽屉开合的
+    撑宽与还宽**全都照常**，只有"外力压窄之后再撑回去"这一种死
+    ⇒ 实测**精确红那 2 条**（A 量到 1629 / B 量到 1088），其余 26 条全绿
+    ——这一条才是 32-27 那一档的**独有**证据（G5 那种宽变异证明的是"规则整体承重"，
+    与 32-24 那轮的 V1 同型，两件事别混着记）。
 
 用法：`python scripts/verify_grow.py`
 """
@@ -268,6 +302,11 @@ CYCLES = int(os.environ.get("GROW_CYCLES", "4"))
 #     但 `PrintWindow` 抓的是**任意一帧**，可能正好落在弹簧的中间帧上
 #     （侧栏自己也在做补间，那一档量到过 236 → 349）⇒ 不许写 0
 SHAKE_MAX = 10.0
+# 压窄探针（32-27）压掉多少：要**明显低于需求**又**高于窗口下限**，
+# 250 的依据是需求里 `MAIN_MIN_W` 那一档只有 950，压 250 之后中间列约 700，
+# 缺口大到不会被 1px 抖动带吞掉；而 `tgt - 250` 在两种态下都 > 1080（窗口最小宽），
+# 免得压到 clamp 上把"撑回来"变成"回到下限"（那是另一条规则，别混着判）。
+SQUEEZE_DELTA = 250.0
 
 # 两列的宽度**都从配置里读**，脚本里一个都不钉（2026-10-11 的更正）：
 # 第一版把侧栏写成 263、注释还写着"与真实那份一致"——真实那份是 **360**，
@@ -640,6 +679,56 @@ def mid_shake(hwnd, tag, n=10, gap=0.04):
     return min(vals), max(vals), vals
 
 
+def squeeze_test(hwnd, sidebar_w, insp_w, inspector_open, ox):
+    """**把窗口强行压窄**，看应用会不会按规则把它撑回来（2026-10-12，路线表 32-27）。
+
+    为什么只有这一种量法能负责 `MAIN_MIN_W`：三个固定项里 `NAV_W`（加分界）与 `GAP`
+    各自有一格像素地标（32-26），而 `MAIN_MIN_W` **没有**——中间那一列的宽是**余数**
+    （容器减掉左右两栏与两侧固定项之后剩下的），所以"这一列不许低于 950"这件事
+    在帧上只能读成**撑回来的宽 == 算式给的数**，不是"量出一格 950"。
+    ⛔ 也别写成算术版（"中间列白面 == 950"）：那一格的期望要再抄一次**卡间那道 6**，
+    正是 32-25 花一整轮拆掉的"第二个出处"。行为版一个新常数都不抄。
+
+    三条读数各自的用途：
+      · `r1` —— `SetWindowPos` 之后**立刻**用 `GetClientRect` 读一次（不抓帧）：
+        那是"压窄真的进去了"的前提。抓帧要 30–80ms，应用下一帧就撑回来了，
+        **拿帧当前提是量不到的**（AGENTS：这条测试要的那个状态得由它自己造出来）。
+      · `w2` —— 等 1.6s 之后的宽，判"撑回来 == 该态算式给的数"。
+      · `s2` —— 撑回来那一下的左栏白面，判"没拿侧栏垫"（31.4 补二十五那味药的复发面）。
+    ⚠️ 这一步会往 `shell_grown_w` 那本账上记一段"不是我们自己撑的"宽
+      （`shell.rs:1019-1022` 那条**已知不完美**：用户自己拖过窗口之后就是这样的），
+      所以它只能放在**这一跑的最后**，之后一个数都不许再比。
+    """
+    need = SHELL_FIXED + sidebar_w + MAIN_MIN + (insp_w if inspector_open else 0.0)
+    tgt = max(INITIAL_W, need)
+    # 压到多少：**不能压过窗口自己的下限**（`WIN_MIN_W`，现读）——压过去会被基座 clamp 住，
+    # 那一跑量到的"撑回来"就变成"回到下限"，判的是另一条规则了。
+    win_min = read_tokens_const("WIN_MIN_W")
+    shrunk = max(tgt - SQUEEZE_DELTA, win_min + 8.0)
+    wr = steps.window_rect(hwnd) if hasattr(steps, "window_rect") else None
+    r = wt.RECT()
+    u.GetWindowRect(hwnd, ctypes.byref(r))
+    new_w = int(shrunk + 2 * ox)
+    # ⚠️ 标志位是 **`SWP_NOZORDER(0x4) | SWP_NOACTIVATE(0x10)`**，不是 0x1 ——
+    #   `0x0001` 是 `SWP_NOSIZE`，带着它尺寸参数**整个被忽略**：第一版就写成 0x1|0x40，
+    #   `SetWindowPos` 返回成功、窗口一个像素没动，而"撑回来 == 目标"那条**照样绿**
+    #   （它本来就等于目标）。⇒ **前提那条红才把这次空跑抓出来**：
+    #   「立刻量到 1879，比目标少 0」——判"没压进去"的那一格就是为这一刻准备的。
+    u.SetWindowPos(hwnd, 0, r.left, r.top, new_w, r.bottom - r.top, 0x0004 | 0x0010)
+    r1 = win_w(hwnd)
+    time.sleep(1.6)
+    park_cursor(hwnd)
+    p = os.path.join(FIX_ROOT, f"squeeze-{'open' if inspector_open else 'shut'}.png")
+    shoot.capture(hwnd, p)
+    s2, _ = measure(p)
+    w2 = win_w(hwnd)
+    print(f"   压窄探针（{'展开' if inspector_open else '收起'}态）：目标 {tgt}，"
+          f"压到 {shrunk}（下限 {win_min} 让开 8）⇒ 压完立刻量 {r1}，"
+          f"等稳后量 {w2}、左栏白面 {s2}")
+    return {"need": need, "tgt": tgt, "shrunk": shrunk, "r1": r1, "win_min": win_min,
+            "w2": w2, "s2": s2, "frame": p}
+
+
 def toggle_leg(label, hwnd, seq):
     """会话中点标题栏那颗「收起右栏 / 展开右栏」，量点完之后的两个数。
 
@@ -681,7 +770,7 @@ def toggle_leg(label, hwnd, seq):
             "shake": max(abs(mid_lo - s), abs(mid_hi - s))}
 
 
-def run_case(tag, inspector_open, sidebar_w, toggles=()):
+def run_case(tag, inspector_open, sidebar_w, toggles=(), squeeze=False):
     write_case(inspector_open, sidebar_w)
     env = qbguard.launch_env()
     assert env["APPDATA"] == SANDBOX, f"沙箱没生效：APPDATA={env.get('APPDATA')}"
@@ -716,7 +805,8 @@ def run_case(tag, inspector_open, sidebar_w, toggles=()):
         ll, lr = land_marks(f, ox, w)
         print(f"  {tag}：客户区宽 {w}，左栏白面宽 {s}（起于 {x0}）｜"
               f"逐项地标：侧栏卡左缘 {ll}、右缘留白 {lr}")
-        res = {"w": w, "s": s, "frame": f, "live": [], "cfg_after": {}, "land": (ll, lr)}
+        res = {"w": w, "s": s, "frame": f, "live": [], "cfg_after": {}, "land": (ll, lr),
+               "squeeze": None}
         # 两腿就在这一跑的会话里点，不另起进程：要的就是"容器变过"那个事件序列
         for ix, label in enumerate(toggles, 1):
             res["live"].append(toggle_leg(label, hwnd, f"{tag}-{ix}"))
@@ -728,6 +818,13 @@ def run_case(tag, inspector_open, sidebar_w, toggles=()):
         # 这一回前提不是环境给的，是**别的跑给的**）
         if toggles:
             res["cfg_after"] = json.load(open(CFG, encoding="utf-8-sig"))["settings"]
+        # 压窄探针放在**这一跑的最后**：它会往 `shell_grown_w` 那本账上记一段
+        # "不是我们自己撑的"宽（`shell.rs:1019-1022` 自己写了这是已知不完美），
+        # 之后再比任何一个数都会被这一步带偏 ⇒ 它是这一跑的**结尾**，不是中间的一步
+        if squeeze:
+            insp_here = float(json.load(open(CFG, encoding="utf-8-sig"))["settings"]
+                              .get("inspector_w") or 0.0)
+            res["squeeze"] = squeeze_test(hwnd, sidebar_w, insp_here, inspector_open, ox)
         return res
     finally:
         p.terminate()
@@ -788,8 +885,8 @@ def main():
                   f"不够放 {DRAG_DELTA} 的增量 ⇒ 基线往下挪，五跑仍测同一条规则")
 
         a = run_case("A-open", True, sw,
-                     toggles=("收起右栏", "展开右栏") * CYCLES)
-        b = run_case("B-closed", False, sw)
+                     toggles=("收起右栏", "展开右栏") * CYCLES, squeeze=True)
+        b = run_case("B-closed", False, sw, squeeze=True)
         c = run_case("C-open-again", True, sw)
         d = run_case("D-open-wider", True, sw + DRAG_DELTA)
         e = run_case("E-closed-wider", False, sw + DRAG_DELTA)
@@ -931,6 +1028,24 @@ def main():
             ok.append((f"{k} 的窗口右缘留白 == 算式里的 GAP {LAND_RIGHT}"
                        f"（帧上量到 {lr}；这一项的落点是 `shell.rs` 那处 `.pr(px(GAP))`）",
                        lr is not None and abs(lr - LAND_RIGHT) <= 1))
+
+        # ── **压窄探针**（2026-10-12，路线表 32-27）：三个固定项里只剩 `MAIN_MIN_W`
+        # 没有自己的像素地标——中间那一列的宽是**余数**，它在帧上唯一能被读出来的形态
+        # 就是"**被压窄之后撑回哪**"⇒ 这一组判的不是宽度算式，是那条规则**会不会兑现**。
+        # ⚠️ 前提那条不是装饰：`SetWindowPos` 之后不**立刻**读 `GetClientRect`，
+        #   应用下一帧就撑回来了 ⇒ 抓帧量到"等于目标"与"根本没压进去"长得一模一样
+        #   （AGENTS：这条测试要的那个状态，必须是它自己造出来的）。
+        for k, sq in (("A", a["squeeze"]), ("B", b["squeeze"])):
+            state = "展开" if k == "A" else "收起"
+            ok.append((f"前提：{k}（{state}）那次压窄真的进去了"
+                       f"（压到 {sq['shrunk']}、立刻量到 {sq['r1']}，比目标 {sq['tgt']} "
+                       f"少 {round(sq['tgt'] - sq['r1'], 1)}）",
+                       abs(sq["r1"] - sq["shrunk"]) <= 3 and sq["tgt"] - sq["r1"] >= 50))
+            ok.append((f"{k}（{state}）被压窄之后要撑回算式给的数 {sq['tgt']}"
+                       f"（等稳量到 {sq['w2']}）——这是 `MAIN_MIN_W` 唯一有自己的判据的地方",
+                       abs(sq["w2"] - sq["tgt"]) <= 2))
+            ok.append((f"{k} 撑回来那一下不许拿侧栏垫（白面 {sq['s2']} 要 == A 的 {a['s']}）",
+                       abs(sq["s2"] - a["s"]) <= 1))
         print("\n判读：")
         for name, passed in ok:
             print(f"   {'通过' if passed else '不通过'}  {name}")
