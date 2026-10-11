@@ -143,10 +143,27 @@ def one(nodes, name, kind=None):
     return hit[0]
 
 
+def tree_sig(nodes):
+    """整棵 a11y 树的**签名**：`(类型:名字)` 的可排序元组。
+
+    给"抓了一帧"这一步当生效判据用（`verify_dark_five.py` 里那两帧逐字节相同
+    就是靠它抓的）。⚠️ **矩形不进签名**——窗口一 resize 每一颗都动，那会把
+    "同一个屏"判成两个屏；名字与类型才是屏的身份。
+    """
+    return tuple(sorted(f"{n.kind}:{n.name}" for n in nodes))
+
+
 def client_origin(hwnd):
     pt = wt.POINT(0, 0)
     user32.ClientToScreen(hwnd, ctypes.byref(pt))
     return pt.x, pt.y
+
+
+def window_rect(hwnd):
+    """`(left, top, right, bottom)` 屏幕坐标。帧偏移 = 客户原点 − (left, top)。"""
+    r = wt.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    return r.left, r.top, r.right, r.bottom
 
 
 # ───────────────────────── 夹具与沙箱 ─────────────────────────
@@ -162,8 +179,14 @@ def build_fixture():
     subprocess.run(["git", "-C", FIXTURE, "commit", "-q", "-m", "base"], check=True)
 
 
-def build_sandbox(inspector_open):
-    """settings 抄真实那份（主题、字号这些影响版面的不许我猜），repos 只留夹具一颗"""
+def build_sandbox(inspector_open, theme=None):
+    """settings 抄真实那份（主题、字号这些影响版面的不许我猜），repos 只留夹具一颗。
+
+    ⚠️ `theme` 那一格写的是**主题名字**，不是 "dark" / "light"：判据是
+    `s.theme == theme::DARK`（`theme.rs:106`）而 `DARK = "qingbird-dark"`（`:41`）——
+    写错**不报错、不落深色**，静默按浅色画（`store.rs:88` 那句注释说的就是这一坑）。
+    默认 `None` = 不动它（沿用真实那份），走查全程要浅色是为了底色不漂。
+    """
     real = json.load(open(os.path.join(os.environ["APPDATA"], "com.qingbird.git",
                                        "config.json"), encoding="utf-8-sig"))
     clean(SANDBOX)
@@ -179,7 +202,14 @@ def build_sandbox(inspector_open):
     real["selected_path"] = FIXTURE.replace("\\", "/")
     real.setdefault("settings", {})["inspector_open"] = inspector_open
     real["settings"]["sidebar_collapsed"] = False
+    if theme is not None:
+        real["settings"]["theme"] = theme
     json.dump(real, open(CFG, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    #  **建沙箱的人负责把启动入口指过去**（D78 的落法：让"忘"没有选项）。
+    # 2026-10-11 第二次为这条交学费：新写的 `verify_dark_five.py` 忘了设 `QB_APPDATA`，
+    # 靠 `launch_env` 那句"没设就是跑真实配置"的警告 + 调用方的 assert 才没写脏用户配置。
+    # 但"每个脚本自己记得设"迟早还会漏 ⇒ 收在这里，所有 import 这颗函数的脚本一起生效。
+    os.environ["QB_APPDATA"] = SANDBOX
 
 
 def cfg_inspector_open():
@@ -193,17 +223,68 @@ def cfg_inspector_open():
 
 # ─────────────── 像素扫：只给"不进 a11y 树的那一列"用 ───────────────
 #
-# 设置对话框左栏那四分类是裸 `div().on_click(...)`（`settings.rs:740-758`）——
-# **既没有 id 也没有 role**，按基座规则不生成 a11y 节点，所以名字驱动在它们身上
-# 拿不到东西。这两条函数是从 2026-10-11 那次取证（`D86`）里搬的，两个坑都写在里面。
+# 设置对话框左栏那四分类是 `v_flex().id("set-nav-…")` + `on_click`（`settings.rs:740-758`）
+# ——**有 id，但没有 role**，按基座规则（`element.rs:368-402`）不生成 a11y 节点，
+# 所以名字驱动在它们身上拿不到东西。这两条函数是从 2026-10-11 那次取证（`D86`）搬的。
+#
+# ⚠️ **两条都改成"与该帧画布色比"，不写死绝对亮度**（2026-10-11 第二次为同一档翻车）：
+# 原来 `dialog_box` 认 "r,g,b 都 ≥ 228"、`dark_bands` 认 "亮度 < 170"——那是**浅色档的数**。
+# 深色档下外卡是 `#16262B`、文字是 `#E6EFF0`，**两条一起反号**：对话框"永远开不起来"、
+# 类别标题"一行都扫不出"。症状与"功能坏了"长得一模一样，而坏的只是判据
+# （与上面"一档底色变了整条像素判据作废"是同一条）。
 
-def dark_bands(png, x0, x1, y0, y1, thresh=170, min_px=2, gap=6):
-    """竖着扫 [x0,x1) 这一条，返回每一簇暗像素的 (中心 y, 高度)。"""
+from collections import Counter  # noqa: E402
+
+
+def canvas_of(png):
+    """该帧的**背景主色** = 全帧隔点取众数（只给人看，不当判据用）。
+
+    ⚠️ 它**不能**当 `dialog_box` / `dark_bands` 的基准色：对话框打开时遮罩把背景压暗，
+    实测压暗值 (206,209,210) 与画布 (232,237,240) 只差 **26** ⇒ "与画布差 ≥10"这种判据
+    会把整帧都算成外卡（当天帧上量到 0..1374，而对话框左缘其实在 x≈220）。
+    ⇒ 那两条改用**卡面档本身**（`card_face_of`），见下面。
+    """
     im = Image.open(png).convert("RGB")
     px = im.load()
+    w, h = im.size
+    return Counter(px[x, y] for y in range(0, h, 7) for x in range(0, w, 7)).most_common(1)[0][0]
+
+
+DARK_NAME = "qingbird-dark"
+
+
+def card_face_of(png=None):
+    """**该帧那套主题的卡面档**，从 `gui/theme.json` 按沙箱 config 里的主题名现取。
+
+    为什么用它当基准而不是"背景色"：外卡与左栏里的白卡都是这一档，而遮罩压暗之后
+    是另一档（混合值）⇒ 认这一档就只认得出"真正亮着的那一块"，明暗两档同一份判据
+    （浅色 `#FFFFFF`、深色 `#16262B`）。
+    主题名取法与 `theme.rs::apply_saved` 一致：**只有等于 `qingbird-dark` 才算深色**，
+    其余（含空串、含老 Tauri 的 `dark`）一律浅色。
+    """
+    name = "qingbird-light"
+    if _saved_theme() == DARK_NAME:
+        name = DARK_NAME
+    d = json.load(open(os.path.join(REPO, "gui", "theme.json"), encoding="utf-8-sig"))
+    for t in d["themes"]:
+        if t["name"] == name:
+            v = t["colors"]["secondary.background"]
+            return (int(v[1:3], 16), int(v[3:5], 16), int(v[5:7], 16))
+    raise AssertionError(f"theme.json 里没有 {name} 那一套")
+
+
+def far(c, base, tol=10):
+    return max(abs(c[0] - base[0]), abs(c[1] - base[1]), abs(c[2] - base[2])) >= tol
+
+
+def dark_bands(png, x0, x1, y0, y1, min_px=2, gap=6, tol=40, face=None):
+    """竖着扫 [x0,x1) 这一条，返回每一簇"与卡面明显不同"的 (中心 y, 高度)。"""
+    im = Image.open(png).convert("RGB")
+    px = im.load()
+    base = face if face is not None else card_face_of(png)
     runs = []
     for y in range(y0, min(y1, im.size[1])):
-        n = sum(1 for x in range(x0, x1) if sum(px[x, y][:3]) / 3.0 < thresh)
+        n = sum(1 for x in range(x0, x1) if far(px[x, y], base, tol))
         if n >= min_px:
             if runs and y - runs[-1][1] <= gap:
                 runs[-1][1] = y
@@ -212,24 +293,71 @@ def dark_bands(png, x0, x1, y0, y1, thresh=170, min_px=2, gap=6):
     return [((a + b) // 2, b - a + 1) for a, b in runs]
 
 
-def dialog_box(png):
-    """对话框那张外卡的横向范围：**多行取并集**，不是单行最长亮段。
+def dialog_box(png, face=None):
+    """**正文卡**的横向范围：认该帧那套主题的卡面档，多行取并集。
 
-    ⚠️ 两个坑都踩过（2026-10-11）：① 按"左栏大概在 x=90..240"去点，结果点到**遮罩**
+    ⚠️ 三个坑都踩过（2026-10-11）：① 按"左栏大概在 x=90..240"去点，结果点到**遮罩**
     上把对话框关了——症状是"点完与上一帧差 214412 处"，与刚开起来那次一模一样；
-    ② 按单行最长亮段量，量到的是里面那段卡的两个空洞，把左栏扫到了内容区里去。
-    ⇒ 改成"每一行数亮像素个数，够多的那些行的亮区并起来"。
+    ② 按单行最长亮段量，量到的是里面那段卡的两个空洞，把左栏扫到了内容区里去；
+    ③ 判"是不是外卡"原来写死绝对亮度 `>= 228`（浅色那档卡面是白），深色档下外卡是
+    `#16262B` ⇒ 一条都不满足，报成"对话框根本没开起来"。
+    ⚠️ 而且它量到的是**"该行有 >250 个卡面档像素"的那一段**：浅色下外卡与正文卡同档
+    （`popover.background` 与 `secondary.background` 两条主题都等于卡面白）⇒ 它给的是
+    **外卡左缘**；而一旦某一档两者不同，它就会从正文卡开始。**别把它当"外卡左缘"依赖**——
+    要找左栏用 `wash_box`（它量的是选中那一格，与底色档无关）。
     """
     im = Image.open(png).convert("RGB")
     px = im.load()
     w, h = im.size
+    base = face if face is not None else card_face_of(png)
     lo, hi = w, 0
     for y in range(150, min(h - 60, 780), 7):
-        xs = [x for x in range(w)
-              if px[x, y][0] >= 228 and px[x, y][1] >= 228 and px[x, y][2] >= 228]
+        xs = [x for x in range(w) if px[x, y] == base]
         if len(xs) > 250:
             lo, hi = min(lo, xs[0]), max(hi, xs[-1])
     return (lo if hi > lo else 0, hi)
+
+
+def wash_box(png, wash=None):
+    """**当前选中的那一格**的矩形：等于 wash 档的那一块，返回 `(x0, x1, 中心 y)`。
+
+    为什么用它找左栏：设置那四分类里选中那一格铺 `tokens::wash(t)`，而它的 x 范围
+    就是整列的 x 范围（四格同宽同位）⇒ **左栏的位置从帧上量出来，不目测**。
+    ⚠️ 这条是 2026-10-11 补的：以前"左栏在哪一列"是从 `dialog_box` 的返回值推的，
+    而那个数**依赖"外卡与正文卡同档"这一巧合**（浅色成立、深色不成立）⇒ 换档就漂。
+    现在直接量"选中那一格"的底，位置与宽度都从帧上来。
+    """
+    im = Image.open(png).convert("RGB")
+    px = im.load()
+    w, h = im.size
+    base = wash if wash is not None else wash_of()
+    lo, hi, ys = w, 0, []
+    for y in range(120, min(h - 60, 780)):
+        xs = [x for x in range(w) if px[x, y] == base]
+        if len(xs) > 40:
+            ys.append(y)
+            lo, hi = min(lo, xs[0]), max(hi, xs[-1])
+    if not ys:
+        raise AssertionError("帧上没有 wash 档那一块 ⇒ 要么没选中项，要么 wash 档取错了")
+    return lo, hi, (ys[0] + ys[-1]) // 2
+
+
+def wash_of():
+    """该帧那套主题的 wash 档（选中面），从 theme.json 现取"""
+    name = DARK_NAME if _saved_theme() == DARK_NAME else "qingbird-light"
+    d = json.load(open(os.path.join(REPO, "gui", "theme.json"), encoding="utf-8-sig"))
+    for t in d["themes"]:
+        if t["name"] == name:
+            v = t["colors"]["secondary.active.background"]
+            return (int(v[1:3], 16), int(v[3:5], 16), int(v[5:7], 16))
+    raise AssertionError(f"theme.json 里没有 {name} 那一套")
+
+
+def _saved_theme():
+    try:
+        return json.load(open(CFG, encoding="utf-8-sig"))["settings"].get("theme")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ───────────────────────── 走查 ─────────────────────────
@@ -238,9 +366,7 @@ def run_walk(inspector_open, tag):
     """一跑 = 一个进程（抽屉开 / 关两种起始态各一次：那颗键的两种 label、两个落点
     都要在 a11y 树真建起来之后被走过一遍，才算 §12.7 那条"条件出现的入口一帧只挂一次"）"""
     build_sandbox(inspector_open)
-    # 沙箱路径由脚本自己知道，就别指望跑之前 shell 里记得设（AGENTS：隔离靠人记得迟早会漏）。
-    # 但**覆盖仍由 qbguard.launch_env 做**，这里只把它的入口填上——API 不改，三个脚本共用一份规则。
-    os.environ["QB_APPDATA"] = SANDBOX
+    # 沙箱入口由 `build_sandbox` 自己设好了（见那里那句注释），这里只**验**它生效
     subprocess.run(["taskkill", "/F", "/IM", "qingbird-git.exe"], capture_output=True)
     time.sleep(0.8)
     if os.path.exists(ERR):
@@ -341,23 +467,47 @@ def run_walk(inspector_open, tag):
         for n in nodes:
             print(f"    {n.kind}|{n.name or '<空名字>'}|{n.w}x{n.h}@{n.x},{n.y}")
 
-        # ④-b 左栏那四分类**逐个点开**——它们不在 a11y 树里（裸 div + on_click，
-        #     没 id 没 role ⇒ 基座不给生成节点），所以这一列只能回到像素扫。
-        #     "零节点"这件事本身是这一跑抓出来的缺陷，登记进路线表。
+        # ④-b 左栏那四分类**逐个点开**——它们不在 a11y 树里（有 id 没 role ⇒ 不生成节点），
+        #     所以这一列只能回到像素扫。"零节点"这件事本身是抓出来的缺陷，已登记。
+        #     ⚠️ 这一版换了**两条判据**，都不是因为旧版给了错答案，而是旧版那两条
+        #     **答对了也证明不了**（AGENTS：一条测不出东西的判据 = 给"没测"盖章）：
+        #     · "对话框还在不在"原来判 `dialog_box` 的宽度——关掉之后主界面那张白卡
+        #       照样满足它，所以它对"点遮罩把对话框关了"这件事**零证明力**。
+        #       现在判 **a11y 树里有没有『保存』那颗键**（主界面没有）。
+        #     · 原来没有"选中那一格真的换了"的判据。现在每点一次都复量 `wash_box`
+        #       的中心 y，**没动就是这一击没换分类**，当场点名。
+        #     左栏 x 范围也改由 wash 块量（不再依赖"外卡那一档恰好是白"，深色下它不是白）。
         f_dlg = shot("dlg-open")
-        dx0, dx1 = dialog_box(f_dlg)
-        assert dx1 - dx0 > 400, f"没扫到设置那张外卡（宽 {dx1 - dx0}）⇒ 对话框没开起来"
-        rows = dark_bands(f_dlg, dx0 + 20, dx0 + 150, 120, 700)
-        titles = [y for y, hh in rows if hh >= 16]      # 副标题与版本号那行都只有 10px 高
-        print(f"[{tag}] 设置左栏扫到 {len(rows)} 行，按高度筛完的类别标题：{titles}")
+        f_dlg = shot("dlg-open")
+
+        def assert_dialog_open(when):
+            if "保存" not in {n.name for n in dump(hwnd) if n.kind == "Button"}:
+                raise AssertionError(f"{when}：设置对话框已经不在（树里没有『保存』那颗键）")
+
+        assert_dialog_open("刚点开设置")
+        wx0, wx1, wy = wash_box(f_dlg)
+        rows = dark_bands(f_dlg, wx0, wx1, 120, 700)
+        titles = [y for y, hh in rows if hh >= 16]      # 副标题与脚底版本号都只有 10px 高
+        print(f"[{tag}] 左栏由 wash 块定到 x={wx0}..{wx1}（选中那一格中心 y={wy}），"
+              f"按高度筛完的类别标题：{titles}")
         assert len(titles) >= 3, f"类别标题至少该有三行，只扫到 {len(titles)} 行"
+        # ⚠️ `wash_box` 量到的是**全帧所有 wash 底的并集**：这一帧上有两块——左栏选中
+        # 那一格 + 侧栏选中那一行（两处都是 `tokens::wash`）。所以它的 `wy` **不是**
+        # "左栏选中格的位置"，拿它判"点完换没换分类"是**一条测不出东西的断言**
+        # （2026-10-11 第一版就这么写着，跑绿了而它一次都没真的判过事）⇒ 删掉。
+        # "这一击换了分类"改判一件真有分辨力的事：**整棵 a11y 树的签名必须变**
+        # （四分类各自屏里的控件本来就不是同一批）。
+        last_sig = [None]
+
+        def go(ty):
+            click(hwnd, (wx0 + wx1) // 2 - offx, ty - offy, settle=1.6)
+            assert_dialog_open(f"点 y={ty} 那一类之后")
+            sig = sorted(f"{n.kind}:{n.name}" for n in dump(hwnd))
+            if last_sig[0] is not None and sig == last_sig[0]:
+                raise AssertionError(f"点 y={ty} 之后整棵树与上一屏逐字相同 ⇒ 这一击没换分类")
+            last_sig[0] = sig
         for ty in titles:
-            def go(ty=ty):
-                click(hwnd, dx0 + 60 - offx, ty - offy, settle=1.6)
-                a0, a1 = dialog_box(shot("dlg-at-%d" % ty))
-                if a1 - a0 < 400:
-                    raise AssertionError(f"点 y={ty} 之后外卡没了 ⇒ 这一击落在遮罩上，对话框被关掉")
-            step(f"设置分类 y={ty}", go)
+            step(f"设置分类 y={ty}", lambda ty=ty: go(ty))
             ns = dump(hwnd)
             kinds = {}
             for m in ns:
