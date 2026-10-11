@@ -2,7 +2,7 @@
 
 判据全部落在帧上量的两个数（窗口客户区宽、左栏白面宽），不是"跑起来没报错"。
 
-五跑十条判据（每跑各写一份 config 再启动，**状态走配置、不走鼠标**）：
+五跑两腿十七条判据（每跑各写一份 config 再启动，**状态走配置**；两腿走鼠标）：
   A 抽屉开            → 记下窗口宽 wA、左栏白面 sA
   B 抽屉关            → **sB 必须等于 sA**（这条就是补二十五的原话）
   C 抽屉开（再跑一次）→ wC == wA 且 sC == sA（"再撑一次要撑到同一个数"，
@@ -17,20 +17,72 @@
                         2026-10-11 实测那一列是 560，不是从前抄的 320），
                         证"撑宽"这件事真的由抽屉参与，而不是窗口一直那么宽
 
+  F 在 A 那一跑里**当场点**「收起右栏」→ 不另起进程，量点完的窗口宽与左栏白面
+  G 再点回「展开右栏」      → 再量一次，与 A 比。
+                        为什么要补这两腿：A–E 的状态全由配置给，**进程起来就是
+                        那一态**，容器宽度从头到尾没变过；而补二十五那条病
+                        （每一格都留着宽度偏好时基座按百分比重分整组）
+                        **只在容器变化那一下发生**——点一次开合 = 外层容器少了
+                        `inspector_w` 那一列、窗口又跟着还宽一次。
+                        ⇒ 五跑一条都判不到它。2026-10-12 的变异实测就是证据：
+                        把 `keep_main_flexible` 里"每帧把中间那一格交回 flex"
+                        改成恒不执行，**十二判据一条都不红**。
+                        两腿的判据：F 三条（前提「config 那一格翻了」+ 左栏白面
+                        == A + 宽 == 收起态算式），G 两条（同样的前提 +
+                        往返回到 A 的左栏与宽）。
+                        坐标按 a11y 名字现场量（那颗键带 `accessibility_label`），
+                        生效判据读沙箱 config，**都不靠像素**
+
 与上一版的三处不同（2026-10-11 按路线表 32-15 的尾巴重写）：
   ① **夹具自己造**（%TEMP 下一颗合成仓库 + 沙箱 config），不再吃 10-08 那轮
      留在 `%TEMP%\\qb_v4` 里的旧沙箱——上一版红就红在它读到的是别人的状态；
   ② **删掉拖把手那一步**：`sidebar_w` 是配置项，直接写进 config 就是"拖完之后"
      那一态，比模拟拖拽稳（拖拽要猜把手坐标，而把手位置随窗口漂）；
-  ③ **删掉找收起键那一步**：收起 = `inspector_open=false` 那一跑（B），
-     不需要点任何键。⇒ 全程只剩**一次**点击（导航轨「我的仓库」），
-     而它的 y 是**现场扫出来的**（D93 那条：v4 改版之后没有一个写死坐标复核过）。
+  ③ **收起态那一跑不必点键**：B / E 走 `inspector_open=false` 的配置就是收起态。
+     但**会话中开合**那一档不在这条配置路径上，由 F / G 两腿点那颗键负责
+     ⇒ 全程三次点击：导航轨「我的仓库」（y 现场扫）+ 两腿各一下，
+     后两下的坐标按 a11y 名字现场量（D93 那条：写死的坐标改版之后全过期过）。
 
-⚠️ **这次重写换来的稳，代价要说清**：它验的是**宽度规则**（谁要更多宽、由哪一列垫），
-状态由配置给，所以**「拖把手」与「点收起键」这两条交互路径本身不再由这条脚本负责**——
-把手能不能拖动、那颗键点得点不动，归别的判据（侧栏/抽屉的单测 + 他双击实机）。
-**别把它当"这两条也回归过了"**：上一版那点得到，但它的坐标随改版过期，
-红的时候分不清是规则坏了还是坐标坏了（D93 的原话正是这件事）。
+⚠️ **这次重写换来的稳，代价要说清**：它验的是**宽度规则**（谁要更多宽、由哪一列垫）。
+2026-10-12 之前这一段写的是"点收起键那条路径不由这条脚本负责"——**那句已经不准了**：
+F / G 两腿走的就是那颗键（点下去 → 量 → 点回来 → 量）。
+现在仍然不负责的是**「拖把手」**：把手坐标随窗口宽漂（D93 那条），模拟拖拽红的
+时候分不清是规则坏了还是坐标坏了，所以它归侧栏 / 抽屉的单测 + 他双击实机。
+**别把它当"拖把手也回归过了"**。
+
+## 变异账（2026-10-12，驱动 `target/mutate_grow2.py` / `mutate_grow3.py`，一次性不入仓库）
+
+三条，各自单变量、跑完按 sha 逐字节还原：
+
+  · **V2 实现侧 `MAIN_MIN_W` 950→100** ⇒ 红 8 条（算式四条 + 前提"只差抽屉那一列" +
+    D 那两条 + D/E 差值那条）。**承重成立**。
+  · **V3 只改脚本里那颗抄来的常数 950→100，二进制保持正确** ⇒ 红 5 条，
+    **正好是"宽 == 算式给的数"那五条**（A / B / D / E / **F**），一条不多一条不少。
+    这条证的是头注释答应过的那件事：四个壳层常数改版会红**并点名是哪一条**；
+    没有它，V2 的红就分不清是"实现坏了"还是"算式本来不敏感"。
+    ⚠️ V3 第一轮跑错了：驱动的还原**只在 `need_build` 分支里重编**，而 V3 标的是
+    `False` ⇒ 二进制里还躺着 V2 的 100，两个变量一起动、两侧口径一致地错，
+    那条结果作废（第二轮把"每条之前无条件还原 + 重编 + 回读确认变异串在盘上"写死）。
+  · **V1 把 `shell.rs::keep_main_flexible` 的每帧交回改成恒不执行 ⇒ 不红。**
+    第二轮它红过一条「B 与 A 左栏同宽」，第三轮单独重跑（全文留在
+    `target/grow_V1_full.log`）**17 条全绿**，而两跑的白面数是这样换着的：
+    基线 A 313 / B 312，V1 跑 A 312 / B 313 ⇒ 那条"红"落在**±1 容差的抖动带上**，
+    不能归因给 V1。⇒ 三条结论一起登记：
+    ① **这一档今天没有判据负责**：这条脚本（含 F / G 两腿）测不出
+       "每帧交回偏好"有没有在做工——保护整个关掉，量出来的宽一个都不变。
+    ② 由此有两种解释，**我没有查清是哪一种**：
+       要么补二十五那条病在现在的代码形态下已经不会发生（那颗保护成了冗余保险，
+       与 32-9 那颗 `busy_timeout` 同族），要么触发它的事件序列不在本脚本覆盖的
+       范围内（历史上量到 630 那一次是**会话中反复开合 + 拖把手**）。
+       查法要往 `ResizableState::sizes()` 里插桩打数，登记成新未决。
+       ⛔ **不许因为"V1 不红"就把 `keep_main_flexible` 删掉**——那是拿"我的判据
+       看不见"当"它不存在"，正是本项目最恨的那种反向错误。
+    ③ 判据的**分辨率下限**要说清：白面宽在跑与跑之间自然抖 **1px**，而容差就是 1px
+       ⇒ 这条脚本对 1px 级的漂移没有区分度，只抓得住 ≥2px 的（历史上那条病是 100px 级）。
+       新增判据时别把容差调到 0，那不是"更严"，那是把抖动判成缺陷。
+
+F / G 两腿是这一轮新加的，**承重由 V3 证过**（「F 的宽 == 收起态算式给的数」跟着红）；
+它们**没能**证到的是"会话中开合那一下会不会抢左栏"（V1 不红，同上②）。
 
 用法：`python scripts/verify_grow.py`
 """
@@ -52,6 +104,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import qbguard, shoot, steps  # noqa: E402
+import a11y_stress as A  # noqa: E402  只用它的 a11y dump / 按名字取矩形 / 客户原点
 
 from PIL import Image  # noqa: E402
 
@@ -209,7 +262,66 @@ def nav_bands(png):
     return [(a + b) // 2 for a, b in runs]
 
 
-def run_case(tag, inspector_open, sidebar_w):
+def wait_stable(hwnd, prev, tag, rounds=10, budget=30):
+    """抓到"画面不再变"为止，返回最后一帧路径。
+
+    抽成一颗函数是给 A–E 五跑与 F/G 两腿**共用**的：两腿之后也要等窗口把
+    还宽 / 再撑宽那两段跑完才能量，各写一遍就是两个会漂的数（本项目为
+    "同一件事两个出处"交过四次学费）。
+    """
+    from PIL import ImageChops
+    cur = prev
+    for i in range(rounds):
+        time.sleep(0.8)
+        cur = os.path.join(FIX_ROOT, f"{tag}-{i + 1}.png")
+        shoot.capture(hwnd, cur)
+        d = ImageChops.difference(Image.open(prev).convert("RGB"),
+                                  Image.open(cur).convert("RGB"))
+        n = sum(1 for y in range(0, d.size[1], 3) for x in range(0, d.size[0], 3)
+                if d.getpixel((x, y)) != (0, 0, 0))
+        if n < budget:
+            break
+        prev = cur
+    return cur
+
+
+def measure(png):
+    """一帧量两个数：窗口客户区宽与左栏白面宽。A–E 与 F/G 同一颗函数。"""
+    runs = white_runs(png, 300, 40, 1200)
+    return runs[0][1] if runs else 0, (runs[0][0] if runs else "-")
+
+
+def toggle_leg(label, hwnd, seq):
+    """会话中点标题栏那颗「收起右栏 / 展开右栏」，量点完之后的两个数。
+
+    三条纪律：
+    · **坐标按名字现场量**——那颗键带 `accessibility_label`（`shell.rs:794/796`），
+      矩形由系统给，不目测、不写死（D93；a11y 走查 2026-10-11 就是靠这一条
+      把三处过期坐标换掉的）。
+    · **生效判据不靠像素**：点下去会把 `inspector_open` 写回沙箱 config
+      （`store::set_inspector_layout`），翻了才叫点中了——"alive / 画面动过"
+      都不算（AGENTS：`alive` 的语义只是没崩）。
+    · **点完要等稳**（`wait_stable`）：还宽与再撑宽是两次 `Window::resize`，
+      抢量会量到中间态。
+    """
+    clx, cly = A.client_origin(hwnd)
+    n = A.one(A.dump(hwnd), label, "Button")
+    before = os.path.join(FIX_ROOT, f"live-{seq}-before.png")
+    shoot.capture(hwnd, before)
+    steps.click(hwnd, n.cx - clx, n.cy - cly, settle=1.2)
+    open_after = json.load(open(CFG, encoding="utf-8-sig"))["settings"]["inspector_open"]
+    wait_stable(hwnd, before, f"live-{seq}")
+    park_cursor(hwnd)
+    p = os.path.join(FIX_ROOT, f"live-{seq}-{label}.png")
+    shoot.capture(hwnd, p)
+    s, x0 = measure(p)
+    w = win_w(hwnd)
+    print(f"  腿 {seq}「{label}」：客户区宽 {w}，左栏白面宽 {s}（起于 {x0}），"
+          f"config 的 inspector_open = {open_after}")
+    return {"w": w, "s": s, "open_after": open_after, "frame": p}
+
+
+def run_case(tag, inspector_open, sidebar_w, toggles=()):
     write_case(inspector_open, sidebar_w)
     env = qbguard.launch_env()
     assert env["APPDATA"] == SANDBOX, f"沙箱没生效：APPDATA={env.get('APPDATA')}"
@@ -234,28 +346,19 @@ def run_case(tag, inspector_open, sidebar_w):
         # 第二颗 =「我的仓库」。x/y **各减各的偏移**：从前记成"偏的是 y"点过 8px 的亏
         #（AGENTS：帧 = 客户 + (8, 0)），而这一档每次现场量，不抄那个数
         steps.click(hwnd, 28 - ox, bands[1] - oy, settle=2.2)
-        prev = f0
-        for i in range(10):
-            time.sleep(0.8)
-            cur = os.path.join(FIX_ROOT, f"{tag}-{i+1}.png")
-            shoot.capture(hwnd, cur)
-            from PIL import ImageChops
-            d = ImageChops.difference(Image.open(prev).convert("RGB"),
-                                      Image.open(cur).convert("RGB"))
-            n = sum(1 for y in range(0, d.size[1], 3) for x in range(0, d.size[0], 3)
-                    if d.getpixel((x, y)) != (0, 0, 0))
-            if n < 30:
-                break
-            prev = cur
+        wait_stable(hwnd, f0, tag)
         park_cursor(hwnd)
         f = os.path.join(FIX_ROOT, f"{tag}-final.png")
         shoot.capture(hwnd, f)
         w = win_w(hwnd)
         # 左栏白面：从导航轨右边一点起扫，取第一段（第一段就是侧栏那张卡的白面）
-        runs = white_runs(f, 300, 40, 1200)
-        s = runs[0][1] if runs else 0
-        print(f"  {tag}：客户区宽 {w}，左栏白面宽 {s}（起于 {runs[0][0] if runs else '-'}）")
-        return {"w": w, "s": s, "frame": f}
+        s, x0 = measure(f)
+        print(f"  {tag}：客户区宽 {w}，左栏白面宽 {s}（起于 {x0}）")
+        res = {"w": w, "s": s, "frame": f, "live": []}
+        # 两腿就在这一跑的会话里点，不另起进程：要的就是"容器变过"那个事件序列
+        for ix, label in enumerate(toggles, 1):
+            res["live"].append(toggle_leg(label, hwnd, f"{tag}-{ix}"))
+        return res
     finally:
         p.terminate()
         try:
@@ -290,7 +393,7 @@ def main():
             print(f"   ⚠️ 他那个数离上限只剩 {hi - BASE['sidebar_w']}，"
                   f"不够放 {DRAG_DELTA} 的增量 ⇒ 基线往下挪，五跑仍测同一条规则")
 
-        a = run_case("A-open", True, sw)
+        a = run_case("A-open", True, sw, toggles=("收起右栏", "展开右栏"))
         b = run_case("B-closed", False, sw)
         c = run_case("C-open-again", True, sw)
         d = run_case("D-open-wider", True, sw + DRAG_DELTA)
@@ -312,6 +415,9 @@ def main():
         print(f"   算式：轨 {TRACK_W} + 侧栏 + 中间下限 {MAIN_MIN} + 抽屉 {insp}"
               f" + 右缘 {EDGE_W}，再与初始 {INITIAL_W} 取大；"
               f"侧栏基线 {sw}（读配置）→ A 该是 {target(True, sw)}、B 该是 {target(False, sw)}")
+        # 两腿的数：少了腿要**当场点名"前提没造出来"**，不许留到判据里 IndexError
+        assert len(a["live"]) == 2, f"F / G 两腿只跑出来 {len(a['live'])} 条 ⇒ 判据不能判"
+        f_leg, g_leg = a["live"]
         ok = [
             # ── 两条**前提**（放在判据之前，并把名字写成"前提"）：
             # 状态走配置不等于配置里的值真的进了界面——应用会夹它（`clamp_sidebar_w`），
@@ -340,12 +446,24 @@ def main():
             # （宽差要读配置里那一列，不许抄一个 320 进来——32-15 就红在抄的数上）
             ("D 与 E 只差抽屉那一列（宽差 ≈ inspector_w）",
              abs((d["w"] - e["w"]) - insp) <= 2),
+            # ── 会话中开合抽屉的两腿：A–E 判不到的那一档（容器宽度变化那一下）
+            ("前提：F 那一下点到了（config 的 inspector_open 翻成 false）",
+             f_leg["open_after"] is False),
+            ("F 会话中收起抽屉后左栏没被抢宽（F 的白面 == A 的）",
+             abs(f_leg["s"] - a["s"]) <= 1),
+            ("F 的宽 == 收起态算式给的数（还宽只还我们自己撑的那一段）",
+             abs(f_leg["w"] - target(False, sw)) <= 2),
+            ("前提：G 那一下点回来了（config 的 inspector_open 翻回 true）",
+             g_leg["open_after"] is True),
+            ("G 往返之后左栏与窗口宽都回到 A 的数（每开合一次漂一次就是补二十五）",
+             abs(g_leg["s"] - a["s"]) <= 1 and abs(g_leg["w"] - a["w"]) <= 2),
         ]
         print("\n判读：")
         for name, passed in ok:
             print(f"   {'通过' if passed else '不通过'}  {name}")
         print(f"   参考：A {a['w']}/{a['s']}  B {b['w']}/{b['s']}  C {c['w']}/{c['s']}"
-              f"  D {d['w']}/{d['s']}  E {e['w']}/{e['s']}")
+              f"  D {d['w']}/{d['s']}  E {e['w']}/{e['s']}"
+              f"  F(会话收起) {f_leg['w']}/{f_leg['s']}  G(点回来) {g_leg['w']}/{g_leg['s']}")
         return 0 if all(p for _, p in ok) else 1
     finally:
         after = qbguard.real_cfg_fp()

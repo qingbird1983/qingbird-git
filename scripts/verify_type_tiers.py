@@ -31,8 +31,20 @@
    最后写进 config 的是深色 ⇒ 拿它解释浅色帧，浅色帧里一个卡面像素都匹配不上。
    详见 `theme_colors` 的头注释。
 
-用法：python scripts/verify_type_tiers.py            # 抓 + 量（五次起进程）
-      python scripts/verify_type_tiers.py --measure-only
+用法：python scripts/verify_type_tiers.py            # 抓 + 量（四次起进程）
+      python scripts/verify_type_tiers.py --measure-only   # 只重量（帧与矩形表留在盘上）
+
+## 变异验证做过（2026-10-12，全走 --measure-only：帧留盘、只动真源或过滤条件）
+- **M1** `tokens.rs` 里 `pill_h` 中档 24→26 ⇒ **精确红在 medium 那一屏**（"期望值真的从源码现读"）
+- **M2** `theme.json` 浅色 `muted.foreground` 改掉 ⇒ 红在「tier3 在帧上 0 颗」，
+  而且**只红浅色那三屏、深色一屏不红**（"按档取色"没串档）
+- **M3** 行内量测的 `DataItem` 过滤名写错 ⇒ 红在「有 1 条表格行却一颗都没量到」
+  （"量不到不许当通过"那一条真的有牙）
+- **M4【预期不红】** 把气口阈值 `16 + 4` 改成 `100` ⇒ **一条都不红**。
+  ⛔ 这不是脚本坏了，是**③ 那一档根本没有独立判据**——它只报数、不判阈值
+  （阈值该是多少归他双击看）。⇒ **别把 ③ 读成"撑住了下限"**，它撑的是"量得到量不到"。
+还原：三条被改文件（`tokens.rs` / `theme.json` / 本脚本）每条之间**一起**还原，
+末端按 sha 逐字节核对相同，还原后复跑一次全绿。
 """
 
 import hashlib
@@ -118,6 +130,13 @@ def lum(c):
 def grab(theme, scale):
     """起一次进程：指定主题与字号档，抓「总览」与「我的仓库-概览」两屏。
     返回 [(tag, png, 帧坐标矩形表)]"""
+    # 夹具自己造 + 自己验：`build_sandbox` 只把 `A.FIXTURE` 这个路径写进 repos，
+    # 那颗仓库是不是真 git 仓库它不管。上一轮的临时目录被清理之后，这里就会拿到
+    # 一个"没有 .git 的空文件夹"，而三档字色照样量得出数 ⇒ **测的是另一屏而报告不知情**。
+    # （2026-10-12 做变异验证时在同一族脚本上炸出来的，三份脚本一起补。）
+    A.build_fixture()
+    assert os.path.isdir(os.path.join(A.FIXTURE, ".git")), \
+        f"夹具 {A.FIXTURE} 没有 .git ⇒ 概览页画的是『不是仓库』那一屏"
     A.build_sandbox(False, theme=theme)
     cfg = json.load(open(A.CFG, encoding="utf-8-sig"))
     cfg["settings"]["ui_scale"] = scale
