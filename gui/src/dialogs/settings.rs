@@ -771,6 +771,47 @@ fn set_nav(t: &Theme, st: &SettingsState, this: &Entity<Shell>) -> impl IntoElem
                     }
                 })
         }))
+        // 版本号钉在左栏**底部**（Q38）。占位这块把那一格推到底：
+        // 基座没有 `mt_auto`（gpui-pre 0.3.7 全量搜过），只能用 `flex_1` 的空块顶开。
+        // 上面那个占位块**什么都不画**，所以不会引入新的颜色或间距档
+        .child(div().flex_1())
+        .child(app_version_line(t))
+}
+
+/// 界面唯一一处读版本号的地方（Q38 ⇒ 32-13 那份单源的**第一个读者**）。
+///
+/// 为什么落在设置页左栏底部，而不是别的三格：
+/// ① 它必须**常驻**——出问题时要当场报得出自己跑的是哪一版。放在任何一个分类的
+///    内容区里，等于要求用户"先想到去那一页找"；左栏四页共用，切哪一类都在。
+/// ② footer 那一行左边已经被「哪几格即时生效」那句占了（`settings_footer`），
+///    两句语义无关的话并排会互相稀释；
+/// ③ 检视抽屉右列是「AI 助理面板 · 开发中」，**硬约束不许塞东西**（路线表 Q 段那条）。
+///
+/// ⚠️ **`env!("CARGO_PKG_VERSION")` 全仓库只许出现在这一颗函数里**。
+/// 32-13 之前版本号手写三处、"只改一两处不会有任何报错"；收成单源之后，
+/// 这里是显示侧。第二次出现就是第二个会漂的出处。
+/// 单测 `the_version_on_screen_is_the_one_in_the_workspace_toml` 把它钉成运行期断言
+fn app_version_line(t: &Theme) -> Div {
+    v_flex()
+        .gap(px(GAP_DENSE))
+        .child(
+            div()
+                .text_size(px(fs_meta()))
+                .text_color(tier4(t))
+                .child("青鸟 Git"),
+        )
+        .child(
+            div()
+                .text_size(px(fs_meta()))
+                .text_color(tier4(t))
+                // 那句话本身抽成纯函数：不开窗口也能断言它等于根表那个数
+                .child(version_text()),
+        )
+}
+
+/// 「版本 0.1.0」那一句。**纯函数**，不碰主题也不碰 `Shell`
+pub(crate) fn version_text() -> String {
+    format!("版本 {}", env!("CARGO_PKG_VERSION"))
 }
 
 /// 右侧内容。**只有当前那一页**
@@ -1349,6 +1390,33 @@ fn settings_footer(t: &Theme, this: &Entity<Shell>, gv: ButtonCustomVariant) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 界面那一格显示的版本，必须等于仓库根 `Cargo.toml` 的 `[workspace.package].version`。
+    ///
+    /// 32-13 把版本号收成单源，但"单源"这件事以前**只靠人记得住**（登记里写的是
+    /// 「发版时只改这一行」）。这条把它钉成运行期断言：
+    /// 变异验证把 `gui/Cargo.toml` 的 `version.workspace = true` 改成写死一个别的数
+    /// ⇒ 精确红在这一条，而那正是"包里的版本与界面读出来的不是同一个数"的形态
+    #[test]
+    fn the_version_on_screen_is_the_one_in_the_workspace_toml() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../Cargo.toml");
+        let txt = std::fs::read_to_string(&root).expect("读不到仓库根的 Cargo.toml");
+        let ws = txt
+            .lines()
+            .skip_while(|l| l.trim() != "[workspace.package]")
+            .find_map(|l| {
+                let l = l.trim();
+                l.strip_prefix("version").and_then(|r| {
+                    r.trim_start()
+                        .strip_prefix('=')
+                        .map(|v| v.trim().trim_matches('"').to_string())
+                })
+            })
+            .expect("根 Cargo.toml 的 [workspace.package] 里没有 version 那一行");
+        assert_eq!(version_text(), format!("版本 {ws}"));
+        // 顺带挡住最坏那一档：`env!` 没读到、整格退成占位值
+        assert_ne!(ws, "0.0.0", "版本号退成了占位值 ⇒ 这条线根本没接上");
+    }
 
     /// 计数那一格的**分母**必须只数"勾得上"的项。
     ///

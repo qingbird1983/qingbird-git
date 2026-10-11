@@ -1628,6 +1628,13 @@ pub(crate) enum Bucket {
     Ahead,
     Behind,
     Forked,
+    /// **领先/落后这一档读不出来**（32-12：git < 2.32 时那条命令不给 `# branch.ab`）。
+    ///
+    /// ⚠️ 为什么单开一档而不是复用 `Unknown`：`Unknown` 那句话是"待扫描"，
+    /// 而这一档**扫过了、只是那一格没数**——把"不知道"说成"还没扫"，
+    /// 与把它说成"已同步"是同一种错，只是方向相反（31.4 补十五那条纪律）。
+    /// ⇒ 开一档新的，让编译器把"每一处遇到它要怎么说"全部列出来（D78）
+    AbUnknown,
     Unknown,
 }
 
@@ -1642,7 +1649,10 @@ pub(crate) fn bucket_of(s: &RepoStatus) -> Bucket {
     } else if s.ahead > 0 {
         Bucket::Ahead
     } else if s.dirty {
+        // 脏是**同一条命令真读到的**，那一格不因为另一格读不出而作废
         Bucket::Dirty
+    } else if s.ab_unknown {
+        Bucket::AbUnknown
     } else {
         Bucket::Synced
     }
@@ -1673,10 +1683,10 @@ pub(crate) fn dot_color(b: Bucket, t: &Theme) -> Hsla {
         Bucket::Ahead => t.colors.accent,
         Bucket::Behind => orange(t),
         Bucket::Forked => t.colors.danger,
-        // 「待扫描」借 `line` 那一档灰。这里原来直写 `t.colors.border`——
-        // 与 `edge(t)` 是**同一个值的两个名字**（2026-10-08 台账第三条），
-        // 归到唯一入口是为了"将来调这一档不会漏改这里"
-        Bucket::Unknown => edge(t),
+        // 「待扫描」与「同步未知」都借 `line` 那一档灰。这里原来直写
+        // `t.colors.border`——与 `edge(t)` 是**同一个值的两个名字**
+        // （2026-10-08 台账第三条），归到唯一入口是为了"将来调这一档不会漏改这里"
+        Bucket::Unknown | Bucket::AbUnknown => edge(t),
     }
 }
 
@@ -1694,7 +1704,11 @@ pub(crate) fn bucket_word(b: Bucket) -> &'static str {
         Bucket::Ahead => "待推送",
         Bucket::Behind => "落后",
         Bucket::Forked => "已分叉",
+        // ⚠️ 这两句必须是**两句话**（与 32-11 那颗片上「零颗」与「不知道」同一条纪律）：
+        // 「待扫描」= 还没问过 git；「同步未知」= 问过 git，但它那个版本读不出
+        // 领先/落后（< 2.32）。合成一句就等于把"我问了、答不上来"说成"我还没问"
         Bucket::Unknown => "待扫描",
+        Bucket::AbUnknown => "同步未知",
     }
 }
 
@@ -1764,6 +1778,7 @@ pub(crate) static EMPTY_VIEW: RepoView = RepoView {
         upstream: String::new(),
         remote_url: String::new(),
         stash_count: 0,
+        ab_unknown: false,
     },
     changed: 0,
     // 「没读过」——总览那一行兜底用的就是这一格，所以它显示「待扫描」而不是
@@ -1849,6 +1864,7 @@ mod tests {
             // 暂存那一档要它非零的用例在 `panels` 里单独造（写在这里会让
             // 所有既有断言一起变红，而红的原因不是缺陷）
             stash_count: 0,
+            ab_unknown: false,
         }
     }
 
@@ -2327,6 +2343,26 @@ mod tests {
             cache_detected_is_trustworthy(&c),
             "扫描那一路写下的行，识别好的命令必须读得回来——有没有提交不算条件"
         );
+    }
+
+    /// 32-12：`ab_unknown` 落在哪一档。**三档都要钉**，因为它们各自的错法不同：
+    /// 读不出 ⇒ 不许说"已同步"；脏是真读到的 ⇒ 不许被那一档带下去；
+    /// 没有上游 ⇒ 那是"没有这一档"，不是"读不出来"
+    #[test]
+    fn an_unreadable_ahead_behind_is_neither_synced_nor_unscanned() {
+        let mut s = st(true, 0, 0, false);
+        s.ab_unknown = true;
+        assert_eq!(bucket_of(&s), Bucket::AbUnknown, "0/0 不许冒充已同步");
+        s.dirty = true;
+        assert_eq!(bucket_of(&s), Bucket::Dirty, "脏是同一条命令真读到的，不作废");
+
+        let mut t = st(true, 0, 0, false);
+        t.has_upstream = false;
+        assert_eq!(bucket_of(&t), Bucket::Synced, "没有上游 ⇒ 那一档本来就不存在");
+
+        // 数字读得出来时，新那一档绝不能自己冒出来
+        let u = st(true, 2, 0, false);
+        assert_eq!(bucket_of(&u), Bucket::Ahead);
     }
 
     /// 空的一份 detected（四条全空）**既不落库也不灌进界面**：它在库里存在的

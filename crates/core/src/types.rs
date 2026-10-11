@@ -26,6 +26,20 @@ pub struct RepoStatus {
     /// 后果不是少一个数，是每个人的秒开缓存集体作废
     #[serde(default)]
     pub stash_count: usize,
+    /// **领先/落后这一档读不出来**（32-12）。
+    ///
+    /// `git status --porcelain=v2 --branch --ahead-behind` 里那个 `--ahead-behind`
+    /// 需要 **git ≥ 2.32**（2021-06）。低于它时这一条命令照样跑，但输出里没有
+    /// `# branch.ab` 那一行 ⇒ `ahead`/`behind` 都会是 0，而 **0/0 与"没算过"
+    /// 在两个数上长得一模一样**——这正是本项目最恨的那一档
+    /// （「没扫过不许写成已同步」，31.4 补十五的 `has_status` 是同一族）。
+    ///
+    /// ⚠️ **极性是 `unknown = true` 而不是 `read = true`**：这份结构会进 `scan_cache`
+    /// 的 JSON，老库里存的没有这一格 ⇒ `#[serde(default)]` 落成 `false`（= 数字可信），
+    /// **升级之后每个人原来的缓存照旧显示数字**。反过来命名会让所有人的领先/落后
+    /// 一夜之间变成「–」——那是把一次无害的字段新增变成一次全员降级
+    #[serde(default)]
+    pub ab_unknown: bool,
 }
 
 /// 拉取/克隆时推送给前端的进度事件

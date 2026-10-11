@@ -74,66 +74,282 @@ pub fn repo_name(path: &str) -> String {
 ///
 /// 每项各跑一条 git 命令，仓库多了会明显慢——所以调用方应该把它放后台线程，
 /// 不要在渲染路径上同步等（界面靠上一次结果先画着，拿到新的再刷）。
+///
+/// ⚠️ **32-12 起这一条只花 3 个 git 子进程**（以前 6 个）：分支、上游、领先落后、
+/// 脏、未提交清单全部来自**同一条** `status --porcelain=v2 --branch --ahead-behind`，
+/// 剩下两条是 `remote get-url origin` 与 `stash list`（那两样这条命令给不出）。
+/// 判据与实测账见路线表 32-12 与变更记录 2026-10-11
 pub fn read_status(repo_path: &str) -> RepoStatus {
+    scan_repo(repo_path).0
+}
+
+/// 一次扫描同时给出**状态**与**未提交清单**。
+///
+/// 为什么要有这一颗：扫描那一轮以前各叫一次 `read_status` 与 `changed_entries`，
+/// 而两者都要问 `git status`——**同一条命令在同一轮里跑两遍**。共用这一颗之后
+/// 一份输出喂两处，界面上那个"未提交 N"与变更清单**结构上不可能不一致**
+pub fn scan_repo(repo_path: &str) -> (RepoStatus, Vec<ChangeEntry>) {
     let mut st = RepoStatus {
         is_repo: valid_repo(repo_path),
         ..Default::default()
     };
     if !st.is_repo {
-        return st;
+        return (st, Vec::new());
     }
-    st.branch = run_local(repo_path, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .stdout
-        .trim()
-        .to_string();
-
-    let upstream = run_local(
-        repo_path,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-    );
-    st.has_upstream = upstream.success;
-    if upstream.success {
-        // 上游的全名就是这条命令的 stdout，界面上要显示"跟踪分支"——
-        // 只留一个 success 就把它扔了，等于让界面再问 git 一遍
-        st.upstream = upstream.stdout.trim().to_string();
-        let counts = run_local(
-            repo_path,
-            &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
-        );
-        if counts.success {
-            let line = counts.stdout.trim().to_string();
-            if let [ahead, behind] = line.split_whitespace().collect::<Vec<_>>()[..] {
-                st.ahead = ahead.parse().unwrap_or(0);
-                st.behind = behind.parse().unwrap_or(0);
-            }
+    match run_status_v2(repo_path) {
+        Some(v2) => {
+            st.branch = v2.branch;
+            st.upstream = v2.upstream.unwrap_or_default();
+            st.has_upstream = !st.upstream.is_empty();
+            st.ahead = v2.ahead;
+            st.behind = v2.behind;
+            st.ab_unknown = ab_is_unknown(st.has_upstream, v2.ab_read);
+            st.dirty = !v2.changes.is_empty();
+            st.remote_url = run_local(repo_path, &["remote", "get-url", "origin"])
+                .stdout
+                .trim()
+                .to_string();
+            // 有几条暂存。**就是 `stash::list` 的长度**，不另起一条数行数的命令——
+            // 界面上那颗感叹号说的数，必须和点开后的清单**同一个出处**，
+            // 否则会出现「说有三份、点开只有两份」这种当场打脸的不一致（32-2）
+            st.stash_count = crate::stash::count(repo_path);
+            (st, v2.changes)
+        }
+        // 这条命令跑不通（仓库损坏，或 git 老到不认 `--branch`）。
+        // 与合并前的行为一致：各字段留空，但**领先/落后那一档明说不知道**，
+        // 不许让 0/0 冒充"已同步"
+        None => {
+            st.ab_unknown = true;
+            st.remote_url = run_local(repo_path, &["remote", "get-url", "origin"])
+                .stdout
+                .trim()
+                .to_string();
+            st.stash_count = crate::stash::count(repo_path);
+            (st, Vec::new())
         }
     }
-    st.dirty = !run_local(repo_path, &["status", "--porcelain"])
-        .stdout
-        .trim()
-        .is_empty();
-    st.remote_url = run_local(repo_path, &["remote", "get-url", "origin"])
-        .stdout
-        .trim()
-        .to_string();
-    // 有几条暂存。**就是 `stash::list` 的长度**，不另起一条数行数的命令——
-    // 界面上那颗感叹号说的数，必须和点开后的清单**同一个出处**，
-    // 否则会出现「说有三份、点开只有两份」这种当场打脸的不一致（32-2）
-    st.stash_count = crate::stash::count(repo_path);
-    st
+}
+
+/// 那一条合并命令的参数。
+///
+/// ⚠️ **`-c core.quotePath=false` 必须带着，而且必须排在 `status` 之前**。
+/// 不带时 git 2.55 实测会把非 ASCII 路径转义成八进制
+/// （`"\346\231\256\351\200\232.txt"`），代价有两层：
+/// ① 界面上列出来的是一串谁都认不出的数字；
+/// ② 阶段 17 拿这种路径去删，删的是一个**磁盘上根本不存在的文件名**。
+/// 这一条在 v1 上就成立，换到 v2 之后**重新实测过它照样生效**（不是想当然）
+fn status_v2_args(with_ab: bool) -> Vec<String> {
+    let mut v = vec![
+        "-c".to_string(),
+        "core.quotePath=false".to_string(),
+        "status".to_string(),
+        "--porcelain=v2".to_string(),
+        "--branch".to_string(),
+    ];
+    if with_ab {
+        v.push("--ahead-behind".to_string());
+    }
+    v
+}
+
+/// 跑那一条合并命令并解析。**跑不通返回 None**（不是"返回一份空的"）——
+/// 让调用方能把"仓库损坏 / git 太老"与"仓库干净"分开说
+fn run_status_v2(repo_path: &str) -> Option<V2Scan> {
+    let args = status_v2_args(git_supports_ahead_behind());
+    let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let out = run_local(repo_path, &a);
+    if !out.success {
+        return None;
+    }
+    Some(parse_v2_status(&out.stdout))
+}
+
+/// 「领先/落后这一档到底知不知道」。**抽成纯函数**是因为它是三档合成一格的判据：
+///
+/// - 有上游、输出里有 `# branch.ab` ⇒ 知道
+/// - 有上游、**没有那一行** ⇒ 不知道（git 2.11–2.31 那一段：认 `--branch`
+///   但不认 `--ahead-behind`）⇒ 界面必须显示「–」，不许显示 0/0
+/// - **没有上游** ⇒ 那一行本来就不该出现，那一档不是"读不出来"而是"没有这一档"。
+///   混起来会让一颗从没推过的仓库显示「–」，而它该显示的是"没有上游"
+fn ab_is_unknown(has_upstream: bool, ab_read: bool) -> bool {
+    has_upstream && !ab_read
+}
+
+/// `git status --porcelain=v2 --branch` 的一份解析结果（32-12）。
+///
+/// **为什么 core 里要留这一份中间结构**：这一条命令同时供出两样东西——仓库状态
+/// 与未提交清单。中间放一份解析结果，两处读的都是**同一次 git 的同一份输出**：
+/// 解析一处、加总一处
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct V2Scan {
+    /// `# branch.head`。游离 HEAD 是 `(no branch)`，这里翻成 `HEAD`——
+    /// 与合并前 `rev-parse --abbrev-ref HEAD` 给的值**保持一致**，不新增可见变化
+    pub branch: String,
+    /// 还没有任何提交（`# branch.oid (initial)`）。
+    /// ⚠️ 这一档合并前后**界面会变**：以前 `rev-parse --abbrev-ref HEAD` 对
+    /// 未出生分支报 `HEAD`（退出码 128），现在给真名（`main`）。方向上是修好了，
+    /// 但它得由他看过帧点头（路线表 32-12 那条实测登记的唯一一处可见变化）
+    pub unborn: bool,
+    /// 上游分支全名，如 `origin/main`；没有上游时是 None
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    /// 输出里有没有 `# branch.ab` 那一行。**没有 ≠ 0/0**：`--ahead-behind`
+    /// 需要 git ≥ 2.32，老 git 上这一行整条缺席
+    pub ab_read: bool,
+    /// 未提交清单，git 原始顺序（排序交给界面）
+    pub changes: Vec<ChangeEntry>,
+}
+
+/// 纯解析那一半。**单独拆出来是为了让每一种行形状都有单测**——走真 git 的那一条
+/// 只能测"能跑通"，测不到"改名行里那个 NUL 取的是哪一半"这种方向性错误
+///
+/// v2 的行形状（本机 git 2.55 实测核对）：
+/// - `# branch.oid <sha>` / `(initial)`
+/// - `# branch.head <name>` / `(no branch)`
+/// - `# branch.upstream origin/main`（没有上游时整行缺席）
+/// - `# branch.ab +1 -2`（没上游或不支持时整行缺席）
+/// - `1 <XY> <sub> <mH> <mI> <mW> <iH> <iI> <path>`
+/// - `2 <XY> <sub> … <score> <新路径>\t<原路径>`（改名/复制：**分隔符是制表符**，实测）
+/// - `u <XY> <sub> … <path>`（冲突，11 段）
+/// - `? <path>`（未跟踪；目录照样折叠成一条带结尾斜杠的）
+pub fn parse_v2_status(stdout: &str) -> V2Scan {
+    let mut s = V2Scan::default();
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("# branch.oid ") {
+            s.unborn = rest.trim() == "(initial)";
+        } else if let Some(rest) = line.strip_prefix("# branch.head ") {
+            let name = rest.trim();
+            // ⚠️ 游离 HEAD 真 git 给的是 `(detached)`——**不是文档里常见的
+            // `(no branch)`**（本机 2.55 实测）。翻成 `HEAD` 与合并前
+            // `rev-parse --abbrev-ref HEAD` 给的值一致，不新增一处可见变化。
+            // 两种写法都认：漏了第二种就会把 `(detached)` 当分支名画到界面上
+            s.branch = if name == "(no branch)" || name == "(detached)" {
+                "HEAD".to_string()
+            } else {
+                name.to_string()
+            };
+        } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                s.upstream = Some(name.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
+            // `+1 -2`：加号那侧是本地领先、减号那侧是落后。**方向反了会把「落后」
+            // 说成「领先」**，而两档里只有一档对称，抓得住的夹具必须两档都不对称
+            let mut it = rest.split_whitespace();
+            let num = |t: Option<&str>| {
+                t.unwrap_or("0")
+                    .trim_start_matches(['+', '-'])
+                    .parse::<u32>()
+                    .unwrap_or(0)
+            };
+            s.ahead = num(it.next());
+            s.behind = num(it.next());
+            s.ab_read = true;
+        } else if line.starts_with('#') {
+            // 其它 `#` 头（将来 git 可能加）不参与，也不当成一条变更
+        } else if let Some(path) = line.strip_prefix("? ") {
+            s.changes.push(v2_entry("??", path));
+        } else if let Some(ty) = line.chars().next() {
+            // 三种带状态的行：`1` 修改/新增/删除、`2` 改名或复制、`u` 冲突。
+            // **每种的段数不一样**（本机 git 2.55 实测，别照文档猜）：
+            //   `1 <XY> <sub> <mH> <mI> <mW> <iH> <iI> <path>`            = 9 段
+            //   `2 <XY> <sub> <m1> <m2> <mm> <i1> <i2> <score> <新>\t<旧>` = 10 段
+            //   `u <XY> <sub> <m1> <m2> <m3> <mI> <i1> <i2> <i3> <path>`   = 11 段
+            // 路径是**剩下那一整段**（里面可以有空格），所以按段数 splitn，
+            // 不能"取最后一个空格之后的部分"
+            let n = match ty {
+                '1' => 9,
+                '2' => 10,
+                'u' => 11,
+                _ => continue,
+            };
+            let parts: Vec<&str> = line.splitn(n, ' ').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let xy = parts[1];
+            let raw = parts[parts.len() - 1];
+            // ⚠️ 改名行新旧路径之间的分隔符是**制表符**，不是文档里说的 NUL
+            // （实测：`R100 renamed.txt\trename-me.txt`）。取前一半 = 新路径，
+            // 与合并前那版 v1 解析取 `old -> new` 的后一半是同一件事。
+            // 少了这一刀，界面上会列出一个带制表符的"文件名"，而清理那一路
+            // 会去删一个磁盘上不存在的名字（阶段 17 就是这条）
+            let path = raw.split('\t').next().unwrap_or(raw);
+            s.changes.push(v2_entry(xy, path));
+        }
+    }
+    s
+}
+
+/// 从 v2 的 `XY` 与路径造一条变更。与合并前 v1 解析给的字段语义**逐格对齐**：
+/// `staged` 看第一位、`untracked` 看有没有 `?`
+fn v2_entry(xy: &str, path: &str) -> ChangeEntry {
+    let b = xy.as_bytes();
+    let first = b.first().copied().unwrap_or(b' ');
+    ChangeEntry {
+        untracked: xy.contains('?'),
+        // v2 用 `.` 顶替 porcelain 里那个"这一侧没变"的空格，
+        // 所以判"在暂存区里"要同时排掉 `' '` 与 `'.'`
+        staged: first != b' ' && first != b'?' && first != b'.',
+        status: xy.to_string(),
+        path: path.to_string(),
+    }
+}
+
+static GIT_AB_OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static GIT_VERSION_TEXT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// 本机 git 认不认 `--ahead-behind`（需 ≥ 2.32）。**一个进程只问一次 `git --version`**，
+/// 结果落在 `OnceLock` 里——它是只读的、且 git 不会在运行中换版本
+pub fn git_supports_ahead_behind() -> bool {
+    *GIT_AB_OK.get_or_init(|| {
+        let text = GIT_VERSION_TEXT
+            .get_or_init(|| {
+                std::process::Command::new("git")
+                    .arg("--version")
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+            })
+            .as_deref();
+        supports_ahead_behind_from(text)
+    })
+}
+
+/// 从 `git --version` 那句里判。**纯函数**：版本注入走这一层，
+/// 单测才能既测 2.31 也测 2.32（不许为了测这一档去装一份老 git）
+///
+/// 认三种真实见过的形状：`git version 2.55.0.windows.2`、`git version 2.32.0`、
+/// `git version 2.7.4 (Apple Git-66)`。**读不出来一律按不支持**——
+/// 宁可那一格显示「–」，也不许拿 0/0 冒充"已同步"
+pub fn supports_ahead_behind_from(text: Option<&str>) -> bool {
+    let Some(v) = text
+        .and_then(|t| t.split_whitespace().find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit())))
+    else {
+        return false;
+    };
+    let mut it = v.split('.');
+    let major: u32 = match it.next().map(|s| s.parse()) {
+        Some(Ok(n)) => n,
+        _ => return false,
+    };
+    let minor: u32 = match it.next().map(|s| s.parse()) {
+        Some(Ok(n)) => n,
+        _ => return false,
+    };
+    (major, minor) >= (2, 32)
 }
 
 /// 未提交的文件数量（仓库头的「未提交 N 文件」那个数字）。
 /// 不是仓库时返回 0。
+///
+/// ⚠️ 32-12 起它**不再自己起一条 `git status`**，而是数 `changed_entries` 那一份：
+/// 以前这里与 `changed_entries` 各跑一条同命令、各自数一遍，
+/// "个数"与"清单"是两处算的——现在同一份输出，两处不可能对不上
 pub fn changed_files(repo_path: &str) -> u32 {
-    if !valid_repo(repo_path) {
-        return 0;
-    }
-    run_local(repo_path, &["status", "--porcelain"])
-        .stdout
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .count() as u32
+    changed_entries(repo_path).len() as u32
 }
 
 /// 一条未提交变更。给提交对话框的「变更摘要」用。
@@ -158,67 +374,16 @@ pub struct ChangeEntry {
 /// 但"我要提交什么"这件事得让人看见文件名才敢按确定。
 ///
 /// 排序交给界面（它要知道按哪种顺序讲），这里只给 git 的原始顺序。
+///
+/// 32-12 起走的是与 `read_status` **同一条命令**（`--porcelain=v2`），
+/// 只是这里只要清单那一半
 pub fn changed_entries(repo_path: &str) -> Vec<ChangeEntry> {
     if !valid_repo(repo_path) {
         return Vec::new();
     }
-    parse_porcelain(&run_local(repo_path, &QUOTE_PATH_OFF_STATUS).stdout)
-}
-
-/// 关掉路径转义的 `git status --porcelain` 参数。
-///
-/// ⚠️ **不带 `core.quotePath=false` 时，git 把非 ASCII 路径转义成八进制**
-/// （`"\\346\\231\\256\\351\\200\\232.txt"`）。代价有两层：
-/// ① 界面上列出来的是一串谁都认不出的数字（变更页签一直是这样）；
-/// ② 阶段 17 拿这种路径去删，删的是一个**磁盘上根本不存在的文件名**。
-///
-/// Rust 侧一直是 `String::from_utf8_lossy` 解码（与控制台代码页无关），
-/// 所以拿到的就是原始 UTF-8 字节，解析没有问题。
-const QUOTE_PATH_OFF_STATUS: [&str; 4] = [
-    "-c",
-    "core.quotePath=false",
-    "status",
-    "--porcelain",
-];
-
-/// 解析 `git status --porcelain` 的输出。
-///
-/// 每行固定是 `XY <path>`：两个状态字符、一个空格、然后路径。
-/// **纯函数**，不碰 git——解析规则（两字符状态、空格分隔、重命名箭头）
-/// 跟 git 子进程一点关系没有，混在跑命令的函数里就只能靠真仓库测。
-pub fn parse_porcelain(stdout: &str) -> Vec<ChangeEntry> {
-    let mut out = Vec::new();
-    for line in stdout.lines() {
-        // 长度至少 4：`XY` + 空格 + 至少一个字符
-        if line.len() < 4 {
-            continue;
-        }
-        let b = line.as_bytes();
-        if b[2] != b' ' {
-            continue; // 形状不对的行（理论上不该有）直接跳过
-        }
-        let status = line[..2].to_string();
-        let path = line[3..].trim().to_string();
-        if path.is_empty() {
-            continue;
-        }
-        // 重命名时 git 给 `old -> new`，展示只要新的那个
-        let path = match path.rsplit_once(" -> ") {
-            Some((_, new)) => new.to_string(),
-            None => path,
-        };
-        out.push(ChangeEntry {
-            untracked: status.contains('?'),
-            // `XY` 里 **X 是暂存区、Y 是工作区**。搞反了会把"我 add 过"
-            // 报成"我改了但没 add"，而提交对话框的摘要正是靠这一列分组。
-            // `?`（未跟踪）要单独排除：它压根不在索引里，X 位那个 `?`
-            // 只是 git 表示"没见过这个文件"，不是"在暂存区里"
-            staged: b[0] != b' ' && b[0] != b'?',
-            status,
-            path,
-        });
-    }
-    out
+    run_status_v2(repo_path)
+        .map(|v| v.changes)
+        .unwrap_or_default()
 }
 
 /// 最近一次提交的标题（`git log -1 --pretty=%s`）。
@@ -1089,45 +1254,138 @@ mod tests {
 mod porcelain_tests {
     use super::*;
 
+    /// 下面这几段常量**不是照文档编的**，是 `target/capture_v2_two.py` 与
+    /// `target/capture_v2_sample.py` 在本机 git 2.55 上抓回来的真输出（含改名行
+    /// 那个制表符、`(detached)` 那个写法）。**照文档写测试会测到一个不存在的格式**
+    const V2_HEADERS: &str = "# branch.oid bdd19506c90c9808b8d6edeaff6e2c501683d63c\n\
+        # branch.head main\n\
+        # branch.upstream origin/main\n\
+        # branch.ab +1 -2\n";
+
+    /// 头部四行。**方向那一档必须用不对称的数**：`+1 -2` 写成 `+0 -0` 的话,
+    /// 把 ahead/behind 读反照样全绿，而界面上"落后"会变成"领先"
     #[test]
-    fn porcelain_splits_status_and_path() {
-        let got = parse_porcelain("M  src/main.rs\n?? target/\nA  new.txt\n");
-        assert_eq!(got.len(), 3);
-        assert_eq!(got[0].status, "M ");
-        assert_eq!(got[0].path, "src/main.rs");
-        assert!(got[0].staged, "第二字符非空格 = 已暂存");
-        assert!(!got[0].untracked);
-        assert!(got[1].untracked, "?? 是未跟踪");
-        assert!(!got[1].staged);
-        assert_eq!(got[2].path, "new.txt");
+    fn the_header_lines_are_read_from_a_real_sample() {
+        let s = parse_v2_status(V2_HEADERS);
+        assert_eq!(s.branch, "main");
+        assert_eq!(s.upstream.as_deref(), Some("origin/main"));
+        assert!(s.ab_read, "有那一行就是读到了");
+        assert_eq!(s.ahead, 1, "`+1` 那侧是本地领先");
+        assert_eq!(s.behind, 2, "`-2` 那侧是落后");
+        assert!(!s.unborn);
+        assert!(s.changes.is_empty(), "头部四行一条变更都不该造出来");
     }
 
-    /// `XY` 两列的分工：**X 是暂存区、Y 是工作区**。
-    /// 搞反了会把"我 add 过"报成"我改了但没 add"
+    /// 四种变更行形状，逐格核对。路径含空格、含中文、目录带结尾斜杠、
+    /// 改名行新旧两段——**每一条都来自真输出**
     #[test]
-    fn staged_flag_comes_from_the_index_column() {
-        // 已 add 过、之后又改了 → `AM`：X=A 在暂存区，Y=M 在工作区
-        let got = parse_porcelain("AM build.rs\n");
-        assert!(got[0].staged, "X 列非空格 = 进了暂存区");
-        // 删了但没 add → ` D`：X 是空格，说明没进暂存区
-        let got = parse_porcelain(" D gone.txt\n");
-        assert!(!got[0].staged, "X 列是空格 = 只在工作区改了");
+    fn every_change_row_shape_becomes_exactly_one_entry() {
+        let out = format!(
+            "{}\
+             1 .M N... 100644 100644 100644 975fbec 975fbec 普通.txt\n\
+             1 A. N... 000000 100644 100644 0000000 3e75765 new-staged.txt\n\
+             2 R. N... 100644 100644 100644 df967b9 df967b9 R100 renamed.txt\trename-me.txt\n\
+             u UU N... 100644 100644 100644 100644 df967b9 c920b32 298b055 conflict.txt\n\
+             ? 未跟踪 目录/\n",
+            V2_HEADERS
+        );
+        let s = parse_v2_status(&out);
+        assert_eq!(s.changes.len(), 5, "四种状态行 + 一条未跟踪");
+        let paths: Vec<&str> = s.changes.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "普通.txt",
+                "new-staged.txt",
+                // ⚠️ 改名行取**新路径**：合并前那版 v1 解析也是拿 `old -> new`
+                // 的后一半。少了那一刀制表符，这里会变成"renamed.txt\trename-me.txt",
+                // 而清理那一路会去删一个磁盘上不存在的名字（阶段 17 那条老坑）
+                "renamed.txt",
+                "conflict.txt",
+                "未跟踪 目录/",
+            ],
+            "路径里可以有空格，但不能有 git 的字段"
+        );
+        assert_eq!(s.changes[0].status, ".M", "v2 用 `.` 顶替 porcelain 里的空格");
+        assert!(!s.changes[0].staged, "X 位是 `.` = 没进暂存区");
+        assert!(s.changes[1].staged, "X 位是 `A` = 进了暂存区");
+        assert!(s.changes[2].staged, "改名（X=R）算已暂存，与旧解析一致");
+        assert!(s.changes[4].untracked, "? 那一档才是未跟踪");
+        assert!(!s.changes[3].untracked, "冲突不是未跟踪");
+        assert_eq!(s.changes[4].status, "??", "未跟踪也要给界面一个两字母码");
     }
 
-    /// 重命名时 git 给 `旧 -> 新`，展示只要新的那个
+    /// 还没有任何提交：`# branch.oid (initial)`。
+    /// ⚠️ 这一档合并前后**界面会变**——以前 `rev-parse --abbrev-ref HEAD` 报 `HEAD`
+    /// （退出码 128），现在给真名 `main`。登记在路线表 32-12，等他看帧点头
     #[test]
-    fn renames_keep_only_the_new_path() {
-        let got = parse_porcelain("R  old/a.rs -> new/b.rs\n");
-        assert_eq!(got[0].path, "new/b.rs");
+    fn an_unborn_repo_reports_its_real_branch() {
+        let s = parse_v2_status("# branch.oid (initial)\n# branch.head main\n");
+        assert!(s.unborn);
+        assert_eq!(s.branch, "main");
+        assert!(!s.ab_read, "没有提交就没有上游，那一行本来不该在");
     }
 
-    /// 空输出与形状不对的行都不能变成一条假变更
+    /// 游离 HEAD。真 git 给的是 `(detached)`——**不是文档里常见的 `(no branch)`**，
+    /// 两种都认：漏了实际那种，界面上就会画出一个叫 `(detached)` 的分支
     #[test]
-    fn malformed_lines_are_skipped() {
-        assert!(parse_porcelain("").is_empty());
-        let got = parse_porcelain("\nXX\nM  ok.rs\n"); // "XX" 太短，第二行形状不对
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].path, "ok.rs");
+    fn a_detached_head_still_says_head() {
+        for raw in ["(detached)", "(no branch)"] {
+            let s = parse_v2_status(&format!("# branch.head {raw}\n"));
+            assert_eq!(s.branch, "HEAD", "{raw} 要翻成 HEAD，与合并前一致");
+        }
+    }
+
+    /// `ab_unknown` 的三档真值表。**中间那档是这一条的全部难点**：
+    /// 有上游而 `# branch.ab` 缺席（git 2.11–2.31 认 `--branch` 但不认那个 flag），
+    /// 此时 ahead/behind 都是 0，而 0/0 与"已同步"在两个数上长得一模一样
+    #[test]
+    fn unknown_is_not_the_same_as_zero() {
+        assert!(!ab_is_unknown(true, true), "有上游、读到了 ⇒ 知道");
+        assert!(ab_is_unknown(true, false), "有上游、没读到 ⇒ 不知道，不许显示 0/0");
+        assert!(
+            !ab_is_unknown(false, false),
+            "没有上游时那一行本来就不在：那一档是「没有上游」，不是「读不出来」"
+        );
+        assert!(!ab_is_unknown(false, true), "没有上游却有 ab 行（真 git 不会这样）⇒ 也不算不知道");
+    }
+
+    /// 版本判据。**纯函数注入**：不许为了测 2.31 去装一份老 git，
+    /// 也不许在单测里 `set_var` 改进程级全局（AGENTS 那条）
+    #[test]
+    fn the_version_gate_reads_the_shapes_real_git_prints() {
+        assert!(supports_ahead_behind_from(Some("git version 2.55.0.windows.2")));
+        assert!(supports_ahead_behind_from(Some("git version 2.32.0")));
+        assert!(
+            supports_ahead_behind_from(Some("git version 3.0.0")),
+            "主版本更大当然也算"
+        );
+        assert!(!supports_ahead_behind_from(Some("git version 2.31.0")));
+        assert!(!supports_ahead_behind_from(Some("git version 2.7.4 (Apple Git-66)")));
+        // 读不出来一律按"不支持"：宁可那一格显示「–」，也不许拿 0/0 冒充已同步
+        assert!(!supports_ahead_behind_from(None));
+        assert!(!supports_ahead_behind_from(Some("")));
+        assert!(!supports_ahead_behind_from(Some("git version (unknown)")));
+    }
+
+    /// 带不带那个 flag，是这一整条唯一的外部开关。**判据与命令构造分开**：
+    /// 命令构造读 `git_supports_ahead_behind()`（进程级缓存，测不到），
+    /// 而"该不该带"落在这一颗纯函数上
+    #[test]
+    fn the_flag_is_only_added_when_the_version_allows_it() {
+        let with = status_v2_args(true);
+        let without = status_v2_args(false);
+        assert!(with.iter().any(|a| a == "--ahead-behind"));
+        assert!(!without.iter().any(|a| a == "--ahead-behind"));
+        // ⚠️ `-c core.quotePath=false` 必须在，而且必须排在 `status` 之前：
+        // 实测不带它时中文路径会变成 `"\346\231\256\351\200\232.txt"`，
+        // 界面上认不出、清理还会删一个磁盘上不存在的文件名（阶段 17 同一条坑）
+        for args in [&with, &without] {
+            let i = args.iter().position(|a| a == "status").expect("得有 status");
+            assert_eq!(args[0], "-c");
+            assert_eq!(args[1], "core.quotePath=false");
+            assert!(i >= 2, "配置项要排在子命令之前，否则 git 不认");
+        }
     }
 
     /// 端到端：真仓库里改一个文件、add 一个，`changed_files` 与明细条数必须一致。

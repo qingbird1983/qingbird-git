@@ -894,8 +894,11 @@ fn short_day(date: &str) -> String {
 /// （`cargo check` 零错、`bucket_of` 的单测全绿，因为它判得**没错**，
 /// 错的是显示那一侧没接住 `Unknown`）。
 pub(crate) fn ov_status_text(b: Bucket, changed: u32, third: bool) -> String {
-    // 没扫过：措辞用 `bucket_word`——那句是**全站唯一一份**（⌘K 搜索同源）
-    if b == Bucket::Unknown {
+    // 没扫过 / 同步读不出：措辞用 `bucket_word`——那句是**全站唯一一份**（⌘K 搜索同源）。
+    // ⚠️ 两档都要在这里挡住，**不能让 `AbUnknown` 掉进下面那个 match**：
+    // 它经 `badge_kind_of` 落进 `BadgeKind::None` ⇒ 会拼出"已同步"，
+    // 而那正是这一整条链上最不能说的一句（git 太老、根本没算出领先落后）
+    if b == Bucket::Unknown || b == Bucket::AbUnknown {
         return bucket_word(b).to_string();
     }
     // 未提交与分档可重叠：分档先给出"要做什么"，未提交作为补充说明
@@ -1002,6 +1005,29 @@ mod status_tests {
         // `changed` 也不该把它变成别的结论：没扫过就是没扫过，
         // 那个数是从哪来的都不知道
         assert_eq!(ov_status_text(Bucket::Unknown, 3, false), "待扫描");
+    }
+
+    /// 32-12 新档：**问过 git 了、但它那个版本读不出领先/落后**。
+    /// 这一档最容易被兜底臂吃掉（`badge_kind_of` 有 `_` 臂、编译器不提醒），
+    /// 而吃掉的后果恰恰是这一整条链上最不能说的那句"已同步"
+    #[test]
+    fn a_repo_whose_ahead_behind_cannot_be_read_is_not_called_synced() {
+        assert_eq!(ov_status_text(Bucket::AbUnknown, 0, false), "同步未知");
+        assert_eq!(
+            ov_status_text(Bucket::AbUnknown, 0, true),
+            "同步未知",
+            "第三方也不许说成「可更新」——那是同一个谎换个说法"
+        );
+        assert_ne!(
+            ov_status_text(Bucket::AbUnknown, 0, false),
+            ov_status_text(Bucket::Synced, 0, false),
+            "「同步未知」与「已同步」必须是两句话"
+        );
+        assert_ne!(
+            ov_status_text(Bucket::AbUnknown, 0, false),
+            ov_status_text(Bucket::Unknown, 0, false),
+            "「问过了、答不上来」与「还没问」也必须是两句话"
+        );
     }
 
     /// 扫过且干净的才轮到「已同步」。**别把上一条改回去**

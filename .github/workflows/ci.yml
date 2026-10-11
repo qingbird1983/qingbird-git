@@ -1,0 +1,136 @@
+# 32-14：CI 最小档。
+#
+# 为什么只有这两条 job（登记在路线表 Q30 / 32-14）：
+# CI 能证的只有「编译得过 + 单测绿 + 机器闸不红 + 产物是那条产物」这四件事。
+# **界面它证不了**——本项目全部视觉判据靠抓帧比两帧（AGENTS「GUI 只能由用户双击 exe 验收」
+# 那条说的是「定版」，而取证本身也是窗口级动作，Windows 上没有 VisualTestContext，
+# 窗口级单测根本写不了）。⇒ 别在这里加「截图对比」这类看着全面、实际一条都跑不了的步骤。
+#
+# 为什么 runs-on 是 windows：
+# 这是 Windows 桌面工具。`windows-sys`、`tray-icon`、PE 头、Inno 全在 Windows 侧，
+# 拿到 ubuntu runner 上编不过的那些东西正好是**要验的那一层**。
+#
+# ⚠️ 这一份工作流**在本机没有真跑过**（推送与建 Actions 运行归人）。
+# 它要跑的四条命令在本地全是绿的；CI 环境本身（runner 镜像、choco 装 Inno、
+# gpui 在 Server 上的编译）属于**未验证**，第一次 push 之后要按实际红条逐条修。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── ① 每次 push / PR 都跑的闸门 ──────────────────────────────────────
+  # 四步就是本地收尾那四步，一个不多：
+  # `cargo check --workspace` → core 单测 → gui 单测 → 设计令牌闸。
+  # ⚠️ gui 那个包**只有 bin target**，写 `--lib` 会直接报
+  # "no library targets found in package qingbird-gui"——本地踩过，这里按全名写死。
+  gate:
+    name: 闸门（check + 两套单测 + 令牌闸）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 缓存 crates.io 的下载
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+        # ⚠️ **故意不缓存 `target/`**。它确实能省十几分钟，但里面是编译产物：
+        # 一旦某次污染（半截的 .dll / .lib），下一轮可能**掩盖一条真实的编译错误**——
+        # 而"该红的没红"比慢十分严重得多。只缓存下载（源码级的东西，坏了会重新解包）
+
+      - name: 给 git 一个身份
+        run: |
+          git config --global user.name "qingbird-ci"
+          git config --global user.email "ci@invalid"
+        # 为什么必须设：core 的 `init_repo` / 提交类用例要**真跑一次 `git commit`**
+        # （验 `.gitignore` 追加与初始提交，见 AGENTS 那条「跑完测试核对它没往真实目录写」）。
+        # runner 上的 git 没有全局身份 ⇒ `git commit` 直接失败，
+        # 那是一条与本次改动无关的红，而且症状长得像"提交功能坏了"
+
+      - name: cargo check --workspace
+        run: cargo check --workspace
+
+      - name: core 单测
+        run: cargo test -p qingbird-core
+
+      - name: gui 单测（只有 bin target）
+        run: cargo test -p qingbird-gui --bin qingbird-git
+
+      - name: 设计令牌闸
+        run: python scripts/check_design_tokens.py
+        # 这条闸的七条规则里有一条抓的是「同一个属性两个名字」——编译器看不见那一类
+        # （AGENTS R7），所以只能靠它。它红的时候**没有一条 cargo 会跟着红**
+
+  # ── ② 打包只在标签上跑 ────────────────────────────────────────────────
+  # 与 AGENTS 的发版流程同序：版本号只在根 `Cargo.toml` 一处（32-13 收成单源）→
+  # 附注标签 → 编 release → ISCC → 产物只进 Release 资产、从不进仓库。
+  # ⚠️ 这里**只上传 artifact、不 publish Release**：发布是有副作用的动作，归人
+  # （`gh release create ... --verify-tag`），CI 不替人按那个按钮。
+  installer:
+    name: 安装包（只在 tag 上）
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: gate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 标签与 Cargo.toml 必须是同一个数
+        shell: python
+        run: |
+          import os, re, sys
+          tag = os.environ["GITHUB_REF_NAME"]
+          txt = open("Cargo.toml", encoding="utf-8").read()
+          m = re.search(r'(?s)\[workspace\.package\].*?version\s*=\s*"([^"]+)"', txt)
+          if not m:
+              sys.exit("读不到根 Cargo.toml 的 [workspace.package].version")
+          ver = m.group(1)
+          if tag != "v" + ver:
+              sys.exit(f"标签 {tag} 与 Cargo.toml 的 {ver} 不是同一个数")
+          print(f"版本号单源一致：{ver}")
+        # 加这一步的理由：以前版本号手写三处，**只改一两处不会有任何报错**（32-13）。
+        # 单源之后剩下的唯一失误方式是「忘了改就打的标签」——
+        # 它会让包里的版本与界面读出来的版本不是同一个数，而两边各自都"对"
+
+      - name: 装 Inno Setup 6
+        run: choco install innosetup -y --no-progress
+        # 落点是 `%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe`，
+        # 正好是 `build_installer.ps1` 探测的那三条路径里的第二条 ⇒ 脚本不用为 CI 改一行
+
+      - name: 编 release 并打包
+        run: pwsh scripts/build_installer.ps1
+        # release 与 debug 是两条产物路径，安装包只能走 release 这条（AGENTS 那条）。
+        # 脚本自己会先 `cargo build --workspace --release`
+
+      - name: 产物必须是 GUI 子系统
+        run: python scripts/pe_subsystem.py target/release/qingbird-git.exe
+        # ⛔ 这条不是仪式感：`gui/src/main.rs` 那行 `cfg_attr(...windows_subsystem...)`
+        # 写错位置时**构建全绿而 exe 仍是 console 子系统**，用户双击必带黑终端。
+        # 判据取产物 PE 头偏移 68 那个 WORD（2 = GUI），不取「代码写了」
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: qingbird-git-installer-${{ github.ref_name }}
+          path: dist/qingbird-git-Setup-*.exe
+        # ⚠️ 文件名不带 `v`（`OutputBaseFilename` 用的是裸的 `0.1.0`），
+        # 照 `Setup-vX.Y.Z.exe` 去 glob 会得到一个不存在的文件

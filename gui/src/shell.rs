@@ -1780,15 +1780,14 @@ impl Shell {
                             .iter()
                             .map(|p| {
                                 s.spawn(move || {
-                                    (
-                                        p.clone(),
-                                        repos::read_status(p),
-                                        // 一条 `git status --porcelain` 同时给个数和文件名。
-                                        // 以前这里跑的是 `changed_files`，跑的是同一条命令、
-                                        // 只把结果数了一下行——提交对话框与检视抽屉要的
-                                        // 变更清单就是这批输出的另一半，等于白丢
-                                        repos::changed_entries(p),
-                                    )
+                                    // 32-12：**一次扫描、一份输出**。这里以前各叫一次
+                                    // `read_status` 与 `changed_entries`，而两者都要问
+                                    // `git status`——同一条命令在同一轮里跑两遍。
+                                    // `scan_repo` 用一条 `--porcelain=v2 --branch
+                                    // --ahead-behind` 同时供出状态与清单，
+                                    // 每颗仓库的 git 子进程 7 条 → 3 条
+                                    let (st, changes) = repos::scan_repo(p);
+                                    (p.clone(), st, changes)
                                 })
                             })
                             .collect();

@@ -486,6 +486,9 @@ mod tests {
                 upstream: "origin/main".into(),
                 remote_url: "https://example/x.git".into(),
                 stash_count: 0,
+                // 32-12 新加的那一格也要走这条往返断言：它是**极性挑过**的
+                // （`unknown = true` 才让老库读成"数字可信"），没验就等于没挑
+                ab_unknown: true,
             },
             changed: 3,
             // ⚠️ 这两格是 32-10 补进样例的：GUI 那一侧「缓存里的快捷命令能不能
@@ -532,6 +535,10 @@ mod tests {
         );
         assert_eq!(back.detected.test_cmd, "cargo test");
         assert_eq!(back.detected.build_cmd, "cargo build --release");
+        assert!(
+            back.status.ab_unknown,
+            "「领先/落后读不出来」这一格必须活过一次序列化——它是界面显示数字还是「–」的判据"
+        );
         assert_eq!(back.langs.len(), 1);
         assert_eq!(
             back.readme_text.as_deref(),
@@ -562,6 +569,46 @@ mod tests {
         let _db = TempDb::new("missing");
         assert!(load_cache("F:\\根本没扫过").is_none());
         // 语义统一成"没扫过"，界面那层就不必区分"没有"与"读坏了"
+    }
+
+    /// 老库（**payload 里没有 `ab_unknown` 这一格**）读回来必须还是"数字可信"。
+    ///
+    /// 这一条钉的是 32-12 那个**命名极性**：字段叫 `ab_unknown` + `serde(default)`，
+    /// 老 payload 缺它 ⇒ `false` ⇒ 升级之后每个人原来的领先/落后照旧显示数字。
+    /// 当初若命名成 `ab_read`，同一次升级会把所有人的那一格一夜变成「–」，
+    /// 而那**看起来不像缺陷、只像"升级了一下"**——最难查回来的一种回归
+    #[test]
+    fn an_old_payload_without_the_new_fields_still_reads_its_numbers() {
+        let _g = APPDATA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _db = TempDb::new("oldpayload");
+        let db = db_path().expect("TempDb 已把 APPDATA 指到沙箱");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO scan_cache (path, scanned_at, payload) VALUES (?1,?2,?3)",
+                rusqlite::params![
+                    "F:\\old",
+                    1_700_000_000i64,
+                    r#"{"status":{"is_repo":true,"branch":"main","ahead":2,"behind":1,
+                       "dirty":false,"has_upstream":true,"upstream":"origin/main",
+                       "remote_url":"x"},"scanned_at":1700000000}"#
+                ],
+            )
+            .unwrap();
+        }
+        let back = load_cache("F:\\old").expect("老 payload 读不出来");
+        assert_eq!(back.status.ahead, 2, "老库里那两个数照旧");
+        assert_eq!(back.status.behind, 1);
+        assert!(
+            !back.status.ab_unknown,
+            "缺这一格 ⇒ 数字可信。极性选反的话这次升级会让所有人那一格变成「–」"
+        );
+        assert!(
+            !back.status_read,
+            "老库里没有「读过 git」那一格 ⇒ 只能当没读过（少说一句已知，不多编一句未知）"
+        );
     }
 
     #[test]

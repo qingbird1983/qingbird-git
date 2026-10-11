@@ -774,6 +774,7 @@ mod tests {
             upstream: upstream.into(),
             remote_url: String::new(),
             stash_count: 0,
+            ab_unknown: false,
         }
     }
 

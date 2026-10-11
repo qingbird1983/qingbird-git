@@ -674,7 +674,9 @@ pub(crate) fn bucket_icon(b: Bucket) -> AssetIcon {
         Bucket::Ahead => AssetIcon::ArrowUp,
         Bucket::Behind => AssetIcon::ArrowDown,
         Bucket::Forked => AssetIcon::GitMerge,
-        Bucket::Unknown => AssetIcon::Circle,
+        // 「待扫描」与「同步未知」同形（空心圆）：**这一档的共同点是"没有要动手的事
+        // 可指"**，而它们的话术差别在文字那一格（`bucket_word` 是两句话）
+        Bucket::Unknown | Bucket::AbUnknown => AssetIcon::Circle,
     }
 }
 
@@ -734,6 +736,9 @@ pub(crate) fn badge_kind_of(b: Bucket, changed: u32) -> BadgeKind {
         // 没扫过不是"没消息"，它落进 `None` 只是因为「没有要动手的事」，
         // 显示那一侧另有分支（`ov_status_text`）
         Bucket::Unknown => BadgeKind::None,
+        // ⚠️ **写明白，别让它从 `_` 那两行兜底臂里滑过去**：新加一档时编译器
+        // 不会提醒这里（有 `_` 臂就够穷尽了），而滑过去的后果是状态列说"已同步"
+        Bucket::AbUnknown => BadgeKind::None,
         // 未提交与上面几档可重叠，是独立维度，所以放在后面兜底
         _ if changed > 0 => BadgeKind::Dirty,
         _ => BadgeKind::None,
@@ -769,13 +774,24 @@ pub(crate) fn badge_tone(
         BadgeKind::Ahead => tone(kind, t.colors.accent, blue_bg(t)),
         BadgeKind::Dirty => tone(kind, t.colors.accent, blue_bg(t)),
         // `None` 有两条来路，显示必须分开：
-        // **没扫过** → 中性灰。它进不了「需要动手」那一列，不该穿行动色；
-        // 同一行里状态点是灰的（`dot_color` 的 Unknown 档 = border），
+        // **「不知道」这一族** → 中性灰。它进不了「需要动手」那一列，不该穿行动色；
+        // 同一行里状态点是灰的（`dot_color` 的 Unknown / AbUnknown 档 = `edge(t)`），
         // 胶囊若是蓝的，一行两种语气。形状仍是 `None`，
         // 侧栏那一格因此什么都不画，与「徽标只放要动手的数字」一致
-        BadgeKind::None if b == Bucket::Unknown => tone(kind, tier3(t), track(t)),
+        BadgeKind::None if badge_is_neutral(b) => tone(kind, tier3(t), track(t)),
         BadgeKind::None => tone(kind, t.colors.accent, blue_bg(t)),
     }
+}
+
+/// 哪些档属于「我不知道」——它们的状态胶囊走中性灰，不许穿行动色。
+///
+/// ⚠️ 这一格原来写的是 `b == Bucket::Unknown`。32-12 新加 `AbUnknown`（领先/落后读不出）
+/// 那一档时，状态点给的是中性灰（`dot_color` 里 `Unknown | AbUnknown` 同一臂），
+/// **这一臂却从 `_` 滑进了行动青** ⇒ 帧上拍到"左列的点是空心灰、右列的胶囊是青底"，
+/// 同一行两种语气。⇒ 判据抽成纯函数钉住，别再靠"下一次记得改两处"
+/// （阶段 16 那条「没扫过不许穿行动色」是同一条规则的第一个落点）
+pub(crate) fn badge_is_neutral(b: Bucket) -> bool {
+    matches!(b, Bucket::Unknown | Bucket::AbUnknown)
 }
 
 /// 分档徽标的档位。单独一个类型而不是直接给字符串：
@@ -830,5 +846,32 @@ fn no_repos(group: Group, other_has_repos: bool, t: &Theme) -> Div {
 fn notify_err(r: Result<(), String>, window: &mut Window, cx: &mut App) {
     if let Err(e) = r {
         window.push_notification(e, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 「我不知道」那一族**只有两档，且两档都必须中性**。
+    ///
+    /// 32-12 加 `AbUnknown` 的时候，状态点跟上了（`dot_color` 里 `Unknown | AbUnknown`
+    /// 同一臂），状态胶囊没跟上（那一臂写的是 `b == Bucket::Unknown`）⇒
+    /// 帧上拍到"左列的点是空心灰、右列的胶囊是青底"，同一行两种语气。
+    /// 变异验证：把 `badge_is_neutral` 改回只认 `Unknown` ⇒ 精确红在这一条
+    #[test]
+    fn the_two_unknown_buckets_are_neutral_and_every_verdict_is_not() {
+        for b in [Bucket::Unknown, Bucket::AbUnknown] {
+            assert!(badge_is_neutral(b), "{b:?} 是「不知道」，不该穿行动色");
+        }
+        for b in [
+            Bucket::Synced,
+            Bucket::Dirty,
+            Bucket::Ahead,
+            Bucket::Behind,
+            Bucket::Forked,
+        ] {
+            assert!(!badge_is_neutral(b), "{b:?} 是一个结论，不该中性");
+        }
     }
 }
