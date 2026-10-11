@@ -41,7 +41,13 @@
 
 #define MyAppName       "青鸟 Git"
 #define MyAppNameEn     "Qingbird Git"
-#define MyAppVersion    "0.1.0"
+; ⛔ **版本号不在这里写**（32-13）：单源是仓库根 `Cargo.toml` 的
+; `[workspace.package].version`，由 `scripts/build_installer.ps1` 读它再传
+; `/DMyAppVersion=`。这一处以前是手写的第三个出处，而"只改一两处不会有任何报错"。
+; 现在没传就直接 `#error`——**让"忘"没有选项**（与上面 `SetupIcon` 同一写法）
+#ifndef MyAppVersion
+  #error 版本号请由 scripts/build_installer.ps1 传入（单源在 Cargo.toml 的 [workspace.package].version），别在这里写第二处
+#endif
 #define MyAppPublisher  "qingbird"
 #define MyAppExeName    "qingbird-git.exe"
 #define MyAppMutex      "qingbird-git-single-instance"

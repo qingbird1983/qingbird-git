@@ -1,3 +1,13 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "gui"]
+
+# ⛔ **全项目版本号的唯一出处就是下面这一行**（32-13）。
+# 以前它手写在三处：`gui/Cargo.toml`、`crates/core/Cargo.toml`、`installer.iss` 的
+# `#define MyAppVersion`——**只改一两处不会有任何报错**。
+# 现在两个包都写 `version.workspace = true` 继承这里，安装包那一处由
+# `scripts/build_installer.ps1` 读本行后用 `/DMyAppVersion=` 传进 ISCC，
+# 而 `installer.iss` 里改成了「没传就 `#error`」——**让"忘"没有选项（D78）**。
+# ⚠️ 发版时只改这一行，然后打标签 `vX.Y.Z`（标签带 `v`、包名不带）。
+[workspace.package]
+version = "0.1.0"

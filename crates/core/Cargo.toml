@@ -1,6 +1,7 @@
 [package]
 name = "qingbird-core"
-version = "0.1.0"
+# 版本号单源在仓库根 `Cargo.toml` 的 `[workspace.package]`（32-13），别在这里写第二处
+version.workspace = true
 edition = "2021"
 description = "qingbird-git 纯逻辑后端：git 子进程封装 / 代理探测 / 配置存储 / IPC 数据结构"
 

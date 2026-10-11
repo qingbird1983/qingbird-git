@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    一条命令出安装包：`qingbird-git-Setup-0.1.0.exe`
+    一条命令出安装包：`qingbird-git-Setup-<版本>.exe`（版本号单源见 Cargo.toml）
 
 .DESCRIPTION
     两步：
@@ -27,6 +27,18 @@ param([switch]$SkipBuild)
 
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
+
+# ──  版本号：单源是 Cargo.toml 的 [workspace.package].version ────────────
+# 32-13。以前这个数手写在三个地方（gui/Cargo.toml、crates/core/Cargo.toml、
+# installer.iss 的 #define MyAppVersion），而**只改一两处不会有任何报错**。
+# 现在两个包都 `version.workspace = true` 继承根表，这里读同一处传给 ISCC；
+# installer.iss 那边改成了「没传就 #error」，所以绕开本脚本直接跑 ISCC 也不行。
+$rootToml = Get-Content 'Cargo.toml' -Raw
+if ($rootToml -notmatch '(?s)\[workspace\.package\].*?version\s*=\s*"([^"]+)"') {
+    throw "Cargo.toml 里找不到 [workspace.package] 的 version——版本号单源就是那一行"
+}
+$ver = $Matches[1]
+Write-Host "版本: $ver（单源：Cargo.toml [workspace.package].version）"
 
 # ── ISCC 在哪 ────────────────────────────────────────────────────────────
 # 查过本机：Inno Setup 6 已装；NSIS / WiX / cargo-wix / cargo-bundle 一个都没有。
@@ -70,7 +82,7 @@ python scripts\add_bom.py installer.iss
 python scripts/add_bom.py 'packaging\lang\zhCN.isl'
 
 Write-Host "`n==> ISCC"
-& $iscc "/DMyAppExe=$exe" "/DSetupIcon=$($ico.FullName)" installer.iss
+& $iscc "/DMyAppVersion=$ver" "/DMyAppExe=$exe" "/DSetupIcon=$($ico.FullName)" installer.iss
 if ($LASTEXITCODE -ne 0) { throw "ISCC 失败" }
 
 $setup = Get-ChildItem 'dist' -Filter 'qingbird-git-Setup-*.exe' |

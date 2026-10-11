@@ -196,10 +196,16 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
 出安装包：`pwsh scripts/build_installer.ps1`（顺带编 release；
 已编过只想重打包就加 `-SkipBuild`）→ `dist/qingbird-git-Setup-0.1.0.exe`（~9 MB）
 - **发版流程（2026-10-10 第一次跑通 v0.1.0，顺序固定）**：
-  ① **版本号写在三处、必须一起改**——`gui/Cargo.toml`、`crates/core/Cargo.toml`、
-  `installer.iss` 的 `#define MyAppVersion`。⚠️ **只改一两处不会有任何报错**，
-  后果是"包里写的版本与界面读出来的版本不是同一个数"（`cargo` 那份进 `env!`/关于框，
-  `.iss` 那份进文件名与注册表显示名）。
+  ① **版本号只有一个出处**（32-13 起）：仓库根 `Cargo.toml` 的
+  `[workspace.package].version`。`gui/Cargo.toml` 与 `crates/core/Cargo.toml` 都写
+  `version.workspace = true` 继承它，`installer.iss` 里**不再有那一行 `#define`**——
+  改成 `#ifndef MyAppVersion / #error`，由 `scripts/build_installer.ps1` 读根表再
+  `/DMyAppVersion=` 传进来。**绕开脚本直接跑 ISCC 会 `Compile aborted`（实测，退出码 2）**，
+  这就是 D78 的落法：让"忘"没有选项，而不是靠人记得改三处。
+  ⚠️ **旧版本这条写着"三处必须一起改，否则界面读出来的版本与包里不一致"——那是假话**：
+  全仓 `env!("CARGO_PKG_VERSION")` **零读者**，界面也没有"关于"那一格，三处里只有 `.iss`
+  那处有读者（包文件名 / 注册表显示名 / exe 的 FileVersion）。⇒ 反过来开 **Q38**：
+  用户手上没有任何地方能看出自己跑的是哪一版，要不要补一格由他拍
   ② 提交 → ③ **附注**标签 `git tag -a vX.Y.Z`（附注才带说明，轻量标签在 Release 上读不出内容）
   → ④ `git push origin main vX.Y.Z` → ⑤ 在**标签那条提交**上 `pwsh scripts/build_installer.ps1`
   → ⑥ `gh release create vX.Y.Z dist/qingbird-git-Setup-X.Y.Z.exe --verify-tag`
