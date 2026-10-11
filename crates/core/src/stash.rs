@@ -176,6 +176,112 @@ pub fn count(repo_path: &str) -> usize {
     list(repo_path).len()
 }
 
+/// 一条暂存里某个文件属于哪一种情况。
+///
+/// ⚠️ **`Untracked` 与 `Added` 是两档，不能并成一档**：`Added` 是"已经 `git add` 过、
+/// 在索引里"，`Untracked` 是"从没被 git 认识过的新文件"（存在第三个父提交里）。
+/// 对用户来说后者更要紧——那种文件**不在任何地方**，工作区一清就没了，
+/// 而它恰好是 `stash show` 默认看不见的那一半
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StashFileKind {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Untracked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StashFile {
+    pub path: String,
+    pub kind: StashFileKind,
+}
+
+/// `--name-status` 那一路输出的纯解析。**拆出来才有单测**：走真 git 的那一条
+/// 只能测"跑通了"，测不到"认不出来时不猜"。
+///
+/// 形状（真 git 2.55 实测）：`M\tpath`、`D\tpath`、`A\tpath`、
+/// `R100\t旧路径\t新路径`（**改名有两个字段**，且状态码带相似度数字）
+pub fn parse_name_status(stdout: &str) -> Vec<StashFile> {
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let mut cols = line.split('\t');
+        let (Some(code), Some(path)) = (cols.next(), cols.next()) else {
+            continue; // 少一列 = git 换了格式或我们拼错了参数，跳过不猜
+        };
+        let kind = match code.trim().chars().next() {
+            Some('M') => StashFileKind::Modified,
+            Some('A') => StashFileKind::Added,
+            Some('D') => StashFileKind::Deleted,
+            // R / C 都带相似度数字（`R100`、`C75`），所以只认首字母
+            Some('R') | Some('C') => StashFileKind::Renamed,
+            // ⚠️ 认不出来的状态码**跳过**，不许折成"改了"：折了就会把一条
+            // 我们看不懂的变化说成看得懂的那种
+            _ => continue,
+        };
+        let path = if kind == StashFileKind::Renamed {
+            match cols.next() {
+                Some(new) if !new.is_empty() => format!("{path} → {new}"),
+                _ => path.to_string(),
+            }
+        } else {
+            path.to_string()
+        };
+        out.push(StashFile { path, kind });
+    }
+    out
+}
+
+/// 第 `index` 条里到底是哪几个文件（32-7）。
+///
+/// ⚠️ **`Some(空表)` 与 `None` 是两句话**，这一档不能省：前者是"这一条真的没有文件
+/// 变化"，后者是"我们没读到"（不是仓库 / 序号已经被别的操作移走了）。把后者报成前者
+/// 就是"这一条是空的"这种假话——与阶段 16 那条「没扫过不许写成已同步」同族。
+///
+/// ⚠️ **两条命令，不是一条**：`stash show` 只看已跟踪那一半（`list` 的注释里
+/// 32-2 就登记过这件事），未跟踪的那些存在**第三个父提交** `stash@{N}^3` 里。
+/// 只做第一条的结果是**少报**，而少的恰好是"工作区一清就没了"的那一类文件
+pub fn files_at(repo_path: &str, index: u32) -> Option<Vec<StashFile>> {
+    // ⚠️ `-c core.quotePath=false` 与 32-6 那条同一条纪律：不带它，中文文件名
+    // 会输出成一串八进制转义码。而且它必须排在子命令之前
+    let sel = format!("stash@{{{index}}}");
+    let tracked = run_local(
+        repo_path,
+        &["-c", "core.quotePath=false", "stash", "show", "--name-status", sel.as_str()],
+    );
+    if !tracked.success {
+        return None;
+    }
+    let mut files = parse_name_status(&tracked.stdout);
+
+    let third = format!("{sel}^3");
+    let untracked = run_local(
+        repo_path,
+        &["-c", "core.quotePath=false", "show", "--name-status", "--format=", third.as_str()],
+    );
+    if !untracked.success {
+        // **没藏未跟踪文件时这一条必然失败**（真 git 2.55 实测退出码 128：
+        // `unknown revision`），那是正常情况，不是读不出。
+        // ⚠️ 但**别的失败不能一起当成"没有"**——那样就是少报。认这一种失败
+        let msg = format!("{}{}", untracked.stderr, untracked.stdout);
+        if !msg.contains("unknown revision") {
+            return None;
+        }
+    } else {
+        // ^3 里的每一条都是"从没被 git 认识过"的，状态码本身是 `A`，
+        // 但语义与索引里的 `A` 不同 ⇒ 整批改标成 `Untracked`
+        files.extend(parse_name_status(&untracked.stdout).into_iter().map(|f| StashFile {
+            kind: StashFileKind::Untracked,
+            ..f
+        }));
+    }
+    Some(files)
+}
+
 /// 动手之前**当场**重读一次清单，确认第 `index` 条还是用户点的那一条。
 ///
 /// 为什么必须有：`drop` 之后所有序号整体前移，界面拿着旧快照点第二条就会动到第三条，
@@ -446,10 +552,9 @@ mod tests {
         out
     }
 
-    /// 造一个"有一条青鸟藏的暂存"的仓库：改一个已跟踪文件 + 造一个未跟踪文件，
-    /// 然后 `stash push -u`。**未跟踪那一条必须一起造**——`-u` 收走的就是它，
-    /// 而"取回之后文件回没回来"要看它才算数
-    fn parked() -> Fixture {
+    /// 只有一步提交、工作区干净、**清单是空的**那一间仓库。
+    /// 32-7 那两条要用它：一条"只藏了未跟踪文件"的暂存、和"问一条不存在的序号"
+    fn fresh_repo() -> Fixture {
         let _git_lock = crate::git::GIT_TEST_LOCK
             .read()
             .unwrap_or_else(|e| e.into_inner());
@@ -469,10 +574,18 @@ mod tests {
         std::fs::write(work.join("tracked.txt"), "原始\n").unwrap();
         ok(&work, &["add", "tracked.txt"]);
         ok(&work, &["commit", "-q", "-m", "base"]);
-        std::fs::write(work.join("tracked.txt"), "改了没提交\n").unwrap();
-        std::fs::write(work.join("scratch.txt"), "未跟踪\n").unwrap();
-        ok(&work, &["stash", "push", "-u", "-m", MSG_PULL]);
         Fixture { root, work, _git_lock }
+    }
+
+    /// 造一个"有一条青鸟藏的暂存"的仓库：改一个已跟踪文件 + 造一个未跟踪文件，
+    /// 然后 `stash push -u`。**未跟踪那一条必须一起造**——`-u` 收走的就是它，
+    /// 而"取回之后文件回没回来"要看它才算数
+    fn parked() -> Fixture {
+        let f = fresh_repo();
+        std::fs::write(f.work.join("tracked.txt"), "改了没提交\n").unwrap();
+        std::fs::write(f.work.join("scratch.txt"), "未跟踪\n").unwrap();
+        ok(&f.work, &["stash", "push", "-u", "-m", MSG_PULL]);
+        f
     }
 
     fn path(f: &Fixture) -> String {
@@ -618,5 +731,133 @@ mod tests {
             "用户入口拿到槽之后那颗标记还立着 ⇒ 清除没人负责：{}",
             alive.stderr
         );
+    }
+
+    // ── 32-7：这一条里到底是哪几个文件 ───────────────────────────────────────
+
+    #[test]
+    fn parse_name_status_reads_every_shape_git_actually_prints() {
+        // 四种状态码 + 两种畸形。形状取自真 git 2.55 实测（不是文档抄的）：
+        // `A\t…`、`D\t…`、`R100\t旧\t新`、`M\t…`
+        let got = parse_name_status("A\tadded.txt\nD\tgone.txt\nR100\told.txt\tnew.txt\nM\ttracked.txt\n");
+        assert_eq!(
+            got,
+            vec![
+                StashFile { path: "added.txt".into(), kind: StashFileKind::Added },
+                StashFile { path: "gone.txt".into(), kind: StashFileKind::Deleted },
+                // 改名合成一格：只报新名的话，用户会找不到"它原来是哪个"
+                StashFile { path: "old.txt → new.txt".into(), kind: StashFileKind::Renamed },
+                StashFile { path: "tracked.txt".into(), kind: StashFileKind::Modified },
+            ]
+        );
+
+        // 认不出来的状态码**跳过**，不许折成"改了"
+        assert!(parse_name_status("T\tsomething.txt\n").is_empty());
+        // 少一列（git 换了格式 / 我们拼错参数）也跳过，不拿空串填进去
+        assert!(parse_name_status("M\n").is_empty());
+        // 空行与只有空白
+        assert!(parse_name_status("\n   \n").is_empty());
+    }
+
+    /// 四档齐全的一条暂存：改 / 删 / 改名 / 索引里的新文件 / 未跟踪。
+    /// ⚠️ **中文文件名各放一颗**：已跟踪那一颗走第一条命令，未跟踪那一颗走 `^3`——
+    /// 两条命令是两个出处，只测后者的话，把前者的 `core.quotePath=false` 删掉
+    /// 一条测试都不会红（32-7 变异 M5 第一次就是这么暴露的）
+    fn parked_every_shape() -> Fixture {
+        let f = fresh_repo();
+        let w = &f.work;
+        // `fresh_repo` 已经提过 base 那一笔，这里只补要动的那几颗——
+        // 再 `add -A` + `commit` 一次会撞上"没有东西可提交"（git 返回非零）
+        std::fs::write(w.join("gone.txt"), "要删的\n").unwrap();
+        std::fs::write(w.join("old.txt"), "要改名的内容\n").unwrap();
+        std::fs::write(w.join("中文 说明.md"), "第一版\n").unwrap();
+        ok(w, &["add", "-A"]);
+        ok(w, &["commit", "-q", "-m", "more base"]);
+        std::fs::write(w.join("tracked.txt"), "改了没提交\n").unwrap();
+        std::fs::write(w.join("中文 说明.md"), "改了没提交的中文说明\n").unwrap();
+        ok(w, &["rm", "-q", "gone.txt"]);
+        ok(w, &["mv", "old.txt", "new.txt"]);
+        std::fs::write(w.join("added_tracked.txt"), "索引里的新文件\n").unwrap();
+        ok(w, &["add", "added_tracked.txt"]);
+        std::fs::write(w.join("scratch.txt"), "未跟踪\n").unwrap();
+        std::fs::write(w.join("中文 文件.txt"), "中文未跟踪\n").unwrap();
+        ok(w, &["stash", "push", "-u", "-m", MSG_PULL]);
+        f
+    }
+
+    #[test]
+    fn the_file_list_of_a_real_stash_has_both_halves() {
+        // ⚠️ **这一条是"少报"的闸**：`stash show` 只看已跟踪那一半，未跟踪的存在
+        // `stash@{N}^3` 里。把第二条命令删掉，这里就只剩 tracked.txt 一颗——
+        // 而界面上那句"这一条里有 1 个文件"听起来完全正常
+        let f = parked();
+        let got = files_at(&path(&f), 0).expect("读到得出来");
+        assert!(
+            got.contains(&StashFile { path: "tracked.txt".into(), kind: StashFileKind::Modified }),
+            "已跟踪那处改动：{got:?}"
+        );
+        assert!(
+            got.contains(&StashFile {
+                path: "scratch.txt".into(),
+                kind: StashFileKind::Untracked
+            }),
+            "未跟踪那一半必须在（^3 那一路）：{got:?}"
+        );
+        assert_eq!(got.len(), 2, "{got:?}");
+    }
+
+    #[test]
+    fn every_kind_shows_up_when_git_really_made_them() {
+        // 五种档位一次钉全，顺带钉中文文件名**原样可读**
+        // （不带 `-c core.quotePath=false` 时 git 输出的是一串八进制转义码——
+        // 与 32-6 同一条纪律，而这一档只有真 git 能证）
+        let f = parked_every_shape();
+        let got = files_at(&path(&f), 0).expect("读到得出来");
+        for want in [
+            StashFile { path: "tracked.txt".into(), kind: StashFileKind::Modified },
+            // 已跟踪那一路的中文名（第一条命令的输出），与下面那颗未跟踪的是两个出处
+            StashFile { path: "中文 说明.md".into(), kind: StashFileKind::Modified },
+            StashFile { path: "gone.txt".into(), kind: StashFileKind::Deleted },
+            StashFile { path: "old.txt → new.txt".into(), kind: StashFileKind::Renamed },
+            StashFile { path: "added_tracked.txt".into(), kind: StashFileKind::Added },
+            StashFile { path: "scratch.txt".into(), kind: StashFileKind::Untracked },
+            StashFile { path: "中文 文件.txt".into(), kind: StashFileKind::Untracked },
+        ] {
+            assert!(got.contains(&want), "缺 {want:?}\n实得 {got:?}");
+        }
+        assert_eq!(got.len(), 7, "{got:?}");
+        let joined = got.iter().map(|f| f.path.as_str()).collect::<Vec<_>>().join(" ");
+        assert!(!joined.contains("\\3"), "出现八进制转义就是 quotePath 没关掉：{joined}");
+    }
+
+    #[test]
+    fn an_untracked_only_stash_is_not_reported_as_empty() {
+        // 真 git 实测：只藏了未跟踪文件时 `stash show --name-status` **成功但输出空**。
+        // ⇒ "第一条命令是空的"绝不能当成"这一条没有文件"，否则少报的正是
+        // "工作区一清就没了"的那一类
+        let f = fresh_repo();
+        std::fs::write(f.work.join("only-new.txt"), "只有新文件\n").unwrap();
+        ok(&f.work, &["stash", "push", "-u", "-m", "只藏新文件"]);
+        let got = files_at(&path(&f), 0).expect("读到得出来");
+        assert_eq!(
+            got,
+            vec![StashFile {
+                path: "only-new.txt".into(),
+                kind: StashFileKind::Untracked
+            }]
+        );
+    }
+
+    #[test]
+    fn a_stash_that_is_not_there_is_not_the_same_as_an_empty_one() {
+        // `None` = "我们没读到"（序号被别的操作移走了 / 不是仓库）；
+        // `Some(空表)` = "这一条真的没有文件变化"。并成一句就是假话
+        let f = parked();
+        assert!(files_at(&path(&f), 7).is_none(), "问一条不存在的序号要说读不出");
+        // 不是仓库的那一格同样只能报"读不出"
+        let not_a_repo = std::env::temp_dir().join(format!("qbg-stash-notrepo-{}", std::process::id()));
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+        assert!(files_at(&not_a_repo.to_string_lossy(), 0).is_none());
+        let _ = std::fs::remove_dir_all(&not_a_repo);
     }
 }
