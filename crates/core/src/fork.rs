@@ -138,17 +138,71 @@ fn first_error_line(o: &git::GitOutput) -> Option<String> {
         .or_else(|| lines.last().cloned())
 }
 
+/// 冲突中的文件清单（`git diff --name-only --diff-filter=U`）。
+///
+/// ⚠️ **必须在 `rebase --abort` 之前问**：abort 会把 index 复原、U 位全部清掉，
+/// 之后再问就是一张空表——那等于把"用户看不到冲在哪几个文件"这句话**假装修好了**，
+/// 而且不报错、不改任何功能（32-6 要挡的正是这个）。
+/// ⚠️ 读不出来（不是仓库 / 命令失败）也给空表，由 `conflict_note` 那边说"没点到名"，
+/// 不假装"没有冲突"。
+/// ⚠️ **`-c core.quotePath=false` 必须带着，而且必须排在 `diff` 之前**（实测：不带时
+/// 中文文件名输出成 `"\344\270\255\346\226\207 \346\226\207\344\273\266.txt"`，
+/// 用户看到的是一串八进制码而不是文件名）。与 `repos.rs` 那条 status 命令同一条纪律
+fn conflicted_files(local: LocalRun<'_>) -> Vec<String> {
+    let o = local(&[
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--name-only",
+        "--diff-filter=U",
+    ]);
+    if !o.success {
+        return Vec::new();
+    }
+    o.stdout.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
+/// 把冲突清单拼成一句话。**上限五颗**——告警那一格只有那么宽，
+/// 而"还有多少颗"这个数字比第五个文件名更有用（用户据此决定去不去终端看）。
+///
+/// 空表必须**有自己那句话**：拼成「冲突的文件：」后面什么都没有，
+/// 比不拼更坏（那是 AGENTS 里「控件禁用了但话还说错了」的同族）。
+fn conflict_note(files: &[String]) -> String {
+    const CAP: usize = 5;
+    if files.is_empty() {
+        return "这次没能读出具体是哪几个文件（可能是未跟踪文件挡了路），请在终端跑一次 git status".to_string();
+    }
+    let head = files.iter().take(CAP).cloned().collect::<Vec<_>>().join("、");
+    if files.len() > CAP {
+        format!("冲突的文件：{head} 等 {} 个", files.len())
+    } else {
+        format!("冲突的文件：{head}")
+    }
+}
+
 /// 变基失败时的结论：中文说明比 git 原文更有用，所以只在拿不出结论时兜底用原文
-fn rebase_failure_message(o: &git::GitOutput, used_proxy: Option<&str>, aborted: bool) -> String {
-    if aborted {
-        return "变基遇到冲突，已自动中止并复原，本地历史没有任何改动".to_string();
-    }
-    if used_proxy.is_none() && git::is_network_error(o) {
-        return "变基失败：无法连接远端，且未找到可用代理".to_string();
-    }
-    match first_error_line(o) {
-        Some(d) => format!("变基失败：{d}"),
-        None => "变基失败".to_string(),
+fn rebase_failure_message(
+    o: &git::GitOutput,
+    used_proxy: Option<&str>,
+    aborted: bool,
+    conflicts: &[String],
+) -> String {
+    let base = if aborted {
+        "变基遇到冲突，已自动中止并复原，本地历史没有任何改动".to_string()
+    } else if used_proxy.is_none() && git::is_network_error(o) {
+        "变基失败：无法连接远端，且未找到可用代理".to_string()
+    } else {
+        match first_error_line(o) {
+            Some(d) => format!("变基失败：{d}"),
+            None => "变基失败".to_string(),
+        }
+    };
+    // 网络那一臂根本还没走到冲突 ⇒ 不硬拼清单（拼了就是一句假话）。
+    // 而"自动中止"那一臂即使清单是空的也要说出来——用户有权知道我们没读到
+    if aborted || !conflicts.is_empty() {
+        format!("{base}。{}", conflict_note(conflicts))
+    } else {
+        base
     }
 }
 
@@ -210,6 +264,10 @@ pub fn rebase_core(
         used_proxy = proxy;
 
         if !pull.success {
+            // ⚠️ **顺序判据**：清单必须在 abort 之前读。把这两行换个次序，
+            // 冲突文件就永远是空表，而界面上一句"没能读出是哪几个文件"照样说得通——
+            // 没有任何东西会红（32-6 的整条价值就压在这个顺序上）
+            let conflicts = conflicted_files(local);
             if rebase_in_progress(path, local) {
                 let abort = local(&["rebase", "--abort"]);
                 log.push_str(&combined(&abort));
@@ -218,7 +276,10 @@ pub fn rebase_core(
             if stashed {
                 log.push_str(&combined(&local(&["stash", "pop"])));
             }
-            break 'seq (false, rebase_failure_message(&pull, used_proxy.as_deref(), aborted));
+            break 'seq (
+                false,
+                rebase_failure_message(&pull, used_proxy.as_deref(), aborted, &conflicts),
+            );
         }
 
         if stashed {
@@ -598,6 +659,15 @@ mod fork_tests {
             out.message,
             out.log
         );
+        // 32-6 的整条价值压在这里：点到名是哪几个文件。
+        // ⚠️ 这条断言同时钉住"清单在 abort **之前**读"——把那两行换个次序，
+        // abort 会把 index 里的 U 位全清掉，句子就退成"没能读出是哪几个文件"，
+        // 而那句话听起来仍然像"我们查过了"
+        assert!(
+            out.message.contains("冲突的文件") && out.message.contains("base.txt"),
+            "冲突要说出文件名，不能只说\"有冲突\"：{}",
+            out.message
+        );
         assert!(
             out.backup_branch.is_none(),
             "已中止复原就不该再给撤销按钮（HEAD 本来就等于备份位置）"
@@ -615,6 +685,38 @@ mod fork_tests {
             std::fs::read_to_string(f.work.join("base.txt")).unwrap(),
             "local version\n",
             "工作区应回到变基前的样子"
+        );
+    }
+
+    #[test]
+    fn a_conflict_in_a_chinese_file_is_named_in_plain_words_not_escapes() {
+        // 真 git 实测（32-6）：不带 `-c core.quotePath=false` 时它输出
+        // `"\344\270\255\346\226\207 \346\226\207\344\273\266.txt"`——用户看到一串八进制码。
+        // ⚠️ **这一路只有真 git 能证**：上面那条 `the_conflict_query_…` 的单测断的是
+        // 命令数组的形态，它绿着而这里红，说明"参数写对了但 git 不认"；反过来
+        // 参数删掉它才红。⇒ 与「格式串/解析类判据必须有一组真跑被解析方」同一条纪律
+        let f = fixture();
+        let name = "中文 文件.txt";
+        push_from_clone(&f, &f.root.join("other"), name, "云端那一版\n", "remote cn");
+        commit_file(&f.work, name, "本地那一版\n", "local cn");
+
+        let before = status_of(&f.work);
+        assert!(before.ahead > 0 && before.behind > 0, "先确认真的分叉了");
+        let path = f.work.to_string_lossy().to_string();
+
+        let out = rebase_core(&path, &before, false, &|a| sh(&f.work, a), &|a| {
+            (sh(&f.work, a), None)
+        });
+        assert!(!out.ok);
+        assert!(
+            out.message.contains(name),
+            "文件名要原样可读，不能是转义码：{}",
+            out.message
+        );
+        assert!(
+            !out.message.contains("\\34"),
+            "出现八进制转义就是 quotePath 没关掉：{}",
+            out.message
         );
     }
 
@@ -715,5 +817,108 @@ mod fork_tests {
         // （原来这里断的是 `STASH_MSG.starts_with("qingbird-git:")`——一个和
         // `stash::is_auto` 并行的第二判据，措辞一改它就漂），改成直接问那颗谓词
         assert!(crate::stash::is_auto(crate::stash::MSG_REBASE));
+    }
+
+    fn v(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn conflict_note_has_its_own_sentence_for_the_empty_list() {
+        // 空表那句话是**独立的一句**，不是"冲突的文件："后面空着——
+        // 那是 AGENTS 里「控件 disable 了但话还说错了」的同族：
+        // 一个看起来像有值的空，比明说"没读到"更会骗人
+        let none = conflict_note(&v(&[]));
+        assert!(none.contains("没能读出"), "{none}");
+        assert!(!none.contains("冲突的文件："), "空表不许披上点名那句话的壳：{none}");
+
+        assert_eq!(conflict_note(&v(&["a.txt"])), "冲突的文件：a.txt");
+        // 恰好到上限：不许多出"等 N 个"
+        let five = conflict_note(&v(&["a", "b", "c", "d", "e"]));
+        assert_eq!(five, "冲突的文件：a、b、c、d、e");
+        assert!(!five.contains("等"), "五颗以内不该出现计数：{five}");
+
+        // 超上限：列五颗 + 报出总数（用户据此决定去不去终端看）
+        let seven = conflict_note(&v(&["a", "b", "c", "d", "e", "f", "g"]));
+        assert!(seven.contains("冲突的文件：a、b、c、d、e 等 7 个"), "{seven}");
+        assert!(!seven.contains("f"), "上限就是上限：{seven}");
+    }
+
+    #[test]
+    fn the_conflict_query_turns_quoting_off_before_the_subcommand() {
+        // 真 git 实测（32-6）：不带 `-c core.quotePath=false` 时中文文件名输出成
+        // "\344\270\255\346\226\207"，用户看到的是一串八进制码而不是文件名。
+        // 而这条纪律**只有顺序对了才生效**，所以这里断的是命令数组本身
+        use std::cell::RefCell;
+        let seen: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
+        let out = git::GitOutput {
+            success: true,
+            stdout: "  src/a.rs \n\nsrc/b.rs\n".to_string(),
+            stderr: String::new(),
+            code: 0,
+            timed_out: false,
+        };
+        let got = conflicted_files(&|a: &[&str]| {
+            seen.borrow_mut().push(a.iter().map(|s| s.to_string()).collect());
+            out.clone()
+        });
+        let args = &seen.borrow()[0];
+        assert_eq!(args[0], "-c", "全局开关必须排在子命令之前：{args:?}");
+        assert_eq!(args[1], "core.quotePath=false");
+        assert_eq!(args[2], "diff");
+        assert!(args.contains(&"--diff-filter=U".to_string()), "{args:?}");
+        // 逐行 trim、空行丢掉（git 的输出末尾总带一个换行）
+        assert_eq!(got, v(&["src/a.rs", "src/b.rs"]));
+
+        // 命令失败 ⇒ 空表，由 `conflict_note` 去说"没点到名"，这里不编内容
+        let bad = git::GitOutput {
+            success: false,
+            stdout: "not a git repository".into(),
+            stderr: String::new(),
+            code: 128,
+            timed_out: false,
+        };
+        assert!(conflicted_files(&|_: &[&str]| bad.clone()).is_empty());
+    }
+
+    #[test]
+    fn failure_message_lists_files_only_where_a_conflict_actually_happened() {
+        let o = git::GitOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: "fatal: Unable to create 'x/.git/index.lock': File exists.".into(),
+            code: 1,
+            timed_out: false,
+        };
+        let files = v(&["base.txt"]);
+
+        // ① 走到了"自动中止"那一臂：即使一颗都没读到也要说出来（用户有权知道没读到）
+        let aborted_empty = rebase_failure_message(&o, None, true, &[]);
+        assert!(aborted_empty.contains("已自动中止并复原"), "{aborted_empty}");
+        assert!(aborted_empty.contains("没能读出"), "{aborted_empty}");
+
+        // ② 网络那一臂根本还没走到冲突 ⇒ 不硬拼清单，拼了就是句假话
+        let net = git::GitOutput {
+            stderr: "fatal: unable to access 'https://github.com/': Could not resolve host".into(),
+            ..o.clone()
+        };
+        let msg = rebase_failure_message(&net, None, false, &[]);
+        assert!(msg.contains("无法连接远端"), "{msg}");
+        // ⚠️ 只断 `!contains("冲突")` **测不出"无条件拼清单"那一档变异**（32-6 变异 M8
+        // 实测一条都没红）：空表那句话是"这次没能读出具体是哪几个文件"，里面
+        // 既没有"冲突"也没有文件名——光看关键字会以为拼上去也看不出破绽。
+        // ⇒ 判据落在"网络臂这句话一个字都不许多"上，清单那两句话的特征串逐个点名
+        assert!(!msg.contains("没能读出"), "网络失败不许带清单那半句：{msg}");
+        assert!(!msg.contains("冲突的文件"), "同上：{msg}");
+
+        // ③ 别的失败（锁文件之类）也没清单 ⇒ 就一句结论，不画蛇添足
+        let plain = rebase_failure_message(&o, None, false, &[]);
+        assert!(!plain.contains("冲突的文件"), "{plain}");
+
+        // ④ 有清单就拼上，而且不管它是不是 aborted 臂
+        let both = rebase_failure_message(&o, None, true, &files);
+        assert!(both.contains("已自动中止并复原") && both.contains("base.txt"), "{both}");
+        let mid = rebase_failure_message(&o, None, false, &files);
+        assert!(mid.contains("base.txt"), "非中止但读到了清单也要说：{mid}");
     }
 }
