@@ -79,20 +79,46 @@ F–M 八腿走的就是那颗键（点下去 → 量 → 点回来 → 量，�
 **别把它当"拖把手也回归过了"**。
 
 ## 变异账（2026-10-12，驱动 `target/mutate_grow2.py` / `mutate_grow3.py` /
-## `mutate_grow4.py` / `mutate_grow5.py` / `probe_kmf.py` + `probe_split_sizes.py`，
-## 全是一次性脚本、不入仓库）
+## `mutate_grow4.py` / `mutate_grow5.py` / `probe_kmf.py` + `probe_split_sizes.py` /
+## `mutate_3225.py` / `mutate_3225b.py`，全是一次性脚本、不入仓库）
 
-三条变异 + 一次插桩对照，各自单变量、跑完按 sha 逐字节还原：
+三条变异 + 一次插桩对照 + 改版后重做的四条（P0 / M1 / M2 / M3，见下面 32-25 那一节），
+各自单变量、跑完按 sha 逐字节还原：
 
   · **V2 实现侧 `MAIN_MIN_W` 950→100** ⇒ 红 8 条（算式四条 + 前提"只差抽屉那一列" +
     D 那两条 + D/E 差值那条）。**承重成立**。
   · **V3 只改脚本里那颗抄来的常数 950→100，二进制保持正确** ⇒ 红 5 条，
-    **正好是"宽 == 算式给的数"那五条**（A / B / D / E / **F**），一条不多一条不少。
+    **正好是"宽 == 算式给的数"那五条**（A / B / D / E / 当时那条叫 F 的腿），一条不多一条不少。
     这条证的是头注释答应过的那件事：四个壳层常数改版会红**并点名是哪一条**；
     没有它，V2 的红就分不清是"实现坏了"还是"算式本来不敏感"。
     ⚠️ V3 第一轮跑错了：驱动的还原**只在 `need_build` 分支里重编**，而 V3 标的是
     `False` ⇒ 二进制里还躺着 V2 的 100，两个变量一起动、两侧口径一致地错，
     那条结果作废（第二轮把"每条之前无条件还原 + 重编 + 回读确认变异串在盘上"写死）。
+    ⛔ **V3 从 2026-10-12 那一版起已经没有对象了**——脚本里不再抄任何壳层常数（见上面
+    32-25 那一节），它换来的性质改成"**改版会拒绝跑**"。别把它当成"这条判据还活着"。
+  · **32-25 那一版（常数改成现读）的四条账**，驱动 `target/mutate_3225.py`（前三条）
+    与 `target/mutate_3225b.py`（后三条，第二版把 M3 换成算式层面的自证）：
+      · **P0 应当放行** ⇒ 整条脚本全跑 **四十一条全绿**，而头行打出
+        「现读到的项：NAV_W + 1.0 + GAP + MAIN_MIN_W ⇒ 固定项 49.0」
+        ⇒ **改成现读没有把判据改掉**（固定项之和仍等于从前抄的 41 + 8 = 49、
+        A 仍算出 1879）——这是"重构不等于修复"那句话的实测版。
+      · **M1 结构变了必须拒绝跑**（真函数里 `+ GAP` 改成 `- GAP`，二进制不动）
+        ⇒ 退出码 1、**没有判读那一行**、报"不再是纯加法" ✓
+        ⇒ 顶替 V3 的那条：改版不再靠"数过期来红"，靠"**不肯猜**"。
+      · **M2 改名必须拒绝跑**（`tokens.rs` 的 `MAIN_MIN_W` 改名）⇒ 报"读不到常量 MAIN_MIN_W" ✓
+      · **M3【预期不红，而且是有意登记的那种不红】**：`--parse-only` 那行把
+        NAV_W 与 GAP 同时换成 48 与 0（**和不变**），现读算出的固定项**仍是 49**、
+        两条 target 一个字不改 ⇒ **补偿性错误这一档没有判据负责**，
+        要判得逐项量导航轨宽与列间距 ⇒ 登记成路线表 **32-26**。
+        ⚠️ 这条最初想用**应用侧**变异证（真把 48/0 编进 exe 再跑八腿）——那条**作废**：
+        合成值下应用窗口没起来（`AssertionError: A-open：窗口没出来`），
+        于是它既不是绿也不是红，是**没跑**（AGENTS 那条三态判读第三次兑现）。
+        ⚠️ 而第二版驱动又差点把这条**成立的**自证记成"没跑"：它的状态枚举只认
+        "跑出判读"与"报拒绝跑"两种，而 `--parse-only` 天生不打『判读』⇒
+        **状态表漏一档时，成立的证据长得像无效**，这条也留在账上。
+        ⚠️ 自证那一行第一版还算错过一次数（把 `MAIN_MIN_W` 也加进"固定项之和"⇒ 打出 999），
+        靠它自己那句"和必须仍等于 `SHELL_FIXED`"当场判红才露出来——
+        **自证那条也要有判据，不然它只是一句印出来的话**
   · **V1 把 `shell.rs::keep_main_flexible` 的每帧交回改成恒不执行 ⇒ 前四跑都不红，
     第五跑精确红一条**。这一条查了五轮，每一步都值得记，因为**错的不是判据的严格度，
     是采样时机**：
@@ -185,25 +211,98 @@ SHAKE_MAX = 10.0
 # ⇒ 两列同源同法，别再"一个读配置、一个抄常数"（同一件事两个出处就是两个会漂的数）
 BASE: dict = {}
 
-# 下面四个数是**壳层常数**，各有一个出处；改版之后它们会漂，
-# 而这条脚本必须红到让人回来复核（D93 那条：写死的数不是错，**没人复核它过期**才是错）
+# ── 壳层常数：**一个都不抄，全部从代码现读**（2026-10-12，路线表 32-25）
 #
-# ⚠️ **前两项的名字从前是假的，2026-10-12 读 `shell.rs::required_shell_w` 才更正**：
-# 那颗纯函数的固定项写的是 `NAV_W + 1.0 + GAP + MAIN_MIN_W`，也就是说
-# **算式里根本没有"主区右缘气口"这一项**——我从前把那个 8 叫成右缘气口，
-# 是照着"总量对上了"倒过来编的名字（41 + 8 = 49 = 40 + 1 + 8，和恰好相等）。
-# 数值一直是对的，**说谎的是注释**（AGENTS：查过不生效就连调用带注释一起删；
-# 这里不是不生效，是名字指错了东西，所以改名字不改数）
-TRACK_W = 41.0      # = `tokens::NAV_W` 40 + 1px 分隔线（函数里那两项的前两个）
-EDGE_W = 8.0        # = `tokens::GAP` 8：**列与列之间的间距**，不是右缘气口
-MAIN_MIN = 950.0    # 中间那一列的最小需求：`gui/src/tokens.rs` 的 MAIN_MIN_W
-INITIAL_W = 1280.0  # 窗口初始客户区宽（`gui/src/tray.rs:68` 那个字面量）
-                    #（规则只"撑宽"，**从不主动缩小**）
-# ⛔ **这四数是加在一起进判据的** ⇒ "TRACK_W 与 EDGE_W 互相补偿"那种错
-#（比如 41→49 同时 8→0）**一条判据都判不出来**——这是这一档的**已知盲区**，
-# 与 32-12 那条"`_` 臂没有独立判据"同款，如实登记，别写成"四个数各自都被钉住"。
-# 从结构上消灭它的办法是把算式**从代码里现读**（`read_range` 已经是这个套路），
-# 登记成路线表 **32-25**，本轮没做（一轮只动一类变量）
+# 从前这里写着四个数（41 / 8 / 950 / 1280），而判据把它们**加在一起**用
+# ⇒ "41 改成 49 同时 8 改成 0"那种互相补偿的错**一条判据都判不出来**（和不变）。
+# ⚠️ 并且其中两个名字是假的：`EDGE_W` 注释写"主区右缘气口"，而真函数
+# `shell.rs::required_shell_w` 的固定项是 `NAV_W + 1.0 + GAP + MAIN_MIN_W`——
+# **算式里根本没有右缘气口这一项**，那个 8 是**列间距 `GAP`**。数值一直对，
+# 说谎的是注释（我是照着"总量对上了"倒过来编的名字）。
+# ⇒ 抄数改注释都只是治标：**把算式本身从代码里读出来**才让"改名"与"补偿"两件事
+# 同时没有发生的可能（`read_range` 早就是这个套路，这一档照做）
+def src_of(*parts) -> str:
+    path = os.path.join(ROOT, *parts)
+    assert os.path.isfile(path), f"真源文件不见了：{path}"
+    return io.open(path, encoding="utf-8-sig").read()
+
+
+def read_tokens_const(name: str) -> float:
+    m = re.search(r"const %s\s*:\s*f32\s*=\s*([\d.]+)\s*;" % re.escape(name),
+                  src_of("gui", "src", "tokens.rs"))
+    if not m:
+        raise SystemExit(
+            f"gui/src/tokens.rs 里读不到常量 {name} ⇒ 那一档改名、搬走或不再是 f32 字面量，"
+            "而这条脚本的算式跟着变了。**不许猜一个数继续跑**，去看它")
+    return float(m.group(1))
+
+
+def read_shell_terms():
+    """解析 `required_shell_w` 里那句"固定项之和"，返回(除 MAIN_MIN_W 之外的和, MAIN_MIN_W, 项列表, 每一项的值)。
+
+    ⛔ **只认纯加法**：出现减法、乘除、括号或函数调用就 `SystemExit`。
+    这一条是整个改动的牙齿——它把"改版会红并点名"换成了"**改版会拒绝跑并点名**"，
+    前者靠脚本里那颗抄来的数过期（V3 证过），后者靠形状本身（新变异 32-25-M1/M2 证）
+    """
+    body = re.search(r"pub\(crate\) fn required_shell_w[^{]*\{\s*let mut w\s*=\s*([^;]+);",
+                     src_of("gui", "src", "shell.rs"))
+    if not body:
+        raise SystemExit("shell.rs::required_shell_w 里那句 `let mut w = ...;` 读不到 "
+                         "⇒ 那颗函数改名了、或者不再用累加写法。这条脚本的前提没了，先去看它")
+    expr = body.group(1).strip()
+    for bad in ("-", "*", "/", "("):
+        if bad in expr:
+            raise SystemExit(f"required_shell_w 的固定项不再是纯加法（读到的式子：{expr}）"
+                             "⇒ 脚本不肯猜，去把这条判据改成与那颗函数同形")
+    terms = [t.strip() for t in expr.split("+") if t.strip()]
+    assert terms, f"required_shell_w 的式子拆不出任何项：{expr!r}"
+    main_min, fixed, values = None, 0.0, {}
+    for t in terms:
+        v = float(t) if re.fullmatch(r"[\d.]+", t) else read_tokens_const(t)
+        values[t] = v
+        if t == "MAIN_MIN_W":
+            main_min = v
+        else:
+            fixed += v
+    if main_min is None:
+        raise SystemExit(f"required_shell_w 的加法项里没有 MAIN_MIN_W（项列表：{terms}）"
+                         "⇒ 中间那一列的下限换了名字或挪了位置，这条判据要跟着改")
+    return fixed, main_min, terms, values
+
+
+def read_initial_w() -> float:
+    """窗口初始客户区宽：规则的另一半（"需求不到初始就不收"）用它，同样现读"""
+    m = re.search(r"WindowBounds::centered\(\s*gpui_kit::size\(\s*gpui_kit::px\(([\d.]+)\)",
+                  src_of("gui", "src", "tray.rs"))
+    if not m:
+        raise SystemExit("gui/src/tray.rs 里开窗那句初始宽读不到 ⇒ 规则的另一半搬家了，先看它")
+    return float(m.group(1))
+
+
+SHELL_FIXED, MAIN_MIN, SHELL_TERMS, SHELL_VALUES = read_shell_terms()
+INITIAL_W = read_initial_w()
+
+
+def sum_with_overrides(overrides=None):
+    """把现读到的项**按给定覆盖值**再加一遍（`--parse-only` 那条"盲区自证"用）。
+
+    ⚠️ 与 `read_shell_terms` **同一口径**：`MAIN_MIN_W` 不进"固定项之和"，
+    第一版我在这颗函数里把它一起加了 ⇒ 覆盖成 48 与 0 之后算出 **999**，
+    而它自己那句"和必须仍是 SHELL_FIXED"当场判红（退出码 1）才露出来。
+    **自证那条也要有判据，不然它只是一句印出来的话**
+    """
+    overrides = overrides or {}
+    total = 0.0
+    for t in SHELL_TERMS:
+        if t == "MAIN_MIN_W":
+            continue
+        if t in overrides:
+            total += overrides[t]
+        elif t in SHELL_VALUES:
+            total += SHELL_VALUES[t]
+        else:
+            total += float(t)
+    return total
 
 
 def read_range(name):
@@ -495,6 +594,22 @@ def frame_offset(hwnd):
 
 
 def main():
+    if "--parse-only" in sys.argv:
+        # 只报"从代码读到了什么"，不起进程、不动夹具——给变异账与"盲区自证"用
+        print("   现读到的项：" + " + ".join(f"{t}={SHELL_VALUES[t]}" for t in SHELL_TERMS))
+        print(f"   固定项之和 {SHELL_FIXED}｜中间下限 {MAIN_MIN}｜初始宽 {INITIAL_W}")
+        print(f"   侧栏 320 抽屉 560 时：开 {max(INITIAL_W, SHELL_FIXED + 320.0 + MAIN_MIN + 560.0)}"
+              f"／关 {max(INITIAL_W, SHELL_FIXED + 320.0 + MAIN_MIN)}")
+        comp = sum_with_overrides({"NAV_W": 48.0, "GAP": 0.0})
+        t_open = max(INITIAL_W, comp + 320.0 + MAIN_MIN + 560.0)
+        t_shut = max(INITIAL_W, comp + 320.0 + MAIN_MIN)
+        print(f"   ⚠️ **盲区自证**：把 NAV_W 与 GAP 同时换成 48.0 与 0.0（**和不变**）"
+              f"⇒ 固定项还是 {comp}、两条 target 仍是 开 {t_open}／关 {t_shut} ⇒ "
+              "**这一档【预期不红】：补偿性错误没有判据负责**（要判得逐项量导航轨宽与列间距，"
+              "登记为路线表 32-26）。这条打印不是判据，是**说明这次改动没消灭什么**")
+        return 0 if (abs(comp - SHELL_FIXED) < 1e-6
+                     and t_open == max(INITIAL_W, SHELL_FIXED + 320.0 + MAIN_MIN + 560.0)
+                     and t_shut == max(INITIAL_W, SHELL_FIXED + 320.0 + MAIN_MIN)) else 1
     os.environ["QB_APPDATA"] = SANDBOX
     st = os.stat(EXE)
     print(f"产物：{EXE}  mtime={datetime.datetime.fromtimestamp(st.st_mtime)}  size={st.st_size}")
@@ -522,7 +637,7 @@ def main():
         insp = BASE["inspector_w"]
 
         def need(open_, sidebar):
-            return TRACK_W + sidebar + MAIN_MIN + (insp if open_ else 0.0) + EDGE_W
+            return SHELL_FIXED + sidebar + MAIN_MIN + (insp if open_ else 0.0)
 
         def target(open_, sidebar):
             """规则的完整形状：**宽 = max(初始宽, 需求)**。
@@ -532,8 +647,11 @@ def main():
             `max` 让两种情形都由同一条判据负责，换谁的 sidebar_w 都不用改脚本"""
             return max(INITIAL_W, need(open_, sidebar))
 
-        print(f"   算式：轨 {TRACK_W} + 侧栏 + 中间下限 {MAIN_MIN} + 抽屉 {insp}"
-              f" + 右缘 {EDGE_W}，再与初始 {INITIAL_W} 取大；"
+        # 把**读到的项**原样打出来（不是打我一个汇总数）：这一行就是"现读真的读了"的自证，
+        # 少了它，"从代码现读"与"抄了一个恰好对的数"在输出上完全无法区分
+        print(f"   算式（从 `required_shell_w` 现读到的项）：{' + '.join(SHELL_TERMS)}"
+              f" ⇒ 固定项 {SHELL_FIXED} + 侧栏 + 中间下限 {MAIN_MIN} + 抽屉 {insp}，"
+              f"再与初始 {INITIAL_W}（从 `tray.rs` 现读）取大；"
               f"侧栏基线 {sw}（读配置）→ A 该是 {target(True, sw)}、B 该是 {target(False, sw)}")
         # 八腿的数：少了腿要**当场点名"前提没造出来"**，不许留到判据里 IndexError
         legs = a["live"]
