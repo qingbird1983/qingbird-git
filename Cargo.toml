@@ -10,4 +10,4 @@ members = ["crates/core", "gui"]
 # 而 `installer.iss` 里改成了「没传就 `#error`」——**让"忘"没有选项（D78）**。
 # ⚠️ 发版时只改这一行，然后打标签 `vX.Y.Z`（标签带 `v`、包名不带）。
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
