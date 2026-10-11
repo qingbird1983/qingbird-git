@@ -256,6 +256,17 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
 - ⚠️ **`installer.iss` 与 `packaging/lang/zhCN.isl` 必须带 UTF-8 BOM**。
   没有 BOM，Inno 按系统 ANSI（本机 GBK）读，中文全变乱码，
   而 ISCC **照样报 "Successful compile"**。`build_installer.ps1` 每次都会补
+- ⚠️ **`.ps1` 自己也必须带 UTF-8 BOM**（2026-10-11 发 v0.2.0 时实锤，是同一条纪律的第三种触发）。
+  Windows PowerShell 5.1 读无 BOM 的 UTF-8 会按 GBK 解，中文一多就**整份脚本在解析期报错、
+  一行都不执行**：症状是 `ParserError` 指向某一句 `Write-Host "版本: …（单源…）"`
+  （全角括号把字符串切断了），而 `cargo build --release` 压根没起跑、
+  `dist/` 里躺着的还是**上一个版本**那个包——**它不产出错的产物，它什么都不产出**，
+  所以"包存在"会被当成"包是新的"。
+  为什么以前一直没撞上：AGENTS 的口径写的是 `pwsh`（PowerShell 7 默认按 UTF-8 读），
+  这次为了省事换 `powershell.exe` 才炸。⇒ **含中文、且被别的解释器读的文件都要带 BOM**，
+  判据不是"这文件谁写的"而是"**谁去读它**"。落法：`python scripts/add_bom.py scripts/build_installer.ps1`，
+  核法（不用真跑六分钟）：`powershell -NoProfile -Command "[System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw 脚本),[ref]$null).Count"`
+  ——**能数出 token 就是解析得过**
 - ⚠️ **`OutputDir` / `MessagesFile` 相对 ISCC 的工作目录解析，不是相对 .iss**
   ——所以那两条路径写成"相对仓库根"，脚本里先 `Set-Location` 到仓库根。
   写 `..\dist` 过一次，包吐到 `F:\AIwork\dist\`（**仓库外面**）
