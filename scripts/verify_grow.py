@@ -1,98 +1,168 @@
-"""验「向右撑窗口」这一条规则，判据都是**帧上的窗口宽**，不是"跑起来没报错"。
+"""31.4 补二十五那条回归判据：**抽屉开与关，左栏那一列不许被抢宽**。
 
-① 抽屉开 → 窗口向右撑到 `required_shell_w` 那个数（客户区 1502 = 轨 41 + 左栏 263
-   + 中间 870 + 右栏 320 + 右缘 8）；
-② 切到总览（那一屏两栏都没有）→ 收回到 1280；
-③ 切回仓库页（`inspector_open` 还开着、选中也还在）→ **再撑一次**到 1502，
-   且左栏宽与①一模一样（"右栏一开左栏就抢宽"那一族缺陷的判据）；
-④ 点抽屉自己那颗收起键 → 收回到 1280（`shell_grown_w` 那条还原路径。这条最容易被
-   "看起来没事"放过：不还原的症状是"窗口越开越宽"，得连着开关两次才看得出来）；
-⑤ 拖侧栏把手 +40 → 侧栏变宽、**窗口跟着向右长那 40**，中间那一列仍是 950
-   （拖把手也是"要更多宽"，同一条规则的另一种触发；拿中间列去垫就又是这一轮修的那个病）。
+判据全部落在帧上量的两个数（窗口客户区宽、左栏白面宽），不是"跑起来没报错"。
 
-三条纪律（AGENTS 都记着踩过）：
-  · 状态用 config 驱动，不靠点键（上一轮"抽屉开着"的两帧其实都是关着的）；
-  · 坐标**量出来**再用：收起键按逐列扫暗像素定在帧上 x=1472..1483，
-    从放大图反算必错（`crop` 的倍数在显示时又被缩过一次）；
-  · 每一步抓一帧并与上一步比，零变化就点名（`alive` 只说明没崩）。
-  · 沙箱：`QB_APPDATA` 指副本，收尾按 mtime+size+sha256 核对真实 config。
+五跑十条判据（每跑各写一份 config 再启动，**状态走配置、不走鼠标**）：
+  A 抽屉开            → 记下窗口宽 wA、左栏白面 sA
+  B 抽屉关            → **sB 必须等于 sA**（这条就是补二十五的原话）
+  C 抽屉开（再跑一次）→ wC == wA 且 sC == sA（"再撑一次要撑到同一个数"，
+                        不幂等的症状是窗口越开越宽）
+  D 抽屉开 + 侧栏 +40 → 窗口长的部分**必须全部进了侧栏**：
+                        `(wD − wA) − (sD − sA) ≈ 0`
+                        这一档挡的就是那一轮修掉的病——拿中间那一列去垫侧栏。
+                        ⚠️ 判据写成**两个增量的差**，不写成"中间列 == 950"：
+                        后者要把轨宽、右缘宽这些壳层常数抄进脚本，
+                        它们一改判据就悄悄失效（本项目为写死的数交过三次学费）
+  E 抽屉关 + 侧栏 +40 → 与 D 只差抽屉那一列：`wD − wE ≈ inspector_w`（**读配置**，
+                        2026-10-11 实测那一列是 560，不是从前抄的 320），
+                        证"撑宽"这件事真的由抽屉参与，而不是窗口一直那么宽
 
-用法：python target/verify_grow.py
+与上一版的三处不同（2026-10-11 按路线表 32-15 的尾巴重写）：
+  ① **夹具自己造**（%TEMP 下一颗合成仓库 + 沙箱 config），不再吃 10-08 那轮
+     留在 `%TEMP%\\qb_v4` 里的旧沙箱——上一版红就红在它读到的是别人的状态；
+  ② **删掉拖把手那一步**：`sidebar_w` 是配置项，直接写进 config 就是"拖完之后"
+     那一态，比模拟拖拽稳（拖拽要猜把手坐标，而把手位置随窗口漂）；
+  ③ **删掉找收起键那一步**：收起 = `inspector_open=false` 那一跑（B），
+     不需要点任何键。⇒ 全程只剩**一次**点击（导航轨「我的仓库」），
+     而它的 y 是**现场扫出来的**（D93 那条：v4 改版之后没有一个写死坐标复核过）。
+
+⚠️ **这次重写换来的稳，代价要说清**：它验的是**宽度规则**（谁要更多宽、由哪一列垫），
+状态由配置给，所以**「拖把手」与「点收起键」这两条交互路径本身不再由这条脚本负责**——
+把手能不能拖动、那颗键点得点不动，归别的判据（侧栏/抽屉的单测 + 他双击实机）。
+**别把它当"这两条也回归过了"**：上一版那点得到，但它的坐标随改版过期，
+红的时候分不清是规则坏了还是坐标坏了（D93 的原话正是这件事）。
+
+用法：`python scripts/verify_grow.py`
 """
 import ctypes
+import datetime
+import io
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
 
-sys.path.insert(0, r"F:\AIwork\qingbird-git\scripts")
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import qbguard, shoot, steps  # noqa: E402
+
 from PIL import Image  # noqa: E402
-
-TMP = r"C:\Users\42527\AppData\Local\Temp\qb_v4"
-SANDBOX = os.path.join(TMP, "appdata")
-REAL = r"C:\Users\42527\AppData\Roaming\com.qingbird.git\config.json"
-CFG = os.path.join(SANDBOX, "com.qingbird.git", "config.json")
-EXE = r"F:\AIwork\qingbird-git\target\debug\qingbird-git.exe"
-
-from qbguard import launch_env, real_cfg_fp, check_real_cfg  # noqa: E402
-import shoot  # noqa: E402
-import steps  # noqa: E402
 
 u = shoot.user32
 wt = shoot.wt
-ROW_DIRTY = 222          # 沙箱里 demo-dirty 那一行（shot_widths.py 同一份实测表）
-HANDLE = (300, 300)      # 侧栏与中间列那条把手（帧上缝 x=306..311 ⇒ 客户区 298..303）
+TEMP = os.environ["TEMP"]
+FIX_ROOT = os.path.join(TEMP, "qb_grow_ui")
+REPO = os.path.join(FIX_ROOT, "repo")
+SANDBOX = os.path.join(TEMP, "qb_grow_app")
+CFG = os.path.join(SANDBOX, "com.qingbird.git", "config.json")
+EXE = os.path.join(ROOT, "target", "debug", "qingbird-git.exe")
+DRAG_DELTA = 40.0   # "拖了 40" 的等价物：sidebar_w 直接 +40
+
+# 两列的宽度**都从配置里读**，脚本里一个都不钉（2026-10-11 的更正）：
+# 第一版把侧栏写成 263、注释还写着"与真实那份一致"——真实那份是 **360**，
+# 那句是假话；而抽屉那一列我照旧抄了个 320，实测是 **560**，两条判据当场红。
+# ⇒ 两列同源同法，别再"一个读配置、一个抄常数"（同一件事两个出处就是两个会漂的数）
+BASE: dict = {}
+
+# 下面四个数是**壳层常数**，各有一个出处；改版之后它们会漂，
+# 而这条脚本必须红到让人回来复核（D93 那条：写死的数不是错，**没人复核它过期**才是错）
+TRACK_W = 41.0      # 导航轨宽：`gui/src/tokens.rs` 的 NAV_W + 1px 分隔
+EDGE_W = 8.0        # 主区右缘气口
+MAIN_MIN = 950.0    # 中间那一列的最小需求：`gui/src/tokens.rs` 的 MAIN_MIN_W
+INITIAL_W = 1280.0  # 窗口初始客户区宽（规则只"撑宽"，**从不主动缩小**）
 
 
-def park_cursor(hwnd):
-    r = wt.RECT()
-    u.GetWindowRect(hwnd, ctypes.byref(r))
-    ox = r.left - 60 if r.left - 60 > 0 else r.right + 60
-    oy = r.top - 60 if r.top - 60 > 0 else r.bottom + 60
-    u.SetCursorPos(ox, oy)
-    time.sleep(0.4)
-    u.SetCursorPos(ox - 8, oy - 8)
-    time.sleep(0.8)
+def read_range(name):
+    """侧栏的合法夹取范围**从 core 现读**，不抄进脚本（抄一次就多一处会漂的真源）。
+
+    ⚠️ 这一条不是洁癖，是本轮红出来的：他的 `sidebar_w` 正好是上限 **360**，
+    而 D/E 两跑要"侧栏 +40"，脚本往配置里写 400 ⇒ 应用按 `clamp_sidebar_w`
+    **夹回 360** ⇒ 那两跑与 A 是**同一个状态**，三条判据红而宽度规则一个字没错。
+    **红的是前提，不是实现**（AGENTS「测试的前提不能外包给环境」的同族：
+    这一回前提不是环境给的，是**我写进配置里的那个数被应用改掉了**）。
+    ⇒ 落法：基线取"离上限还留着 delta 余量"的那个数，余量与上限都从 core 读。"""
+    src = io.open(os.path.join(ROOT, "crates", "core", "src", "store.rs"),
+                  encoding="utf-8-sig").read()
+    m = re.search(r"pub const %s\s*:\s*\(f32, f32\)\s*=\s*\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)\s*;"
+                  % re.escape(name), src)
+    assert m, f"store.rs 里读不到 {name}——夹范围的形状变了，这条脚本的前提没了，先去看它"
+    return float(m.group(1)), float(m.group(2))
 
 
-def to_client(hwnd, x, y):
-    pt = wt.POINT(int(x), int(y))
-    u.ClientToScreen(hwnd, ctypes.byref(pt))
-    return pt.x, pt.y
+def unlock(func, path, exc):
+    os.chmod(path, 0o777)
+    func(path)
 
 
-def drag(hwnd, cx, cy, dx, dy=0):
-    """按住 -> 分几步移动 -> 松手。一步到位的移动会被当成一次跳跃，
-    gpui 的把手靠 `MouseMoveEvent` 增量算宽，所以要拆成几段"""
-    if u.GetForegroundWindow() != hwnd:
-        steps.ensure_focus(hwnd)
-    sx, sy = to_client(hwnd, cx, cy)
-    u.SetCursorPos(sx, sy)
-    time.sleep(0.25)
-    u.mouse_event(0x0002, 0, 0, 0, 0)      # down
-    time.sleep(0.12)
-    for i in range(1, 5):
-        u.SetCursorPos(sx + dx * i // 4, sy + dy * i // 4)
-        time.sleep(0.08)
-    u.SetCursorPos(sx + dx, sy + dy)
-    time.sleep(0.25)
-    u.mouse_event(0x0004, 0, 0, 0, 0)      # up
-    time.sleep(0.9)
+def build_fixture():
+    """一颗最小的合成仓库。⚠️ 不许拿用户那 17 颗当素材（AGENTS 明写）"""
+    if os.path.isdir(FIX_ROOT):
+        shutil.rmtree(FIX_ROOT, onerror=unlock)
+    assert not os.path.exists(FIX_ROOT), "夹具没清干净，读到的可能是上一跑的旧状态"
+    os.makedirs(FIX_ROOT)
+    subprocess.run(["git", "init", "-q", "--initial-branch=main", REPO], check=True)
+    for k, v in (("user.email", "t@t"), ("user.name", "t"), ("core.autocrlf", "false")):
+        subprocess.run(["git", "-C", REPO, "config", k, v], check=True)
+    with open(os.path.join(REPO, "base.txt"), "w", encoding="utf-8") as f:
+        f.write("base\n")
+    subprocess.run(["git", "-C", REPO, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", REPO, "commit", "-q", "-m", "base"], check=True)
+    print(f"夹具就绪：{REPO}")
 
 
-def win_w(hwnd):
-    """客户区宽（帧上判据换算成客户区，好跟算式对数）"""
-    r = wt.RECT()
-    u.GetClientRect(hwnd, ctypes.byref(r))
-    return r.right - r.left
+def build_sandbox():
+    """settings 抄真实那份（主题、缩放、两列的宽度这些不许跟着变），repos 只留夹具这一条"""
+    real = json.load(open(os.path.join(os.environ["APPDATA"], "com.qingbird.git",
+                                       "config.json"), encoding="utf-8-sig"))
+    if os.path.isdir(SANDBOX):
+        shutil.rmtree(SANDBOX, onerror=unlock)
+    os.makedirs(os.path.dirname(CFG))
+    json.dump(real, open(CFG, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    rs = real.get("settings", {})
+    for key, fallback in (("sidebar_w", 263.0), ("inspector_w", 320.0)):
+        raw = rs.get(key)
+        # 那两个兜底值只在"配置里根本没有这一格"时用得上（老配置可能没有）。
+        # **用了哪一个当场打印**，不许静默把抄的数当成他配的数
+        BASE[key] = float(raw) if raw else fallback
+        print(f"   从真实 config 读 {key}："
+              f"{'读到 ' + format(float(raw), '.0f') if raw else '没有这一格，用兜底 ' + format(fallback, '.0f')}"
+              f"（这两个数脚本里不钉）")
+
+
+def write_case(inspector_open: bool, sidebar_w: float):
+    cfg = json.load(open(CFG, encoding="utf-8"))
+    cfg["settings"]["inspector_open"] = inspector_open
+    cfg["settings"]["sidebar_collapsed"] = False
+    cfg["settings"]["sidebar_w"] = sidebar_w
+    cfg["selected_path"] = REPO
+    # ⚠️ 沙箱那份是从真实 config **整份拷**来的（为了 settings 一致），
+    # 所以这里必须把 repos 换成只有夹具这一颗——留着用户那 17 颗的话，
+    # 量的时候侧栏画的是他的仓库列表，而这一屏本来就不该碰它们
+    cfg["repos"] = [
+        {
+            "path": REPO, "name": "grow-fixture", "alias": "",
+            "added_at": 1791600000, "last_used": 1791600000,
+            "test_cmd": "", "build_cmd": "", "dev_cmd": "", "install_cmd": "",
+            "pinned_cmds": [], "cmd_runs": {}, "auto_sync_mins": 0,
+            "daily_time": "", "auto_pull": False, "last_auto_check": 0,
+            "last_auto_result": "", "is_third_party": False,
+        }
+    ]
+    json.dump(cfg, open(CFG, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
 
 def white_runs(png, y, x0, x1):
-    """帧上 [x0,x1) 里连续的白面段（>=248 三通道），返回 (起, 宽) 列表"""
+    """帧上 [x0,x1) 里连续的白面段（三通道都 >=248），返回 (起, 宽) 列表"""
     im = Image.open(png).convert("RGB")
     px = im.load()
-    x1 = min(x1, im.size[0])       # 帧宽随窗口变，扫过头会 IndexError
+    x1 = min(x1, im.size[0])
     out, start = [], None
     for x in range(x0, x1):
         c = px[x, y]
@@ -108,153 +178,180 @@ def white_runs(png, y, x0, x1):
     return out
 
 
-def find_collapse(png, drawer_left):
-    """在抽屉表头那一条里找**最右边那颗图标**的中心（帧坐标 x,y）。
-    ⚠️ 收起键的坐标**不许写死**：窗口一撑宽它就跟着右移，写死的数下一轮就过期
-    （路线表 D93 那条「alive 全绿而一步都没生效」的同款坑）。
-    判据：抽屉左缘右侧 20px 起，到帧右缘留 12px 气口止，y=48..80 里最右一簇暗像素"""
+def win_w(hwnd):
+    r = wt.RECT()
+    u.GetClientRect(hwnd, ctypes.byref(r))
+    return r.right - r.left
+
+
+def park_cursor(hwnd):
+    """把鼠标挪出窗口：hover 淡底会留在帧上，把"两帧应当一样"这条判据污染掉"""
+    r = wt.RECT()
+    u.GetWindowRect(hwnd, ctypes.byref(r))
+    x = r.left - 60 if r.left - 60 > 0 else r.right + 60
+    y = r.top - 60 if r.top - 60 > 0 else r.bottom + 60
+    u.SetCursorPos(x, y)
+    time.sleep(0.5)
+
+
+def nav_bands(png):
+    """导航轨上每颗图标的 y——**现场扫，不写死**（D93 那条）"""
     im = Image.open(png).convert("RGB")
     px = im.load()
-    xs = [
-        x
-        for x in range(drawer_left + 20, im.size[0] - 12)
-        if any(sum(px[x, y]) < 460 for y in range(48, 80))
-    ]
-    assert xs, "抽屉表头里没找到图标（x 从 %d 起）" % (drawer_left + 20)
-    # 最右一簇：从右往左连续（气口 <= 4px）的都算同一颗键
-    hi = xs[-1]
-    lo = hi
-    for x in reversed(xs):
-        if hi - x <= 20:
-            lo = x
-        else:
-            break
-    return (lo + hi) // 2, 62
+    runs = []
+    for y in range(30, im.size[1] - 90):
+        n = sum(1 for x in range(8, 46) if sum(px[x, y][:3]) / 3 < 150)
+        if n >= 3:
+            if runs and y - runs[-1][1] <= 6:
+                runs[-1][1] = y
+            else:
+                runs.append([y, y])
+    return [(a + b) // 2 for a, b in runs]
+
+
+def run_case(tag, inspector_open, sidebar_w):
+    write_case(inspector_open, sidebar_w)
+    env = qbguard.launch_env()
+    assert env["APPDATA"] == SANDBOX, f"沙箱没生效：APPDATA={env.get('APPDATA')}"
+    subprocess.run(["taskkill", "/F", "/IM", "qingbird-git.exe"], capture_output=True)
+    time.sleep(0.7)
+    p = subprocess.Popen([EXE], cwd=ROOT, env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        hwnd = steps.find_window(p.pid)
+        assert hwnd, f"{tag}：窗口没出来"
+        assert steps.ensure_focus(hwnd), f"{tag}：拿不到前台"
+        f0 = os.path.join(FIX_ROOT, f"{tag}-0.png")
+        shoot.capture(hwnd, f0)
+        bands = []
+        for i in range(12):
+            bands = nav_bands(f0)
+            if len(bands) >= 2:
+                break
+            time.sleep(0.5)
+            shoot.capture(hwnd, f0)
+        ox, oy = frame_offset(hwnd)
+        # 第二颗 =「我的仓库」。x/y **各减各的偏移**：从前记成"偏的是 y"点过 8px 的亏
+        #（AGENTS：帧 = 客户 + (8, 0)），而这一档每次现场量，不抄那个数
+        steps.click(hwnd, 28 - ox, bands[1] - oy, settle=2.2)
+        prev = f0
+        for i in range(10):
+            time.sleep(0.8)
+            cur = os.path.join(FIX_ROOT, f"{tag}-{i+1}.png")
+            shoot.capture(hwnd, cur)
+            from PIL import ImageChops
+            d = ImageChops.difference(Image.open(prev).convert("RGB"),
+                                      Image.open(cur).convert("RGB"))
+            n = sum(1 for y in range(0, d.size[1], 3) for x in range(0, d.size[0], 3)
+                    if d.getpixel((x, y)) != (0, 0, 0))
+            if n < 30:
+                break
+            prev = cur
+        park_cursor(hwnd)
+        f = os.path.join(FIX_ROOT, f"{tag}-final.png")
+        shoot.capture(hwnd, f)
+        w = win_w(hwnd)
+        # 左栏白面：从导航轨右边一点起扫，取第一段（第一段就是侧栏那张卡的白面）
+        runs = white_runs(f, 300, 40, 1200)
+        s = runs[0][1] if runs else 0
+        print(f"  {tag}：客户区宽 {w}，左栏白面宽 {s}（起于 {runs[0][0] if runs else '-'}）")
+        return {"w": w, "s": s, "frame": f}
+    finally:
+        p.terminate()
+        try:
+            p.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def frame_offset(hwnd):
+    r = wt.RECT()
+    u.GetWindowRect(hwnd, ctypes.byref(r))
+    pt = wt.POINT(0, 0)
+    u.ClientToScreen(hwnd, ctypes.byref(pt))
+    return (pt.x - r.left, pt.y - r.top)
 
 
 def main():
-    real = json.load(open(REAL, encoding="utf-8-sig"))
-    rs = real.get("settings", {})
     os.environ["QB_APPDATA"] = SANDBOX
-    cfg = json.load(open(CFG, encoding="utf-8-sig"))
-    for k in ("ui_scale", "theme", "sidebar_w", "sidebar_collapsed"):
-        if k in rs:
-            cfg["settings"][k] = rs[k]
-    cfg["settings"]["inspector_open"] = True
-    cfg["settings"]["sidebar_collapsed"] = False
-    paths = [e["path"] for e in cfg["repos"] if e["name"] == "demo-dirty"]
-    assert paths, "沙箱里没有 demo-dirty"
-    cfg["selected_path"] = paths[0]
-    json.dump(cfg, open(CFG, "w", encoding="utf-8"), ensure_ascii=False)
-
-    before = real_cfg_fp()
-    env = launch_env()
-    assert env["APPDATA"] == SANDBOX, "APPDATA 没指向沙箱：%s" % env["APPDATA"]
-    p = subprocess.Popen([EXE], env=env)
+    st = os.stat(EXE)
+    print(f"产物：{EXE}  mtime={datetime.datetime.fromtimestamp(st.st_mtime)}  size={st.st_size}")
+    build_fixture()
+    build_sandbox()
+    before = qbguard.real_cfg_fp()
     try:
-        hwnd = steps.find_window(p.pid)
-        assert hwnd, "找不到窗口"
-        assert steps.ensure_focus(hwnd), "窗口拿不到前台"
-        park_cursor(hwnd)
-        steps.click(hwnd, 700, 300)          # 空点激活
-        steps.ensure_focus(hwnd)
-        steps.click(hwnd, 28, 94)            # 导航轨「我的仓库」
-        time.sleep(1.2)
-        steps.click(hwnd, 122, ROW_DIRTY)    # 选中 demo-dirty
-        time.sleep(3.0)
-        park_cursor(hwnd)
-        f1 = os.path.join(TMP, "g1_open.png")
-        shoot.capture(hwnd, f1)
-        w1 = win_w(hwnd)
-        print("① 抽屉开：客户区宽 %d（算式给的数 = %d）" % (w1, 40 + 1 + 8 + 950 + 263 + 320))
-        print("   帧上白面 y=300:", white_runs(f1, 300, 8, 1600))
+        lo, hi = read_range("SIDEBAR_W_RANGE")
+        # 基线要留出 DRAG_DELTA 的余量，否则 D/E 那一跑会被 clamp 夹回同一个宽，
+        # 等于两跑测的是同一个状态而判据以为它们差 40
+        sw = max(lo, min(BASE["sidebar_w"], hi - DRAG_DELTA))
+        print(f"   侧栏合法区间（从 core 现读）{lo}–{hi}；"
+              f"他配的是 {BASE['sidebar_w']} → 基线取 {sw}，D/E 取 {sw + DRAG_DELTA}")
+        if sw != BASE["sidebar_w"]:
+            print(f"   ⚠️ 他那个数离上限只剩 {hi - BASE['sidebar_w']}，"
+                  f"不够放 {DRAG_DELTA} 的增量 ⇒ 基线往下挪，五跑仍测同一条规则")
 
-        # ② 切到总览（那一屏两栏都没有）-> 该收回 1280
-        steps.ensure_focus(hwnd)
-        steps.click(hwnd, 28, 50)
-        time.sleep(2.2)
-        park_cursor(hwnd)
-        f2 = os.path.join(TMP, "g2_overview.png")
-        shoot.capture(hwnd, f2)
-        w2 = win_w(hwnd)
-        print("② 切到总览：客户区宽 %d（期望收回 1280）" % w2)
+        a = run_case("A-open", True, sw)
+        b = run_case("B-closed", False, sw)
+        c = run_case("C-open-again", True, sw)
+        d = run_case("D-open-wider", True, sw + DRAG_DELTA)
+        e = run_case("E-closed-wider", False, sw + DRAG_DELTA)
 
-        # ③ 切回仓库页（config 里 inspector_open 还开着、选中也还在）-> 该再撑到 1502
-        steps.ensure_focus(hwnd)
-        steps.click(hwnd, 28, 94)
-        time.sleep(2.6)
-        park_cursor(hwnd)
-        f3 = os.path.join(TMP, "g3_back.png")
-        shoot.capture(hwnd, f3)
-        w3 = win_w(hwnd)
-        print("③ 切回仓库页：客户区宽 %d（期望再撑回 1582，且左栏仍是 257）" % w3)
-        print("   帧上白面 y=300:", white_runs(f3, 300, 8, 1600))
+        insp = BASE["inspector_w"]
 
-        # ④ 点抽屉自己那颗收起键 -> 收回 1280（`shell_grown_w` 那条还原路径）。
-        #    键的位置从③那一帧现量，不写死
-        runs3 = white_runs(f3, 300, 8, 1700)
-        drawer_left = runs3[-1][0]
-        fx, fy = find_collapse(f3, drawer_left)
-        print("   收起键量到：帧 (%d,%d) → 客户区 (%d,%d)" % (fx, fy, fx - 8, fy - 8))
-        steps.ensure_focus(hwnd)
-        steps.click(hwnd, fx - 8, fy - 8)
-        time.sleep(2.5)
-        park_cursor(hwnd)
-        f4 = os.path.join(TMP, "g4_closed.png")
-        shoot.capture(hwnd, f4)
-        w4 = win_w(hwnd)
-        print("④ 点收起键之后：客户区宽 %d（期望回到没撑之前的 1280）" % w4)
-        print("   帧上白面 y=300:", white_runs(f4, 300, 8, 1600))
+        def need(open_, sidebar):
+            return TRACK_W + sidebar + MAIN_MIN + (insp if open_ else 0.0) + EDGE_W
 
-        # ⑤ 拖侧栏把手 +40 -> 侧栏变宽、窗口跟着向右撑那 40，**中间那一列仍是 950**
-        #    （同一条规则的另一种触发：拖把手也是"要更多宽"，不该拿中间列去垫）
-        steps.ensure_focus(hwnd)
-        drag(hwnd, HANDLE[0], HANDLE[1], 40)
-        park_cursor(hwnd)
-        f5 = os.path.join(TMP, "g5_dragged.png")
-        shoot.capture(hwnd, f5)
-        w5 = win_w(hwnd)
-        print("⑤ 拖侧栏把手 +40 之后：客户区宽 %d（④是 %d，期望长出接近 40）" % (w5, w4))
-        print("   帧上白面 y=300:", white_runs(f5, 300, 8, 1600))
+        def target(open_, sidebar):
+            """规则的完整形状：**宽 = max(初始宽, 需求)**。
+            那条规则只会"向右撑"，需求低于初始宽时它一个像素都不收——
+            所以只写 `== need` 会在"需求小于初始"那一跑上假红（上一版就红在这里，
+            而我当时把它写成 `>=`，等于把这条规则的另一半从判据里漏掉了）。
+            `max` 让两种情形都由同一条判据负责，换谁的 sidebar_w 都不用改脚本"""
+            return max(INITIAL_W, need(open_, sidebar))
 
+        print(f"   算式：轨 {TRACK_W} + 侧栏 + 中间下限 {MAIN_MIN} + 抽屉 {insp}"
+              f" + 右缘 {EDGE_W}，再与初始 {INITIAL_W} 取大；"
+              f"侧栏基线 {sw}（读配置）→ A 该是 {target(True, sw)}、B 该是 {target(False, sw)}")
         ok = [
-            ("①抽屉开撑到算式给的数", abs(w1 - 1582) <= 2),
-            ("②切总览收回去", abs(w2 - 1280) <= 2),
-            ("③切回来再撑一次", abs(w3 - 1582) <= 2),
-            ("④点收起键收回去", abs(w4 - 1280) <= 2),
-            ("⑤拖把手窗口跟着长", w5 - w4 >= 10),
+            # ── 两条**前提**（放在判据之前，并把名字写成"前提"）：
+            # 状态走配置不等于配置里的值真的进了界面——应用会夹它（`clamp_sidebar_w`），
+            # 而"两跑其实是同一个状态"若由后面的规则判据去发现，报出来的就是"规则坏了"。
+            # 上一轮那三条红就是这么来的：红的是前提，不是实现
+            ("前提：D 的侧栏比 A 宽 ≈ 40（没被 clamp 夹掉）",
+             abs((d["s"] - a["s"]) - DRAG_DELTA) <= 3),
+            ("前提：A 与 B 只差抽屉那一列（宽差 ≈ inspector_w，收起真的生效）",
+             abs((a["w"] - b["w"]) - insp) <= 2),
+            # ①② 就是补二十五那条原话：抽屉开与关，左栏那一列不许被抢
+            ("B 与 A 左栏同宽（抽屉不抢左栏）", abs(b["s"] - a["s"]) <= 1),
+            ("C 与 A 窗口同宽（再撑一次撑到同一个数）", abs(c["w"] - a["w"]) <= 2),
+            ("C 与 A 左栏同宽", abs(c["s"] - a["s"]) <= 1),
+            # ④ 撑宽这件事要能算出来，不是"看起来变宽了"
+            ("A 的宽 == 算式给的数", abs(a["w"] - target(True, sw)) <= 2),
+            ("B 的宽 == 算式给的数（含『需求不到初始就不收』那一半）",
+             abs(b["w"] - target(False, sw)) <= 2),
+            # ⑤ 侧栏变宽的 40 必须由窗口承担。判据取**两个增量的差**，
+            # 不去反算中间列的绝对宽（那要把轨宽与右缘宽抄成脚本里的数）
+            ("D 侧栏 +40 之后窗口确实长了", (d["w"] - a["w"]) >= 20),
+            ("D 长的部分全部进了侧栏（没拿中间列垫）",
+             abs((d["w"] - a["w"]) - (d["s"] - a["s"])) <= 3),
+            ("D 的宽 == 算式给的数", abs(d["w"] - target(True, sw + DRAG_DELTA)) <= 2),
+            ("E 的宽 == 算式给的数", abs(e["w"] - target(False, sw + DRAG_DELTA)) <= 2),
+            # 头注释答应过的一条：D 与 E 只差抽屉那一列，证撑宽真的由抽屉参与
+            # （宽差要读配置里那一列，不许抄一个 320 进来——32-15 就红在抄的数上）
+            ("D 与 E 只差抽屉那一列（宽差 ≈ inspector_w）",
+             abs((d["w"] - e["w"]) - insp) <= 2),
         ]
-        # 侧栏那一格确实跟着把手变宽了（否则"窗口跟着长"只是因为拖拽整个没生效）
-        sw4 = white_runs(f4, 300, 40, 340)
-        sw5 = white_runs(f5, 300, 40, 400)
-        a = sw4[0][1] if sw4 else 0
-        b = sw5[0][1] if sw5 else 0
-        ok.append(("⑤侧栏真的被拖宽了", b - a >= 30))
-        print("   侧栏白面：拖前 %d -> 拖后 %d" % (a, b))
-        # ⑤ 真正的不变量不是"窗口长 40"，是**中间那一列还是 950**：
-        # 拖之前窗口本来就比需求宽 18（1280 vs 1262），那 18 先垫掉，
-        # 所以窗口只长了 40 − 18 = 22 上下。用帧上的白面宽反算中间列
-        panel5 = b + 6                       # 侧栏面板宽 = 卡白面 + 它自己那 6px 内缩
-        main5 = w5 - 41 - panel5 - 8         # 客户区 − 轨 41 − 侧栏 − 右缘 8
-        ok.append(("⑤拖完中间列仍是 950", abs(main5 - 950) <= 3))
-        print("   ⑤反算中间列 = %d − 41 − %d − 8 = %d（目标 950）" % (w5, panel5, main5))
-        # 左栏宽在①③两次里必须是同一个数（抢宽那一族缺陷的判据）
-        s1 = white_runs(f1, 300, 40, 340)
-        s3 = white_runs(f3, 300, 40, 340)
-        v1 = s1[0][1] if s1 else 0
-        v3 = s3[0][1] if s3 else 0
-        ok.append(("①③左栏宽一致（没被右栏抢）", abs(v1 - v3) <= 1))
-        print("   左栏白面：①%d ③%d" % (v1, v3))
         print("\n判读：")
         for name, passed in ok:
-            print("   %s  %s" % ("✓" if passed else "✗", name))
-        if not all(p for _, p in ok):
-            print("   ⇒ 有没过的，别当过了")
+            print(f"   {'通过' if passed else '不通过'}  {name}")
+        print(f"   参考：A {a['w']}/{a['s']}  B {b['w']}/{b['s']}  C {c['w']}/{c['s']}"
+              f"  D {d['w']}/{d['s']}  E {e['w']}/{e['s']}")
+        return 0 if all(p for _, p in ok) else 1
     finally:
-        p.terminate()
-        time.sleep(0.6)
-        check_real_cfg(before)
+        after = qbguard.real_cfg_fp()
+        print(f"真实 config 指纹 before={before} after={after}｜"
+              f"{'一致' if before == after else '**不一致，查是谁写的**'}")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
