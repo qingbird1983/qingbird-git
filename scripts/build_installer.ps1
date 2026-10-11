@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     一条命令出安装包：`qingbird-git-Setup-<版本>.exe`（版本号单源见 Cargo.toml）
 
