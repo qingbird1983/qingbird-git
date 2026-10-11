@@ -21,6 +21,15 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # 32-17：加这一条的唯一理由是 `on.push.tags` 那一档**到今天没被证过**——
+  # 发 v0.2.0 时 `git push origin main v0.2.0` 只产生了两条 branch push 的 run，
+  # `installer` job 全程 `skipped`。有了手动触发，就能在**不发版**的前提下把那一 job 跑一次：
+  # choco 装 Inno 的实际落点、`build_installer.ps1` 在 runner 上跑不跑得通、
+  # `upload-artifact` 那个 glob（包名不带 `v`）。
+  # ⚠️ 手动触发时 `github.ref_name` 是分支名而不是 `vX.Y.Z` ⇒ 下面那条
+  # 「标签与 Cargo.toml 必须是同一个数」在 dispatch 时**跳过**（不是放宽判据，
+  # 是那一刻根本没有标签可比——硬跑会把一次正常的手动打包判成红）
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -84,7 +93,7 @@ jobs:
   # （`gh release create ... --verify-tag`），CI 不替人按那个按钮。
   installer:
     name: 安装包（只在 tag 上）
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: gate
     runs-on: windows-latest
     steps:
@@ -95,6 +104,7 @@ jobs:
           python-version: "3.11"
 
       - name: 标签与 Cargo.toml 必须是同一个数
+        if: github.event_name == 'push'
         shell: python
         run: |
           import os, re, sys
