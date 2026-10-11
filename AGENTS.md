@@ -57,6 +57,14 @@ Windows 桌面工具：本地 Git 仓库一键同步。**Rust 原生 GPUI 界面
   ⇒ **翻行尾不会进仓库**：`git diff --numstat README.md` 只报 72 增 / 11 删，
   若行尾被当成内容变化，旧文件那 83 行会整份进删除侧 ⇒ autocrlf 在 diff 与 add 两侧都归一化。
   **只有"逐字节比 sha"这种工作树层面的判据会被它骗**
+  ⇒ **反向也会翻**（2026-10-11 第二次触发，方向与上面相反）：用 Python **文本模式**读一遍
+  再写一遍（`io.open(..., encoding=..)` + 默认 universal newlines + `newline=''` 写出），
+  会把工作树里的 CRLF 全拍成裸 LF。症状是 **`git diff HEAD` 报零行**（autocrlf 在 diff 与
+  add 两侧都归一化）而 `git status` 一直报 M，唯一线索是那句 "LF will be replaced by CRLF
+  the next time Git touches it"。⇒ **别拿"diff 是空的"当"文件没被动过"的证据**；
+  还原判据与上面同一条：**先数两种行尾各有几处**（本轮 0 对 108 ⇒ 补回 108 对 0，
+  status 才干净），再决定往哪边补。改源码的一次性脚本一律**按字节读写**（`open(..., 'rb')`
+  / `'wb'`），不要走文本模式
   ⇒ **字节级锚点（变异脚本、一次性改源码的脚本）先量目标文件此刻的行尾再写**；
   方向写反的症状是 assert 报**"锚点 0 次"**——本轮就因此**一轮变异都没跑成**
   ⇒ **变异脚本必须把还原写进 `finally`**：第一版是顺序语句，第二轮 assert 抛出时
@@ -1236,6 +1244,19 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
   且默认等宽字体 Consolas 不含汉字，代码区中文会掉字重。设计上要用 Noto Sans SC + Sarasa Gothic SC。
   ⚠️ **挂等宽字体的容器里不要放中文 UI 文案**：连空态提示语一起放进去就会掉字重
   （`log.rs` 的输出流空态已改回 `t.font_family` + 居中）。
+  ⚠️ **上面那句「写英文名会查不到」2026-10-11 实测不成立，落法要按这三条改**
+  （路线表 32-16 前置实测 / Q40，判据都是运行期从应用自己的文本系统打出来的，不是读代码）：
+  ① **同一个字体在清单里有两条名字**（`微软雅黑` 与 `Microsoft YaHei UI` 同时存在，
+  `Noto Sans SC` 走的是英文那条）⇒ 探针要**两个名字都试**，不是二选一；
+  ② ⛔ **家族名解析不到不会崩，也不会缺字——是静默换成另一款**（实测要 `Sarasa Gothic SC`
+  与一个乱写的名字，两次都落在 Segoe UI）。上游两份文档在这件事上互相矛盾：
+  `gpui-component/theme/mono_font.rs` 的头注释说 "GPUI panics on the first line it lays out
+  in a family it cannot find"，而底下那颗 `gpui-pre/text_system.rs:364` 的 `resolve_font`
+  写的是"falling back to the default font stack"，只有连回退栈都解析不出才真 panic。
+  ⇒ **别照着任何一份文档下结论，跑一次**（这一族本项目吃过亏）；
+  ③ 判据因此不能是"没报错"，要取 **`get_font_for_id(resolve_font(f)).family == 要的那个名字`**
+  ——清单里有同名条目也不等于解析时真选中了它。**风险是"同一款应用在不同机器上长得不一样，
+  而一个字都不报"**，比崩更难发现
 - 编译坑：本机 WorkBuddy 宿主会拦截新编译 exe 创建命名管道（OS error 231），
   **个别**带 build script 的依赖在进程内编不出来。绕行办法是用计划任务脱离进程树构建
   （`Register-ScheduledTask` + `Start-ScheduledTask`，输出重定向到日志文件）。
