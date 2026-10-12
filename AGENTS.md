@@ -294,7 +294,8 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
 出安装包只能用 release 那条，别拿 debug 的凑）
 
 出安装包：`pwsh scripts/build_installer.ps1`（顺带编 release；
-已编过只想重打包就加 `-SkipBuild`）→ `dist/qingbird-git-Setup-0.1.0.exe`（~9 MB）
+已编过只想重打包就加 `-SkipBuild`）→ `dist/qingbird-git-Setup-<版本号>.exe`（~9 MB，
+版本号取自根 `Cargo.toml`，**这里不复述具体数字**——写过 `0.1.0` 的那句在 v0.2.0 之后就是假话）
 - **发版流程（2026-10-10 第一次跑通 v0.1.0，顺序固定）**：
   ① **版本号只有一个出处**（32-13 起）：仓库根 `Cargo.toml` 的
   `[workspace.package].version`。`gui/Cargo.toml` 与 `crates/core/Cargo.toml` 都写

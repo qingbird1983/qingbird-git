@@ -7360,8 +7360,13 @@ core **234** + gui **145** 全绿；gui 单测连跑 **5 遍** 5/5 全绿、真�
   ⚠️ **v0.3.0 那次 run 不去 rerun、标签也不移**：rerun 拿的是**标签那条提交里的旧 ci.yml**，
   照样红；移动已发布标签要连带改 Release 指向，属不可逆的高代价动作，
   而那个包已经过三条校验（包是新的、PE 头 `Subsystem=2`、上传资产回比 sha256 逐字节相同）
-  ⇒ **红的是打印，不是产物**。修复从**下一个标签**起生效，
-  本轮用 `workflow_dispatch` 传 `v0.3.0` 把修好的这一步**真跑绿**当证据。
+  ⇒ **红的是打印，不是产物**。修复从**下一个标签**起生效。
+  ✅ **手动那一跑已经把它证死了**（run `38208863034`，`workflow_dispatch` 传 `tag=v0.3.0`，
+  两条 job 全 `success`，20m35s）：那一步在 runner 上**不再被跳过**，日志里第 137 行就是那句
+  中文报喜话「版本号单源一致：0.3.0」（13:48 本地）⇒ 编码那一档修好了；
+  后面三步也一并过了（choco 装 Inno、runner 上编 release + ISCC `Successful compile`、
+  PE 头 `[OK ] Subsystem=2`），产物只上传成 Actions artifact（名字带 `ref_name`，
+  dispatch 那一次叫 `qingbird-git-installer-main`，**不会与 Release 上那个包混**）。
 
 * [x] **32-29 那条"旁观者读不到半份配置"的用例偶发红：红的是它自己的前提，而前提在操作系统手里**
   （2026-10-12 收尾闸里撞出来的，同轮查完并落；只动 `crates/core/src/store.rs` 的
