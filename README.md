@@ -29,8 +29,9 @@
 * **批量同步**：拉取全部 / 推送全部 / 检测全部三条固定命令，**按已扫状态自动筛**
   （「拉取全部」只跑落后的、「推送全部」只跑非第三方且有待推送的），回车即跑不弹确认。
   脏工作区的仓库**跳过并记进它自己的日志**，不替你 stash。
-  ⚠️ 目前是**逐个串行**跑的（后台那把操作锁是整个应用一把，同一时刻只放一个忙操作），
-  锁的粒度下沉登记在路线表阶段 32。
+  ⚠️ 批量是**最多 4 路并发**（`sync::MAX_CONCURRENT_OPS`，完成一颗补一颗）；互斥的粒度是
+  **每仓库一把锁**（`sync::try_begin_op(path)`），配置写另有自己那把串行闸 `store::SAVE_LOCK`。
+  旧版那句"整个应用一把锁、下沉登记在阶段 32"是 **32-8 / 32-9 之前**的形状，那两个阶段已经落了。
 * **后台自动同步**：按间隔或每日定时两种档，到期自动检测并推送结果。
 * **托盘常驻**：关闭主窗口后进程留在托盘，托盘菜单支持重新打开、扫描全部仓库、退出。
 * **关窗时问一句**：三档可选（最小化到托盘 / 直接退出 / 每次询问），询问那一档是面板里
@@ -73,6 +74,8 @@
 | `docs/UI-ROADMAP.md` | 路线表与决策台账——**改界面前先读它**，那是唯一施工真源 |
 | `docs/UI-DESIGN-v4.md` | **v4 视觉契约**：颜色 / 圆角 / 间距 / 阴影 / 动效 / 图标这六类数值**只写在这里** |
 | `docs/UI-DESIGN.md` | 设计规范：版面结构 / 侧栏 / 内容区 / 功能分层与唯一入口 / 文案 / 键盘 / 官方组件对照——**"哪里放什么"这一层仍然有效**；它的第 4、5 章（颜色与交互状态）已被 v4 取代 |
+| `docs/CODE.md` | **代码规范**：文件与函数尺寸、命名、错误处理、日志、注释、提交信息、依赖 |
+| `docs/DOCS.md` | **文档规范**：哪一本管什么、一条规则只有一个家、新增一篇的判据、路线表条目格式 |
 | `installer.iss` + `packaging/` | Inno Setup 6 安装包脚本与中文向导（按用户安装、免 UAC） |
 | `scripts/` | 实机验收用的抓帧与点击脚本，另有设计令牌闸与 PE 头校验 |
 
@@ -84,7 +87,7 @@ cargo build --workspace                      # 编译（调试产物）
 target\debug\qingbird-git.exe                # 跑起来
 
 cargo build --workspace --release            # 发布产物（gpui 那棵树约 5 分半，约 32 MB）
-pwsh scripts/build_installer.ps1             # 出安装包（顺带编 release）→ dist\qingbird-git-Setup-0.1.0.exe
+pwsh scripts/build_installer.ps1             # 出安装包（顺带编 release）→ dist\qingbird-git-Setup-<版本号>.exe
 ```
 
 ⚠️ **debug 与 release 是两条产物路径，而且行为不同**：debug 保留控制台（panic 栈、
@@ -96,8 +99,8 @@ pwsh scripts/build_installer.ps1             # 出安装包（顺带编 release�
 ## 测试
 
 ```bash
-cargo test -p qingbird-core                  # 业务逻辑（回归靠它，188 条）
-cargo test -p qingbird-gui                   # 界面里不依赖 gpui 初始化的纯逻辑（121 条）
+cargo test -p qingbird-core                  # 业务逻辑（回归靠它）
+cargo test -p qingbird-gui                   # 界面里不依赖 gpui 初始化的纯逻辑
 cargo test --workspace --no-run              # 测试模块也要零告警（这条 check 看不到）
 python scripts/check_design_tokens.py        # 设计令牌闸：字面色值 / 裸间距 / 裸时长 / 文字冒充图标…
 ```
