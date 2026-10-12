@@ -27,12 +27,29 @@ on:
   # choco 装 Inno 的实际落点、`build_installer.ps1` 在 runner 上跑不跑得通、
   # `upload-artifact` 那个 glob（包名不带 `v`）。
   # ⚠️ 手动触发时 `github.ref_name` 是分支名而不是 `vX.Y.Z` ⇒ 下面那条
-  # 「标签与 Cargo.toml 必须是同一个数」在 dispatch 时**跳过**（不是放宽判据，
-  # 是那一刻根本没有标签可比——硬跑会把一次正常的手动打包判成红）
+  # 「标签与 Cargo.toml 必须是同一个数」**没有标签可比**。
+  # 2026-10-12 补：以前这里是"dispatch 整步跳过"，于是那一步的判据**只有真发版才第一次执行**——
+  # v0.3.0 那一跑撞上的编码崩就正好藏在这个盲区里（见下面那步的注释）。
+  # 现在改成把标签名当输入传进来：传了就跑（拿它当标签名对照根 Cargo.toml），
+  # 留空才跳过 ⇒ 不发版也能把这一档证一遍。
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "手动跑时要对照的标签名（如 v0.3.0）；留空则跳过版本单源那一步"
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
+  # ⛔ 这一行是 v0.3.0 那次 tag run 红的**唯一成因**，而红的不是判据：
+  # 标签与 Cargo.toml 那两个数**确实一致**（判据已经走完了），炸的是最后那句中文报喜话——
+  # runner 的标准流默认 cp1252，`print("版本号单源一致：…")` 编不出来 ⇒
+  # `UnicodeEncodeError` ⇒ 退出码 1 ⇒ 整条 job 判红。
+  # 这是 AGENTS「GBK 控制台会编不出」那条的**第四种触发**：不在控制台、不在写文件、
+  # 不在本地报错句，而在** Actions 的内联 `shell: python` 步骤**里。
+  # 落法取根因（解释器标准流的编码），不把中文判读行改成 ASCII——
+  # 改成 ASCII 等于为了让日志编得出来而把"红在哪一条"那句话删掉，方向反了。
+  PYTHONIOENCODING: utf-8
 
 jobs:
   # ── ① 每次 push / PR 都跑的闸门 ──────────────────────────────────────
@@ -104,11 +121,15 @@ jobs:
           python-version: "3.11"
 
       - name: 标签与 Cargo.toml 必须是同一个数
-        if: github.event_name == 'push'
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.tag != ''
+        env:
+          # push（含 tag）时用真实 ref 名；手动跑时用输入里填的那个标签名——
+          # 两个来源收成一条表达式，判据本身一个字不改
+          QB_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
         shell: python
         run: |
           import os, re, sys
-          tag = os.environ["GITHUB_REF_NAME"]
+          tag = os.environ["QB_TAG"]
           txt = open("Cargo.toml", encoding="utf-8").read()
           m = re.search(r'(?s)\[workspace\.package\].*?version\s*=\s*"([^"]+)"', txt)
           if not m:
@@ -120,6 +141,10 @@ jobs:
         # 加这一步的理由：以前版本号手写三处，**只改一两处不会有任何报错**（32-13）。
         # 单源之后剩下的唯一失误方式是「忘了改就打的标签」——
         # 它会让包里的版本与界面读出来的版本不是同一个数，而两边各自都"对"
+        # ⚠️ 上面那两条 `sys.exit(中文)` 走的是**判据真红的那一路**，而它以前在 cp1252
+        # 下会先炸在"把这句红话说出来"上：退出码照样 1，可"红在哪一条"一个字都读不出来。
+        # 与 AGENTS「炸点在报错那条话上，所以它只在真抓到漂移那一刻才坏」同一条，
+        # 这一族本项目第四次撞——前三次都在本地脚本，这次在 CI。
 
       - name: 装 Inno Setup 6
         run: choco install innosetup -y --no-progress

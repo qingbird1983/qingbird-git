@@ -1035,12 +1035,14 @@ mod tests {
         save_to(&file, &big_cfg("seed", 120)).expect("先铺一份底");
 
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
+        let (tx, rx) = std::sync::mpsc::channel::<(Vec<String>, usize)>();
         let reader = {
             let (file, stop) = (file.clone(), stop.clone());
             std::thread::spawn(move || {
                 let mut bad: Vec<String> = Vec::new();
+                let mut reads: usize = 0;
                 while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    reads += 1;
                     match fs::read_to_string(&file) {
                         Err(e) => bad.push(format!("文件读不到：{e}")),
                         Ok(text) => {
@@ -1050,19 +1052,65 @@ mod tests {
                         }
                     }
                 }
-                let _ = tx.send(bad);
+                let _ = tx.send((bad, reads));
             })
         };
 
+        // 写侧：**成功次数是计数器，不是断言前置**。
+        // 为什么这里不许 panic（2026-10-12 改成这样，起因是一次全量并行里的偶发红）：
+        // `save_to` 最后一步是 `fs::rename(tmp, 目标)` 覆盖，而 Windows 上实时防护
+        // （Defender / 索引类过滤驱动）会在一个文件**刚被创建**的那一瞬间把它占住，
+        // 此时 `MoveFileExW` 返回 `ERROR_ACCESS_DENIED`（实测那句是「拒绝访问。 (os error 5)」，
+        // 出现在第 52/60 轮）。**这一支不是数据损坏**：`save_to` 在这一支已经把临时文件删掉、
+        // 原样把错误返回，目标那一格仍然是**完整的旧配置** ⇒ 旁观者的判据照样成立。
+        // 红的是这条用例的前提——「60 轮写全部成功」从来不是实现能承诺的东西，
+        // 它是**操作系统给的**（AGENTS「测试的前提不能外包给环境」那一族的第三种触发：
+        // 前两种是"拿外部世界的反应当夹具"与"固定 sleep 猜走到哪一步"，
+        // 这一次是"要求内核在一个有第三方过滤驱动的 filesystem 上从不暂时拒绝"）。
+        // ⇒ 前提改成**量出来 + 有下限**（下面 `wrote_ok` 那条），而不是要求"零次拒绝"
+        let mut wrote_ok = 0usize;
+        let mut refused: Vec<String> = Vec::new();
         for i in 0..60 {
             // 两份相差一个量级：写的时间越长那个窗口越宽，最好让交叠真发生
             let (tag, count) = if i % 2 == 0 { ("even", 40) } else { ("oddish", 420) };
-            save_to(&file, &big_cfg(tag, count))
-                .unwrap_or_else(|e| panic!("第 {i} 轮写失败：{e}"));
+            match save_to(&file, &big_cfg(tag, count)) {
+                Ok(()) => wrote_ok += 1,
+                Err(e) => refused.push(format!("第 {i} 轮：{e}")),
+            }
         }
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         reader.join().expect("旁观线程该回来");
-        let bad = rx.recv().expect("该拿到旁观者的账");
+        let (bad, reads) = rx.recv().expect("该拿到旁观者的账");
+        // ── 两条"测量发生了没有"的自检，各自独立于上面那条判据分支 ──────────
+        // 下限都按**量出来的数**取（不拍）：
+        //   写成功次数：正常 60/60；偶发那次系统拒绝是 51/60 ⇒ 40 这道线在两者之间，
+        //     既能挡住"整条写路径压根没跑"（0 次也绿就是假通过），也不会把
+        //     一次真实的过滤驱动干扰判成缺陷；
+        //   旁观者读数：**实测只有 97 / 111 / 145 次**（每次读都要把近百 KB 的 JSON
+        //     解析一遍，比想象慢两个量级）⇒ 取 50 为线。
+        //     这一格必须自己报红，否则"60 轮写跑完而旁观者一次都没读到"会被报成
+        //     「没有坏状态」——那是**假通过**（AGENTS：量到 0 条既不能当通过也不能当失败）
+        assert!(
+            wrote_ok >= 40,
+            "60 轮里只写成功 {wrote_ok} 次（被拒 {} 次：{}）⇒ 写这条路径没跑起来，\
+             这条用例什么都没测",
+            refused.len(),
+            refused.first().map(String::as_str).unwrap_or("")
+        );
+        assert!(
+            reads >= 50,
+            "旁观者只读了 {reads} 次 ⇒ 与写侧的交叠没造出来（正常量级 97–145），\
+             这条「没有半份」是空的通过"
+        );
+        if !refused.is_empty() {
+            // 不吹成"全成功"：被系统拒过几轮、第几轮、错误码是什么都要留下字。
+            // 生产要不要给那一步加有界重试是**另一件事**，登记在路线表（32-29），归用户拍
+            println!(
+                "写侧被系统拒绝 {} 轮（{wrote_ok}/60 成功）：{}",
+                refused.len(),
+                refused.join(" | ")
+            );
+        }
         assert!(
             bad.is_empty(),
             "旁观者读到过 {} 次坏状态。第一条：{} ⇒ 配置落盘不是原子的，\
