@@ -371,7 +371,7 @@ fn stash_row(
                                 let subject = subject.clone();
                                 move |_, _window, cx| {
                                     this.update(cx, |shell, cx| {
-                                        shell.run_stash_apply(idx, &subject, cx)
+                                        shell.stash_op(idx, &subject, false, cx)
                                     });
                                 }
                             }),
@@ -410,7 +410,7 @@ fn stash_row(
                                 let subject = subject.clone();
                                 move |_, _window, cx| {
                                     this.update(cx, |shell, cx| {
-                                        shell.run_stash_drop(idx, &subject, cx)
+                                        shell.stash_op(idx, &subject, true, cx)
                                     });
                                 }
                             }),

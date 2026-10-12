@@ -56,7 +56,9 @@ use crate::git;
 use crate::repos::{self, ChangeEntry};
 use crate::space::explain_delete_error;
 
-const LOCAL_TIMEOUT: Duration = Duration::from_secs(60);
+/// 恢复工作区（`git restore` 一大批路径）比普通本地命令久，单独一档——
+/// 别的 `LOCAL_TIMEOUT` 都是 10s，那档量的是 status / log 这类随手命令
+const RESTORE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 一次清理的结果
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -211,7 +213,7 @@ fn restore_tracked(repo_path: &str, paths: &[String]) -> Result<(), String> {
             "--pathspec-file-nul",
         ],
         &payload,
-        LOCAL_TIMEOUT,
+        RESTORE_TIMEOUT,
     );
     if out.success {
         Ok(())
@@ -326,19 +328,6 @@ mod tests {
                 "git {args:?} 失败: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
-        }
-
-        /// 允许失败的一条（造某种状态用）
-        fn try_git(&self, args: &[&str]) -> bool {
-            Command::new("git")
-                .arg("-C")
-                .arg(&self.root)
-                .args(["-c", "user.name=t", "-c", "user.email=t@x.invalid"])
-                .args(args)
-                .output()
-                .unwrap()
-                .status
-                .success()
         }
 
         fn path(&self) -> String {

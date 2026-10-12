@@ -116,7 +116,7 @@ impl Shell {
                     .child(pill(
                         if third { "第三方" } else { "我的" },
                         if third { orange_text(t) } else { tier3(t) },
-                        if third { orange_bg(t) } else { track(t) },
+                        if third { wash_bg(WARN_WASH, t) } else { track(t) },
                     ))
                     // ⚠️ **停止键挂在仓库头，不挂在日志段**（2026-10-05 用户反馈：
                     // 「构建卡死没有终止按钮，以前是有的」）。

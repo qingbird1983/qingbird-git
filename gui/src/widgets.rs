@@ -242,37 +242,20 @@ pub(crate) fn pill(text: &str, fg: Hsla, bg: Hsla) -> Div {
     pill_with(None, text, fg, bg, None)
 }
 
-/// 带一枚前置图标的胶囊。**与 `pill` 共用同一份实现**——
-/// 高度、圆角、字号、水平内边距只有一个出处，不会出现"带图标的那种胶囊矮一档"
-pub(crate) fn pill_icon(
-    icon: gpui_kit::assets::IconName,
-    text: &str,
-    fg: Hsla,
-    bg: Hsla,
-) -> Div {
-    pill_with(Some(icon), text, fg, bg, None)
-}
-
-/// **描边胶囊**：透明底 + 一圈 `line` 描边 + muted 字（原型 `.pill.out`）。
+/// 胶囊全家共用的实现：实底（`pill`）/ 带图标实底 / 描边只差**传进来的颜色与描边**。
 ///
-/// 它和实底胶囊不是一种装饰偏好，是**两种语义重量**：
-///   · 实底（`pill` / `pill_icon`）= 这格在**报一个状态**（未提交 / 待推送 / 已同步），
-///     底色就是那个状态的 wash，扫一眼就能挑出来；
-///   · 描边（这一个）= 这格只是**标一个身份**（当前分支叫什么、仓库归属哪边），
-///     没有"好坏"要报，所以不许占底色——一屏里全是实底胶囊时，
-///     真需要看的那三个状态反而被淹掉。
+/// 两种语义重量，别混：
+///   · 实底 = 这格在**报一个状态**（未提交 / 待推送 / 已同步），底色就是那个
+///     状态的 wash，扫一眼就能挑出来（`border` 传 `None`）；
+///   · 描边 = 这格只是**标一个身份**（当前分支叫什么、仓库归属哪边），没有
+///     "好坏"要报，所以不许占底色——一屏里全是实底胶囊时，真需要看的那三个
+///     状态反而被淹掉（底给 `card_face(t)` 卡白 + `edge(t)` 描边 + `tier3(t)` 字）。
+///     ⚠️ 它不是真透明 ⇒ **只能坐在白卡上**；要挪到灰底（侧栏、画布）上得先改成吃父底
 ///
 /// 原来分支那一枚是 `panels::branch_badge` 自己手搓的第四种胶囊写法
 /// （`R_MD` 方角 + `muted` 实底 + `fs_sec` 字），既不在 `pill_h()` 那一档、
-/// 也不在全圆角那一档 ⇒ 收回来走同一个 `pill_with`，**只换底与描边这两样**。
-///
-/// ⚠️ 底给的是 `card_face(t)`（卡白），不是真透明 ⇒ **它只能坐在白卡上**。
-/// 目前唯一的用法就在头卡里；要挪到灰底（侧栏、画布）上得先改成吃父底
-pub(crate) fn pill_out(icon: Option<gpui_kit::assets::IconName>, text: &str, t: &Theme) -> Div {
-    pill_with(icon, text, tier3(t), card_face(t), Some(edge(t)))
-}
-
-fn pill_with(
+/// 也不在全圆角那一档 ⇒ 收回来走这一个，**只换底与描边这两样**。
+pub(crate) fn pill_with(
     icon: Option<gpui_kit::assets::IconName>,
     text: &str,
     fg: Hsla,

@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::git;
+use crate::net::{percent_of, PROGRESS_STAGES};
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RepoStatus {
@@ -149,14 +150,14 @@ impl OpResult {
 pub(crate) fn combined(out: &git::GitOutput) -> String {
     // 进度刷新行（\r 重复输出）在进度条里已展示，日志里去掉避免刷屏
     //
-    // **白名单必须与 `net::parse_progress` 那份保持同步**（2026-10-05 修）：
-    // 原来这里只有 7 条且漏了 `remote: Compressing` / `Unpacking` /
+    // **白名单就是 `net::PROGRESS_STAGES` 那一份**（2026-10-05 修）：原来这里
+    // 另抄了一份 7 条的，漏了 `remote: Compressing` / `Unpacking` /
     // `Checking out`，于是"完成"那几行逃过过滤、又没被别处渲染，
-    // 在日志里就成了半截。
+    // 在日志里就成了半截。合成一份之后两边不可能再漂。
     //
     // 判据是**百分比 < 100**：完成那一条（100% / done）是要留的，
-    // 它正是"这一步做完了"的记录。两份各写一遍规则迟早漂——
-    // 所以这里认不出的行**一律保留**（宁可多一行，也不要静默吞掉信息）。
+    // 它正是"这一步做完了"的记录。抠不出百分比的行**一律保留**
+    // （`percent_of` 返 `None` ⇒ 不当刷新行；宁可多一行，也不要静默吞掉信息）。
     let clean = |text: &str| -> String {
         text.split('\n')
             .filter(|line| {
@@ -167,7 +168,7 @@ pub(crate) fn combined(out: &git::GitOutput) -> String {
                 let body = l.strip_prefix("remote:").map(str::trim_start).unwrap_or(l);
                 !PROGRESS_STAGES
                     .iter()
-                    .any(|k| body.starts_with(k) && percent_of(body) < 100.0)
+                    .any(|(k, _)| body.starts_with(k) && percent_of(body).is_some_and(|p| p < 100.0))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -185,28 +186,3 @@ pub(crate) fn combined(out: &git::GitOutput) -> String {
     }
     s
 }
-
-/// git 进度行的前缀。与 `net::parse_progress` 的那份同源同值。
-const PROGRESS_STAGES: &[&str] = &[
-    "Updating files",
-    "Checking out files",
-    "Unpacking objects",
-    "Counting objects",
-    "Compressing objects",
-    "Enumerating objects",
-    "Receiving objects",
-    "Resolving deltas",
-    "Writing objects",
-];
-
-/// 从进度行里抠出百分比。抠不出（无 `%`）算 100——
-/// **无百分比的行为一次性事件行，不是刷新行**，不该被滤掉。
-fn percent_of(s: &str) -> f32 {
-    let Some(idx) = s.find('%') else { return 100.0 };
-    let Some(start) = s[..idx].rfind(|c: char| !c.is_ascii_digit() && c != '.') else {
-        return 100.0;
-    };
-    s[start..idx].parse().unwrap_or(100.0)
-}
-
-

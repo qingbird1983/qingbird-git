@@ -7,7 +7,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::git;
-use crate::repos::{self, LOCAL_TIMEOUT};
+use crate::net::LOCAL_TIMEOUT;
+use crate::repos;
 
 /// 可清理的构建缓存目录名白名单（均为可再生的构建产物 / 依赖缓存）。
 /// 同时用作两个判定：容量面板里的"可清理"、以及可以建议写进 `.gitignore` 的目录

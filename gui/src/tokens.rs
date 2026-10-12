@@ -94,18 +94,8 @@ pub(crate) fn card_face(t: &Theme) -> Hsla {
 pub(crate) fn wash(t: &Theme) -> Hsla {
     t.colors.secondary_active
 }
-/// 「可更新」徽章 / 清理条的橙底 = v4 的 `warn-wash`。
-/// ⚠️ 名字是历史包袱（`orange_*` 说的是色相不是语义）；阶段 31.3 把它们收进
-/// `widgets::pill` 之后按语义命名，这一轮只换值、不换调用点
-pub(crate) fn orange_bg(t: &Theme) -> Hsla {
-    // 深色下是**深棕底 + 亮橙字**，不是浅色 wash（浅色 wash 铺在深卡上是一块刺眼的白斑）
-    if t.is_dark() {
-        rgb(0x1E1610).into()
-    } else {
-        rgb(0xFBE9D6).into()
-    }
-}
-/// 清理条上的深橙文字 = v4 的 `warn`（浅色）/ 深色档提亮值
+/// 清理条上的深橙文字 = v4 的 `warn`（浅色）/ 深色档提亮值。
+/// 与 wash 底**必须是同一个色相的两档**（底和字拆家就是两种东西）
 pub(crate) fn orange_text(t: &Theme) -> Hsla {
     if t.is_dark() {
         rgb(0xF08A3C).into()
@@ -113,34 +103,30 @@ pub(crate) fn orange_text(t: &Theme) -> Hsla {
         rgb(0xB85C12).into()
     }
 }
-/// 「待推送 / 进行中」徽章底 = v4 的 `info-wash`，与 `wash` 同值
-/// （v4 §2.1 把 info 定成主色本体 + wash）
-pub(crate) fn blue_bg(t: &Theme) -> Hsla {
-    if t.is_dark() {
-        rgb(0x17383F).into()
-    } else {
-        rgb(0xDCEFF0).into()
-    }
-}
-/// 「失败 / 已分叉」徽章底 = v4 的 `bad-wash`。文字色直接用 `t.colors.danger`，
-/// 底和字必须是同一个色相的两档
-pub(crate) fn red_bg(t: &Theme) -> Hsla {
-    if t.is_dark() {
-        rgb(0x331A1C).into()
-    } else {
-        rgb(0xF8E2E3).into()
-    }
-}
-/// 「即时生效 / 已配置」徽章底 = v4 §2 的 `ok-wash`（浅 `#D6F0DD` / 深 `#10281A`）。
+
+/// v4 §2 四档徽章 wash 底：（浅色, 深色）一对。名字照 v4 的语义档
+/// （warn / info / bad / ok），不按色相叫——`orange_*` / `blue_*` 那套是历史包袱
 ///
-/// 这一档早就登记在 v4 里，只是**一直没有调用点**（阶段 31.2 裁档时跟着
-/// `green` 一起删了）。现在设置页要标"哪几条不用点保存"，调用点来了才补回来——
-/// **先有调用点再有档**，反过来就是 `cargo check` 里一条常驻 unused 警告
-pub(crate) fn green_bg(t: &Theme) -> Hsla {
+/// ⚠️ **深色下是深底 + 亮字，不是把浅色 wash 照搬**：浅色 wash 铺在深卡上
+/// 是一块刺眼的白斑。`ok-wash` 那一档阶段 31.2 裁档时删过，设置页要标
+/// "哪几条不用点保存"才补回来——**先有调用点再有档**
+///
+/// 「可更新」徽章 / 清理条的底 = v4 的 `warn-wash`
+pub(crate) const WARN_WASH: (u32, u32) = (0xFBE9D6, 0x1E1610);
+/// 「待推送 / 进行中」徽章底 = v4 的 `info-wash`（v4 §2.1 把 info 定成主色本体 + wash）
+pub(crate) const INFO_WASH: (u32, u32) = (0xDCEFF0, 0x17383F);
+/// 「失败 / 已分叉」徽章底 = v4 的 `bad-wash`。文字色直接用 `t.colors.danger`
+pub(crate) const BAD_WASH: (u32, u32) = (0xF8E2E3, 0x331A1C);
+/// 「即时生效 / 已配置」徽章底 = v4 的 `ok-wash`
+pub(crate) const OK_WASH: (u32, u32) = (0xD6F0DD, 0x10281A);
+
+/// wash 底按主题取浅/深那一档。**全仓只有这一个 if**——原来四颗 `*_bg`
+/// 函数各写一遍同样的 if、只差两个 rgb 常量，改一处漏三处
+pub(crate) fn wash_bg(pair: (u32, u32), t: &Theme) -> Hsla {
     if t.is_dark() {
-        rgb(0x10281A).into()
+        rgb(pair.1).into()
     } else {
-        rgb(0xD6F0DD).into()
+        rgb(pair.0).into()
     }
 }
 /// v4 §2 的 `line`（浅 #D7E0E4 / 深 #2E454C）——**这一档灰全站唯一的取值入口**。
@@ -839,22 +825,6 @@ pub(crate) const NAV_PAD_TOP: f32 = 3.0;
 /// 它与窗口下沿之间要的是"两个不同的东西"那种能分开的气口，所以往大档走。
 /// 早先顶与底共用一个 `NAV_PAD` 时也是这么混的（见 `nav_rail()` 的注释）。
 pub(crate) const NAV_PAD_BOTTOM: f32 = GAP_LG;
-/// 检视抽屉宽度上下限。与 core 的 `INSPECTOR_W_RANGE` 同一份定义。
-///
-/// **默认宽度不在这儿再写一份**：右栏从"写死 320 的固定列"变成"用户能拖、
-/// 且存得住"的列之后，宽度成了一份**会被用户改的状态**——界面常量与落盘值
-/// 各留一份必然有一帧对不上。老配置没这个字段时由 core 的
-/// `DEFAULT_INSPECTOR_W` 兜底，`Shell::new` 里夹一次范围，界面只管用
-/// `Shell::inspector_w`。侧栏的 `SIDEBAR_MAX_W` 与 `sidebar_min_w()` 是同一个做法
-pub(crate) const INSPECTOR_MIN_W: f32 = qingbird_core::store::INSPECTOR_W_RANGE.0;
-pub(crate) const INSPECTOR_MAX_W: f32 = qingbird_core::store::INSPECTOR_W_RANGE.1;
-/// 侧栏宽度**上限**。与 core 的 `SIDEBAR_W_RANGE.1` 同一份定义——
-/// 界面夹一遍、落盘再夹一遍，值域只有一个出处。
-///
-/// ⚠️ **下限不在这里**：原来也钉着一个 `SIDEBAR_MIN_W = 200`，那是"文字总放得下吧"
-/// 拍的数，帧上量到侧栏拖到最小那一站、底部「克隆仓库」那颗按钮的盒子压过卡右缘
-/// 8px。现在下限是 `sidebar_min_w(fs_sec)` 算出来的，**跟着字号档走**
-pub(crate) const SIDEBAR_MAX_W: f32 = qingbird_core::store::SIDEBAR_W_RANGE.1;
 /// 官方 `Button` 在 `Size::Small` 档自带的左右内边距（`button.rs:660-663` 的 `px_2`）。
 /// ⚠️ **这不是我们的间距档**，抄在这儿只为让 `sidebar_min_w` 的推导能逐字核对
 pub(crate) const BTN_PAD_X_SMALL: f32 = 8.0;

@@ -9,7 +9,7 @@ use crate::types::ProgressEvent;
 use crate::git;
 
 /// 本地 git 命令（status / log 等）超时
-pub const LOCAL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const LOCAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 从 git 进度行的参数部分提取传输量与网速：
 /// ":  6% (120/2000), 1.21 MiB | 56.00 KiB/s" → "已传输 1.21 MiB · 56.00 KiB/s"
@@ -96,6 +96,33 @@ pub fn progress_hooks(
     (tag, forward, stage)
 }
 
+/// git 进度行的九个阶段：英文前缀（git 输出里长这样）→ 中文显示名。
+///
+/// **全 core 唯一一份**：`types::combined` 的刷新行过滤与这里的进度解析共用它。
+/// 两份各写一遍迟早漂——2026-10-05 就漂过一次：过滤那份只有 7 条且漏了
+/// `remote: Compressing` / `Unpacking` / `Checking out`，于是"完成"那几行
+/// 逃过过滤、又没被别处渲染，在日志里成了半截
+pub(crate) const PROGRESS_STAGES: &[(&str, &str)] = &[
+    ("Updating files", "检出文件"),
+    ("Checking out files", "检出文件"),
+    ("Unpacking objects", "解包对象"),
+    ("Counting objects", "统计对象"),
+    ("Compressing objects", "压缩对象"),
+    ("Enumerating objects", "枚举对象"),
+    ("Receiving objects", "接收对象"),
+    ("Resolving deltas", "解析增量"),
+    ("Writing objects", "写对象"),
+];
+
+/// 从进度行里抠百分比。**抠不出返 `None`，不是 100**——
+/// "无百分比的一次性事件行"与"0% 的刷新行"是两件事，由调用方决定
+/// （`types::combined` 认不出的行一律保留，`parse_progress` 认不出的行照常上屏）
+pub(crate) fn percent_of(s: &str) -> Option<f32> {
+    let idx = s.find('%')?;
+    let start = s[..idx].rfind(|c: char| !c.is_ascii_digit() && c != '.')? + 1;
+    s[start..idx].parse().ok()
+}
+
 /// 解析 git 的 stderr 进度行，转换成可展示的进度事件
 ///
 /// **认不出的行也要返回**（`stage` / `detail` 留空、只带 `raw` 原文）——
@@ -125,24 +152,9 @@ pub fn parse_progress(line: &str) -> Option<ProgressEvent> {
         })
     };
 
-    let pct = |s: &str| -> Option<f32> {
-        let idx = s.find('%')?;
-        let start = s[..idx].rfind(|c: char| !c.is_ascii_digit() && c != '.')? + 1;
-        s[start..idx].parse().ok()
-    };
-    for (kw, stage) in [
-        ("Updating files", "检出文件"),
-        ("Checking out files", "检出文件"),
-        ("Unpacking objects", "解包对象"),
-        ("Counting objects", "统计对象"),
-        ("Compressing objects", "压缩对象"),
-        ("Enumerating objects", "枚举对象"),
-        ("Receiving objects", "接收对象"),
-        ("Resolving deltas", "解析增量"),
-        ("Writing objects", "写对象"),
-    ] {
+    for &(kw, stage) in PROGRESS_STAGES {
         if let Some(rest) = body.strip_prefix(kw) {
-            let percent = pct(rest);
+            let percent = percent_of(rest);
             // **到 100% 才进日志**：`Receiving objects: 45% …` 每秒刷十几行，
             // 全塞进日志会把真正的记录冲掉。完成那一条是"这一步做完了"，
             // 才是用户要看的东西。judge 放这里——core 才懂 git 输出的形状

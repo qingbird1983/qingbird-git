@@ -79,7 +79,13 @@ impl Shell {
         // `state.scroll_to_bottom = true`），由基座在下一帧布局时消费，
         // 所以它在哪一帧调都生效，但**要在这一帧 notify 之前**立起来，
         // 否则观感上就是"慢一帧才滚"。
-        let stick = self.log_follow_bottom();
+        // 判据是"视口是不是还贴着底"（不是"用户有没有滚过"）——用户自己滚回底部后
+        // 跟随就该自动恢复，否则会留一个只有用户自己摸得出来的怪状态，
+        // 见 `Shell::log_stick_to_bottom` 的注释
+        let stick = should_follow_bottom(
+            self.log_scroll.offset().y.to_f64() as f32,
+            self.log_scroll.max_offset().y.to_f64() as f32,
+        );
 
         // ⚠️ **"真的什么都没有"时那句状态话整条不给**（原型 `.log-card` 里
         // 那条 `bar` 只在有输出时长）。它第三档回落去问落盘历史，问不到就写
@@ -127,18 +133,6 @@ impl Shell {
             self.log_scroll.scroll_to_bottom();
         }
         panel
-    }
-
-    /// 该不该跟着新输出滚到底（阶段 21-1）。
-    ///
-    /// **判据是"视口是不是还贴着底"**，而不是"用户有没有滚过"——
-    /// 见 `Shell::log_stick_to_bottom` 的注释：用户自己滚回底部后
-    /// 跟随就该自动恢复，否则会留一个只有用户自己摸得出来的怪状态
-    fn log_follow_bottom(&self) -> bool {
-        should_follow_bottom(
-            self.log_scroll.offset().y.to_f64() as f32,
-            self.log_scroll.max_offset().y.to_f64() as f32,
-        )
     }
 }
 
@@ -756,7 +750,7 @@ impl Shell {
                         r.child(crate::widgets::pill(
                             &format!("代理 {proxy}"),
                             orange_text(t),
-                            orange_bg(t),
+                            wash_bg(WARN_WASH, t),
                         ))
                     }),
             );

@@ -304,9 +304,6 @@ fn default_true() -> bool {
     true
 }
 
-/// 侧栏宽度的 serde 缺省值。见 `Settings::sidebar_w` 的注释：
-/// 走独立函数而不是 `Settings::default()`，否则反序列化路径与新建路径会给出不同的宽度
-
 // ---- 关窗行为（阶段 22）----
 
 /// 点关闭键时怎么办。**存字面量而不是 bool**：理由见 `Settings::close_action`。
@@ -345,6 +342,8 @@ fn default_close_action() -> String {
     CLOSE_ASK.to_string()
 }
 
+/// 侧栏宽度的 serde 缺省值。见 `Settings::sidebar_w` 的注释：
+/// 走独立函数而不是 `Settings::default()`，否则反序列化路径与新建路径会给出不同的宽度
 fn default_sidebar_w() -> f32 {
     DEFAULT_SIDEBAR_W
 }

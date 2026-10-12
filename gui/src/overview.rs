@@ -391,11 +391,12 @@ impl Shell {
                 CardHeader::new("提交活跃度")
                     .note(format!("近 {ACTIVITY_DAYS} 天 · 全部仓库合计"), false)
                     .right(
-                        pill_icon(
-                            AssetIcon::TrendingUp,
+                        pill_with(
+                            Some(AssetIcon::TrendingUp),
                             &format!("{} 次提交", total),
                             t.colors.accent,
                             wash(t),
+                            None,
                         )
                         .into_any_element(),
                     )
@@ -474,11 +475,7 @@ impl Shell {
                 let status = ov_status_text(b, v.changed, e.is_third_party);
                 OvRow {
                     path: e.path.clone(),
-                    name: if e.alias.trim().is_empty() {
-                        e.name.clone()
-                    } else {
-                        e.alias.trim().to_string()
-                    },
+                    name: qingbird_core::scheduler::display_name(e),
                     third: e.is_third_party,
                     branch: v.status.branch.clone(),
                     bucket: b,

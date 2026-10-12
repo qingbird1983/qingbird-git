@@ -713,23 +713,21 @@ impl Shell {
     /// 下面 `status_of` / `title` / `log_of` 都要再借一次 `self`，
     /// 拿着长借用去调它们是**编译不过**的那种"看着一样"的写法
     fn pump_batch(&mut self, cx: &mut Context<Self>) {
-        while let Some(path) = self.batch_take_next() {
+        loop {
+            // 取下一颗：并发位满了、队列空了、或这一批已经收尾 ⇒ 停。
+            // "该不该发"那一问是纯函数 `batch_can_launch_more`（理由写在那颗函数上：
+            // `Shell` 构造不出来，不抽出来"上限有没有生效"就一条用例都写不了）
+            let path = {
+                let Some(b) = self.batch.as_mut() else { break };
+                if !crate::state::batch_can_launch_more(b.running, b.running_now.len(), b.queue.len()) {
+                    break;
+                }
+                let Some(path) = b.queue.first().cloned() else { break };
+                b.queue.remove(0);
+                path
+            };
             self.start_batch_item(path, cx);
         }
-    }
-
-    /// 该发下一颗了吗？并发位满了、队列空了、或这一批已经收尾 ⇒ `None`。
-    ///
-    /// 那一问本身抽成了纯函数 `batch_can_launch_more`（理由写在那颗函数上：
-    /// `Shell` 构造不出来，不抽出来"上限有没有生效"就一条用例都写不了）
-    fn batch_take_next(&mut self) -> Option<String> {
-        let b = self.batch.as_mut()?;
-        if !crate::state::batch_can_launch_more(b.running, b.running_now.len(), b.queue.len()) {
-            return None;
-        }
-        let path = b.queue.first().cloned()?;
-        b.queue.remove(0);
-        Some(path)
     }
 
     /// 发一颗出去（或就地结清一颗不用跑的）
@@ -1194,17 +1192,10 @@ impl Shell {
         cx.notify();
     }
 
-    /// 32-2：取回某一条（`apply`，放回后仍留在清单里）
-    pub(crate) fn run_stash_apply(&mut self, index: u32, expect: &str, cx: &mut Context<Self>) {
-        self.stash_op(index, expect, false, cx);
-    }
-
-    /// 32-2：丢掉某一条。**不可逆**，所以走到这里之前必须已经点过「确认丢掉」
-    pub(crate) fn run_stash_drop(&mut self, index: u32, expect: &str, cx: &mut Context<Self>) {
-        self.stash_op(index, expect, true, cx);
-    }
-
     /// 取回与丢掉**共用这一条**：两者只差"调哪个 core 函数"与那句动词。
+    ///
+    /// ⚠️ `destructive` 那一档**不可逆**——调用方（stash 对话框）必须已经让用户
+    /// 点过「确认丢掉」才会传 true（32-2）
     ///
     /// ⚠️ 为什么不写成两份：这两份的其余每一行（防连点、后台跑、结论落哪个日志槽、
     /// 跑完重读清单、刷新状态）都必须**逐字相同**，其中"跑完重读清单"那一行漏掉

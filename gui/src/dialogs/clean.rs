@@ -155,7 +155,7 @@ fn clean_body(t: &Theme, items: &[(String, u64)], total: u64) -> Div {
                 .rounded(px(R_MD))
                 .border_1()
                 .border_color(orange(t))
-                .bg(orange_bg(t))
+                .bg(wash_bg(WARN_WASH, t))
                 .px(px(GAP))
                 .py(px(GAP_TIGHT))
                 .text_size(px(fs_meta()))

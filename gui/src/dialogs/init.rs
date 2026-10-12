@@ -136,8 +136,7 @@ pub(crate) fn init_body(
 }
 
 /// 初始化向导底栏：取消 / 初始化（跑起来时按钮转圈）
-pub(crate) fn init_footer(t: &Theme, init: &InitState, this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
-    let _ = t;
+pub(crate) fn init_footer(init: &InitState, this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
     h_flex()
         .w_full()
         .justify_end()

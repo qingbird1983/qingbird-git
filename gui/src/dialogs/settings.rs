@@ -624,9 +624,9 @@ impl SetCard {
 
 /// 「即时生效」那一枚。用 `pill` 而不是自己画：它与仓库状态徽标是**同一副形状**
 /// （小字 + wash 底 + 全圆），只是语义不同（一个是数据的态，一个是配置的生效方式）。
-/// 底色走 `tokens::green_bg` = v4 §2 的 `ok-wash`
+/// 底色走 `tokens::OK_WASH` = v4 §2 的 `ok-wash`
 fn live_badge(t: &Theme) -> AnyElement {
-    pill("即时生效", t.colors.success, green_bg(t)).into_any_element()
+    pill("即时生效", t.colors.success, wash_bg(OK_WASH, t)).into_any_element()
 }
 
 /// 设置对话框正文。**左侧分类导航 + 右侧内容**（阶段 20）

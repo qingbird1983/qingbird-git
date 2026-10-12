@@ -379,7 +379,7 @@ impl Shell {
                     // `ButtonCustomVariant` 是 `Copy`，按值传最省事。
                     let gv = ghost_variant(cx);
                     match &init {
-                        Some(i) => init_footer(&t, i, &this, gv),
+                        Some(i) => init_footer(i, &this, gv),
                         None => dlg_footer(&this, &editing, &path_input, &name_input, gv),
                     }
                 })

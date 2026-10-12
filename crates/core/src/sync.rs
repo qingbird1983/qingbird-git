@@ -19,7 +19,7 @@ use crate::git;
 /// 网络 git 操作超时
 pub const NET_TIMEOUT: Duration = Duration::from_secs(300);
 /// 检查云端更新只做 fetch + 对比，超时比完整拉取短得多
-pub const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
+const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// 每仓库一个忙槽。
 ///

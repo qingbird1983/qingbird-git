@@ -534,7 +534,7 @@ impl Shell {
             )
             .child(meta_text(space::human_bytes(e.size), t))
             .when(e.is_cache, |r| {
-                r.child(crate::widgets::pill("可清理", orange_text(t), orange_bg(t)))
+                r.child(crate::widgets::pill("可清理", orange_text(t), wash_bg(WARN_WASH, t)))
             });
         if foldable {
             // 有下级的才给箭头；`.role` 让读屏软件把它当树节点念出来

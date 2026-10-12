@@ -728,8 +728,13 @@ pub(crate) struct Shell {
     pub(crate) split: Entity<ResizableState>,
     /// 检视抽屉是否展开（仅仓库页有）
     pub(crate) inspector_open: bool,
-    /// 检视抽屉当前宽度（px，已夹在 `INSPECTOR_MIN_W..INSPECTOR_MAX_W`）。
-    /// 拖完由 `on_resize` 写回，收起再展开恢复的就是它
+    /// 检视抽屉当前宽度（px，已夹在 core 的 `INSPECTOR_W_RANGE`：.0 下限 / .1 上限）。
+    /// 拖完由 `on_resize` 写回，收起再展开恢复的就是它。
+    ///
+    /// **默认宽度不在这儿再写一份**：右栏从"写死 320 的固定列"变成"用户能拖、
+    /// 且存得住"的列之后，宽度成了一份**会被用户改的状态**——界面常量与落盘值
+    /// 各留一份必然有一帧对不上。老配置没这个字段时由 core 的 `DEFAULT_INSPECTOR_W`
+    /// 兜底，`Shell::new` 里夹一次范围，界面只管用 `Shell::inspector_w`
     pub(crate) inspector_w: f32,
     /// 检视抽屉宽度的代次。**与 `sidebar_gen` 是同一个东西的两份**，
     /// 理由、换 id 为什么能重新锚定、为什么不会泄漏 keyed state，
@@ -1588,7 +1593,7 @@ pub(crate) fn batch_summary(
 
 /// 批量调度那一问的**纯函数**版：还能不能再发一颗。
 ///
-/// ⚠️ 为什么不直接写在 `Shell::batch_take_next` 里：`Shell` 带着 gpui 上下文，
+/// ⚠️ 为什么不直接写在 `Shell::pump_batch` 里：`Shell` 带着 gpui 上下文，
 /// **构造不出来** ⇒ "上限有没有生效"这条判据一条单测都写不了，
 /// 而它恰恰是这一批最容易被改坏的一处（把 `<` 改成 `<=`、把常量抄成 100，
 /// check 零错、界面看着也还在跑）。抽出来之后变异能红在它身上

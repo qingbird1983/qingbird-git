@@ -171,7 +171,7 @@ impl Shell {
                 .gap(px(GAP))
                 .p(px(GAP_XL))
                 .rounded(px(r_xl(t)))
-                .bg(red_bg(t))
+                .bg(wash_bg(BAD_WASH, t))
                 .border_1()
                 // 这一圈边按 v4 §2 取 `line_soft`（卡/卡内盒一档），不取 `line`。
                 // ⚠️ **原型 `.sync-alert` 根本没有四周一圈边**，只有
@@ -565,11 +565,11 @@ impl Shell {
         } else {
             branch.to_string()
         };
-        // **走全站唯一那份胶囊实现**（`widgets::pill_out`）。这里原来自己手搓了
-        // 第四种写法：`R_MD` 方角 + `muted` 实底 + `fs_sec` 字 + `icon_md` 图标——
+        // **走全站唯一那份胶囊实现**（`widgets::pill_with` 的描边那一档）。这里原来
+        // 自己手搓了第四种写法：`R_MD` 方角 + `muted` 实底 + `fs_sec` 字 + `icon_md` 图标——
         // 既不在 `pill_h()` 那一档也不在全圆角那一档，与它左边那枚「我的」并排时
         // 一眼就是两种东西。分支该读成"身份"而不是"状态" ⇒ 描边那一档
-        crate::widgets::pill_out(Some(AssetIcon::GitBranch), &text, t)
+        crate::widgets::pill_with(Some(AssetIcon::GitBranch), &text, tier3(t), card_face(t), Some(edge(t)))
     }
 }
 

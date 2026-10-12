@@ -378,13 +378,13 @@ impl Shell {
             Badge::Pill {
                 text: "失败".into(),
                 fg: t.colors.danger,
-                bg: red_bg(t),
+                bg: wash_bg(BAD_WASH, t),
             }
         } else if lg.used_proxy.is_some() {
             Badge::Pill {
                 text: "走代理".into(),
                 fg: orange_text(t),
-                bg: orange_bg(t),
+                bg: wash_bg(WARN_WASH, t),
             }
         } else {
             bucket_badge(&status, changed, third, t)
@@ -765,21 +765,21 @@ pub(crate) fn badge_tone(
         // 说它"落后"像在挑刺
         BadgeKind::Behind => {
             let _ = third;
-            tone(kind, orange(t), orange_bg(t))
+            tone(kind, orange(t), wash_bg(WARN_WASH, t))
         }
         // 分叉是红（Q7）：徽标、状态点、分叉条**三处必须同一色**，
         // 同一屏里出现"这里红、那里橙"会让人以为那是两件事。
         // （原来这一条列的是四处，第四处是同步环——那颗环 2026-10-05 已下线）
-        BadgeKind::Forked => tone(kind, t.colors.danger, red_bg(t)),
-        BadgeKind::Ahead => tone(kind, t.colors.accent, blue_bg(t)),
-        BadgeKind::Dirty => tone(kind, t.colors.accent, blue_bg(t)),
+        BadgeKind::Forked => tone(kind, t.colors.danger, wash_bg(BAD_WASH, t)),
+        BadgeKind::Ahead => tone(kind, t.colors.accent, wash_bg(INFO_WASH, t)),
+        BadgeKind::Dirty => tone(kind, t.colors.accent, wash_bg(INFO_WASH, t)),
         // `None` 有两条来路，显示必须分开：
         // **「不知道」这一族** → 中性灰。它进不了「需要动手」那一列，不该穿行动色；
         // 同一行里状态点是灰的（`dot_color` 的 Unknown / AbUnknown 档 = `edge(t)`），
         // 胶囊若是蓝的，一行两种语气。形状仍是 `None`，
         // 侧栏那一格因此什么都不画，与「徽标只放要动手的数字」一致
         BadgeKind::None if badge_is_neutral(b) => tone(kind, tier3(t), track(t)),
-        BadgeKind::None => tone(kind, t.colors.accent, blue_bg(t)),
+        BadgeKind::None => tone(kind, t.colors.accent, wash_bg(INFO_WASH, t)),
     }
 }
 

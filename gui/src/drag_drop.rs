@@ -100,8 +100,6 @@ pub(crate) fn classify(
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DropReport {
     pub added: usize,
-    /// 已在列表里，静默跳过
-    pub dup: usize,
     /// 路径不存在或不是文件夹
     pub not_dir: usize,
     /// 是文件夹但不是 git 仓库
@@ -185,7 +183,8 @@ impl Shell {
             let valid = already || (!path.is_empty() && repos::valid_repo(&path));
 
             match classify(&path, already, is_dir, valid) {
-                Verdict::Already => report.dup += 1,
+                // 已在列表里：静默跳过（重复拖同一个仓库不是错误）
+                Verdict::Already => {}
                 Verdict::NotADir => report.not_dir += 1,
                 Verdict::NotARepo => {
                     report.not_repo += 1;
@@ -321,7 +320,7 @@ mod tests {
     #[test]
     fn silence_only_when_nothing_went_wrong() {
         assert!(DropReport { added: 3, ..Default::default() }.is_quiet());
-        assert!(DropReport { added: 1, dup: 2, ..Default::default() }.is_quiet());
+        assert!(DropReport { added: 1, ..Default::default() }.is_quiet());
         assert!(DropReport { not_repo: 1, ..Default::default() }.summary().is_some());
         assert!(DropReport { not_dir: 1, ..Default::default() }.summary().is_some());
         assert!(DropReport { failed: 1, ..Default::default() }.summary().is_some());

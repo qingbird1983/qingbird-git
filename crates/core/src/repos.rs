@@ -3,21 +3,11 @@
 //! 只搬界面真正要用的那一部分：Screen 3（我的仓库工作台）需要仓库列表与实时状态，
 //! 其余（初始化向导、一键扫描、语言统计、提交历史）随对应屏一起迁，不提前铺。
 
-use crate::git;
+use crate::net::run_local;
 use crate::store::{self, AppConfig, RepoEntry};
 use crate::types::RepoStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
-
-/// 本地 git 命令（status / log 等）超时。与 src-tauri 侧同值：
-/// 这些命令不联网，10 秒还不出结果基本是仓库卡死或路径不对。
-pub const LOCAL_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// 执行本地 git 命令（不涉及网络，不走代理回退）
-fn run_local(repo_path: &str, args: &[&str]) -> git::GitOutput {
-    git::run_git(repo_path, args, None, LOCAL_TIMEOUT)
-}
 
 /// 是不是一个 git 仓库（只看 .git 存在，不递归探测——
 /// 非仓库的文件夹也允许添加进来，界面上要能显示「不是仓库」而不是直接拒绝）
@@ -1065,7 +1055,7 @@ pub fn readme_docs(repo_path: &str) -> BTreeMap<String, String> {
         .filter_map(|c| {
             let full = std::path::Path::new(repo_path).join(&c.name);
             let text = std::fs::read_to_string(full).ok()?;
-            clamp_readme(text).map(|t| (c.name, t))
+            Some((c.name, clamp_readme(text)))
         })
         .collect()
 }
@@ -1076,13 +1066,13 @@ pub fn readme_docs(repo_path: &str) -> BTreeMap<String, String> {
 pub const README_MAX_CHARS: usize = 120_000;
 
 /// 按上限截一段原文，超了就在末尾留一句说明
-fn clamp_readme(text: String) -> Option<String> {
+fn clamp_readme(text: String) -> String {
     if text.chars().count() <= README_MAX_CHARS {
-        return Some(text);
+        return text;
     }
     let mut out: String = text.chars().take(README_MAX_CHARS).collect();
     out.push_str("\n\n…… README 太长，已截断 …………\n");
-    Some(out)
+    out
 }
 
 /// 读仓库根目录的 README **原文**（给「说明」页签整篇渲染用）。
@@ -1094,7 +1084,7 @@ pub fn read_readme_text(repo_path: &str) -> Option<String> {
         return None;
     }
     let file = find_readme(repo_path)?;
-    clamp_readme(std::fs::read_to_string(&file).ok()?)
+    Some(clamp_readme(std::fs::read_to_string(&file).ok()?))
 }
 
 /// 读**指定**那一份说明文档（`readme_alt` 给的文件名）。
@@ -1109,7 +1099,7 @@ pub fn read_readme_named(repo_path: &str, name: &str) -> Option<String> {
     if readme_parts(name).is_none() {
         return None;
     }
-    clamp_readme(std::fs::read_to_string(std::path::Path::new(repo_path).join(name)).ok()?)
+    Some(clamp_readme(std::fs::read_to_string(std::path::Path::new(repo_path).join(name)).ok()?))
 }
 
 /// 实际读到的是仓库根目录下的哪个 README 文件名（`README.md` 之类）。

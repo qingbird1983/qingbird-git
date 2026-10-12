@@ -179,7 +179,7 @@ impl Render for Shell {
         // （`anim_w == target_w` ⇒ `animating` 是 false）⇒ **两个分支一条都不跑**，
         // 面板于是由基座 `sync_panels_count` 补成占位值，再由 `update_panel_size`
         // 量"还没缩之前的整组宽"写进去（实测 1232）⇒ 随后被 `size_range` 夹到上限
-        // `SIDEBAR_MAX_W` = **360** ⇒ 而那条写只在"还等于占位值"时才发生，**就此锁死**。
+        // `qingbird_core::store::SIDEBAR_W_RANGE.1` = **360** ⇒ 而那条写只在"还等于占位值"时才发生，**就此锁死**。
         // 后果：左栏 360 / 中间 872，用户设的 `sidebar_w` = 263 **从来没生效过**，
         // 而中间那 872 刚好压在他给的 870 上，所以这一条一直没被发现。
         //
@@ -232,7 +232,7 @@ impl Render for Shell {
         if sidebar_mounted {
             group = group.child(
                 resizable_panel()
-                    .size_range(min_w..px(SIDEBAR_MAX_W))
+                    .size_range(min_w..px(qingbird_core::store::SIDEBAR_W_RANGE.1))
                     .size(px(self.sidebar_w))
                     // 官方面板默认 flex_grow: 1，会把主区挤走；定宽面板要自己关掉
                     .flex_none()
@@ -384,9 +384,10 @@ impl Shell {
                     // 与左栏 `min_w` 那条同一理由：不放开的话收起时会停在最小宽，
                     // 凭空多出一条空槽——正好是这一步要消灭的东西
                     .size_range(if insp_animating {
-                        px(0.0)..px(INSPECTOR_MAX_W)
+                        px(0.0)..px(qingbird_core::store::INSPECTOR_W_RANGE.1)
                     } else {
-                        px(INSPECTOR_MIN_W)..px(INSPECTOR_MAX_W)
+                        px(qingbird_core::store::INSPECTOR_W_RANGE.0)
+                            ..px(qingbird_core::store::INSPECTOR_W_RANGE.1)
                     })
                     // 只在这一列**首次挂上**、状态里还没有它那一格时起作用
                     // （`panel.rs:341-349`：`panel_state.size` 为 None 才吃
@@ -1690,13 +1691,7 @@ impl Shell {
     /// 当前仓库的显示名：有自定义名用自定义名
     pub(crate) fn title(&self, path: &str) -> String {
         self.entry(path)
-            .map(|r| {
-                if r.alias.trim().is_empty() {
-                    r.name.clone()
-                } else {
-                    r.alias.trim().to_string()
-                }
-            })
+            .map(qingbird_core::scheduler::display_name)
             .unwrap_or_default()
     }
 }

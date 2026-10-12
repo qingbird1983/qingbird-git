@@ -11,12 +11,8 @@
 use serde::Serialize;
 
 use crate::git::run_git;
-use crate::net::run_local;
+use crate::net::{run_local, LOCAL_TIMEOUT};
 use crate::repos::valid_repo;
-use std::time::Duration;
-
-/// 本地只读 git 命令的超时。历史页签是随手点的，不能让它把界面卡住
-const LOCAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// 一次列多少条提交
 const MAX_LOG: usize = 200;
 /// 单个提交的变更文件上限，超了截断（真实数据能到几千个文件）
