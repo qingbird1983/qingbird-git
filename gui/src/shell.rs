@@ -128,8 +128,10 @@ impl Render for Shell {
                 Some(path) => self.detail_page(&path, &t, cx).into_any_element(),
                 None => empty_main(&t, window).into_any_element(),
             },
-            // CLI 工具屏：左栏工具列表 + 右栏详情，仿仓库屏骨架（阶段一为新屏）
-            Page::CliTools => self.cli_page(&t, cx).into_any_element(),
+            // CLI 工具屏：左栏工具列表 + 右栏详情，仿仓库屏骨架（阶段一为新屏）。
+            // **左栏不在这儿给**——它是 `body-split` 的 0 号面板，与仓库侧栏
+            // 同一个位置、同一套机制（见下面 `sidebar_mounted` 那一段）
+            Page::CliTools => self.cli_detail(&t, cx).into_any_element(),
         };
 
         // 侧栏宽度只有一个真源：`ResizableState` 里第 0 号面板的宽度。
@@ -151,10 +153,16 @@ impl Render for Shell {
         // 官方那条 ζ=0.85 ⇒ 过冲 0.63% ⇒ 侧栏 220px 行程上只有 **1.4px**，
         // 弹簧确实在跑、用户确实看不到回弹（2026-10-05 实机反馈）。
         // 数字与推导见 `tokens.rs` 动效段，那儿有单测钉住"过冲必须看得见"。
-        // ⚠️ **只有仓库页挂侧栏**：总览页与 CLI 屏都没有它。
-        // 判据写成 `!= Page::Repos` 而不是枚举出那两屏——加第三屏时
-        // 这里天然跟上（原写法只列了 Overview，CLI 屏一进来侧栏就弹了出来）
-        let target_w: Pixels = if self.sidebar_collapsed || self.page != Page::Repos {
+        // ⚠️ **左栏由两屏共用同一套面板机制**：仓库页是仓库侧栏，CLI 屏是工具列表。
+        // 这就是"边距与仓库版面一比一"的落法——**不去微调数值，而是让 CLI 左栏
+        // 就是同一种面板**：宽度来源同一个 `self.sidebar_w`、上下限同一条
+        // `SIDEBAR_W_RANGE`、朝向气口同一个 `side_shell` 的 `mr(GAP_TIGHT)`。
+        // 自己拼一个定宽 `div` 是本项目最贵的那类错——2026-10-13 实机量出来：
+        // 那个 div 的卡比仓库侧栏**宽 4px、右移 1px**（358 vs 353 白面），
+        // 而肉眼几乎看不出、`cargo check` 与单测一个字都不报。
+        // 收起态**两屏各存一份**（`sidebar_collapsed` / `cli_collapsed`），
+        // 见 `state.rs::cli_collapsed`；判据写成"这两屏"而不是枚举出别的屏
+        let target_w: Pixels = if self.left_collapsed() || !self.has_left_col() {
             px(0.0)
         } else {
             px(self.sidebar_w)
@@ -175,8 +183,7 @@ impl Render for Shell {
         // 只在可见或正在滑出时挂面板。宽度到 0 就把面板整个摘掉，
         // 这才是"不留空槽位"——留一个 0 宽面板在 flex 里，主区虽然吃掉了它的
         // 份额，可第 1 号面板上那个拖拽把手还挂在 x=0，一条按了没用的 4px 命中区
-        let sidebar_mounted =
-            (self.page == Page::Repos && !self.sidebar_collapsed) || anim_w > px(0.5);
+        let sidebar_mounted = (self.has_left_col() && !self.left_collapsed()) || anim_w > px(0.5);
 
         // ⚠️ **挂载那一帧的插入要用「意图宽」，而且不能只在补间时跑**（2026-10-09 帧上量出来的成因）。
         //
@@ -241,7 +248,13 @@ impl Render for Shell {
                     .size(px(self.sidebar_w))
                     // 官方面板默认 flex_grow: 1，会把主区挤走；定宽面板要自己关掉
                     .flex_none()
-                    .child(self.sidebar(&t, window, cx)),
+                    // 这一颗就是"两屏的左栏"：仓库页给仓库侧栏，CLI 屏给工具列表。
+                    // 两者的卡外壳 / 内距 / 顶距 / 朝向气口都出自同一颗 `side_shell`
+                    .child(if self.page == Page::CliTools {
+                        self.cli_list(&t, cx).into_any_element()
+                    } else {
+                        self.sidebar(&t, window, cx).into_any_element()
+                    }),
             );
         }
         // 主区不带 size：不写 flex_basis，让它吃掉剩下的全部宽度。
@@ -262,8 +275,39 @@ impl Render for Shell {
 }
 
 impl Shell {
+    /// 这一屏有没有**左栏**（仓库页 = 仓库侧栏，CLI 屏 = 工具列表）。
+    ///
+    /// 两屏共用同一套面板机制（`body-split` 的 0 号面板 + `self.sidebar_w` 宽度来源），
+    /// 所以"宽多少 / 内距多少 / 朝向气口多少"三处各只有一个出处，几何天然一比一。
+    /// 写成 `matches!` 而不是枚举"没有左栏的那些屏"：加第四屏时这里天然跟上
+    /// （旧写法就是枚举出来的，CLI 屏一进来侧栏立刻弹了出来）
+    fn has_left_col(&self) -> bool {
+        matches!(self.page, Page::Repos | Page::CliTools)
+    }
+
+    /// 左栏此刻的收起态。**两屏各一份**（设计 §10.1「两者互不干扰」）：
+    /// 在 CLI 屏收起工具列表，不该把仓库页的侧栏也一起收掉
+    fn left_collapsed(&self) -> bool {
+        match self.page {
+            Page::CliTools => self.cli_collapsed,
+            _ => self.sidebar_collapsed,
+        }
+    }
+
+    /// 这一屏有没有**右栏**（检视列 / 预留的 AI 助理栏）可开。
+    ///
+    /// 仓库页要选中一个仓库才有它（那一列读的是"当前仓库"这个对象）；
+    /// CLI 屏是它自己的对象，常驻可开（2026-10-13 用户令：CLI 屏 100% 要这一栏）
+    fn has_inspector(&self) -> bool {
+        match self.page {
+            Page::CliTools => true,
+            Page::Repos => self.selected.is_some(),
+            Page::Overview => false,
+        }
+    }
+
     /// 组好窗口的其余部分：导航轨 / 主区分组 / 检视抽屉 / 状态条。
-    /// `body` 已经是「侧栏（可选）+ 主区」的 resizable 分组。
+    /// `body` 已经是「左栏（可选）+ 主区」的 resizable 分组。
     fn finish_frame(
         &mut self,
         t: Theme,
@@ -279,8 +323,8 @@ impl Shell {
         // 两栏"开不开"用**目标态**判（折叠态 / 抽屉开关），不用 `*_mounted`：
         // 后者在补间里会跟着弹簧值来回翻转，窗口就会一边开抽屉一边长一下缩一下
         self.ensure_shell_width(
-            self.page == Page::Repos && !self.sidebar_collapsed,
-            self.page == Page::Repos && self.inspector_open && self.selected.is_some(),
+            self.has_left_col() && !self.left_collapsed(),
+            self.has_inspector() && self.inspector_open,
             window,
         );
         // ⚠️ `items_stretch()` 不能省。`h_flex()` 装的是 `items_center()`（基座
@@ -316,10 +360,7 @@ impl Shell {
         //    **拽回去再弹过来**，每次拖拽必现（用户 2026-10-05 实机报的
         //    「右栏拉大拉小时会弹簧一下」）
         // ③ 显式夹住 0：ζ=0.6 收拢时会真的过冲到负宽度
-        let insp_target: Pixels = if self.page == Page::Repos
-            && self.inspector_open
-            && self.selected.is_some()
-        {
+        let insp_target: Pixels = if self.has_inspector() && self.inspector_open {
             px(self.inspector_w)
         } else {
             px(0.0)
@@ -358,7 +399,8 @@ impl Shell {
         //    `panel.rs:350-351` 再拿它去写 `flex_basis` ⇒ 所以要**每帧**清，
         //    不是只在挂载那一帧清一次
 
-        // 检视抽屉只在仓库页有——总览页没有当前仓库，这一列里没有东西可看
+        // 检视抽屉在有"当前对象"的那两屏都有（仓库页 / CLI 屏）——
+        // 总览页没有当前仓库，这一列里没有东西可看，`has_inspector` 判的就是它
         if inspector_mounted {
             // ⚠️ 与左栏**同一处修法**（AGENTS 那条"两处用了同一套写法必须一起改"）：
             // 挂载那一帧插的尺寸 = **弹簧此刻的值**，理由与实测数字写在左栏
@@ -645,8 +687,9 @@ impl Shell {
                             .text_color(body(t))
                             .child("青鸟 Git"),
                     )
-                    // 总览页没有侧栏可折，藏起来免得点了个没反应的东西
-                    .when(self.page == Page::Repos, |bar| {
+                    // 总览页没有左栏可折，藏起来免得点了个没反应的东西。
+                    // 仓库页与 CLI 屏都挂（后者折的是工具列表）——两屏顶栏一比一
+                    .when(self.has_left_col(), |bar| {
                         bar.child(self.sidebar_toggle(t, cx))
                     }),
             )
@@ -687,9 +730,11 @@ impl Shell {
                     }),
             )
             .on_double_click(|_, window, _| window.zoom_window())
-            // 右栏开关紧挨着主题键（用户 2026-10-09 的令）。与左栏那颗同一条件：
-            // 总览页没有右栏那一列，藏起来免得点了没反应
-            .when(self.page == Page::Repos, |bar| {
+            // 右栏开关紧挨着主题键（用户 2026-10-09 的令）。条件与左栏那颗同一档：
+            // `has_left_col()` 是"这一屏有左栏"，而**有左栏的两屏都有右栏**
+            // （仓库页选中一个仓库就有、CLI 屏常驻有）⇒ 两屏顶栏一比一。
+            // 总览页两栏都没有，两颗一起藏
+            .when(self.has_left_col(), |bar| {
                 bar.child(self.inspector_toggle(t, cx))
             })
             .child(self.theme_toggle(t, cx))
@@ -748,7 +793,8 @@ impl Shell {
         })
         .into_any_element()
     }
-    /// 侧栏展开 / 收起开关。
+    /// 左栏展开 / 收起开关。**仓库页与 CLI 屏共用这一颗**（两屏顶栏一比一）：
+    /// 仓库页折仓库侧栏，CLI 屏折工具列表——图标与文案两样都跟着屏走。
     ///
     /// **为什么用裸 `Button` 而不用官方 `SidebarToggleButton`**：
     /// 那个组件内部写死了 `Button::new("collapse").custom(ghost_variant(cx)).small()` +
@@ -763,11 +809,19 @@ impl Shell {
     /// 这一条我们自己照搬（`collapsed` 那一行），没丢语义。
     /// 组件库做不到的是**调一个图标颜色**，不是"画一颗开关按钮"。
     fn sidebar_toggle(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        // 图标随折叠态翻：这颗键的图标就是"它现在会做什么"的说明
-        let (icon, label) = if self.sidebar_collapsed {
-            (AssetIcon::PanelLeftOpen, "展开仓库侧栏")
+        // 图标随折叠态翻：这颗键的图标就是"它现在会做什么"的说明。
+        // 文案按屏说清折的是哪个——同一颗键在 CLI 屏折的是工具列表
+        let cli = self.page == Page::CliTools;
+        let (icon, label) = if self.left_collapsed() {
+            (
+                AssetIcon::PanelLeftOpen,
+                if cli { "展开工具列表" } else { "展开仓库侧栏" },
+            )
         } else {
-            (AssetIcon::PanelLeftClose, "收起仓库侧栏")
+            (
+                AssetIcon::PanelLeftClose,
+                if cli { "收起工具列表" } else { "收起仓库侧栏" },
+            )
         };
         self.titlebar_toggle("titlebar-sidebar-toggle", icon, label, t, cx, |this, _, window, cx| {
             this.toggle_sidebar(window, cx)
@@ -900,9 +954,15 @@ fn window_control_button(
 }
 
 impl Shell {
-    /// 折叠 / 展开侧栏（`Ctrl B` 与标题栏按钮共这一个入口）。
-    /// 折叠态与宽度都落盘，下次启动回到用户自己摆的样子
+    /// 折叠 / 展开左栏（`Ctrl B` 与标题栏那颗键共这一个入口）。
+    /// 仓库页折的是仓库侧栏——折叠态与宽度都落盘，下次启动回到用户自己摆的样子；
+    /// CLI 屏折的是它自己的工具列表（收起态两屏各存一份、不落盘）
     pub(crate) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page == Page::CliTools {
+            self.cli_collapsed = !self.cli_collapsed;
+            cx.notify();
+            return;
+        }
         if self.page != Page::Repos {
             // 总览页没有侧栏。按 `Ctrl B` 却什么都不发生会像坏了，
             // 不如把它当成"我要看仓库"——切回仓库页并展开
@@ -1422,6 +1482,9 @@ impl Shell {
             cli: CliState::default(),
             cli_seq: 0,
             cli_task: None,
+            // 左栏默认展开，与仓库侧栏同一档：收起的左栏是一屏的读法，
+            // 不是偏好，所以不进配置、每次进屏都是展开的
+            cli_collapsed: false,
             history: HistoryState::default(),
             history_table,
             ov_table,
@@ -1992,7 +2055,12 @@ impl Shell {
                 match (&batch, &running) {
                     (Some(b), _) => b.clone(),
                     (None, Some(path)) => format!("运行中 · {}", self.title(path)),
-                    (None, None) => format!("{} 个仓库", self.repos.len()),
+                    (None, None) => match self.page {
+                        // 这一格报的是**当前这一屏的对象数**：CLI 屏报工具数，
+                        // 别的屏报仓库数。与"右页脚刷新谁"同一条——底栏跟着屏走
+                        Page::CliTools => format!("{} 个 CLI 工具", self.cli.packages.len()),
+                        _ => format!("{} 个仓库", self.repos.len()),
+                    },
                 },
                 t,
             ));
@@ -2040,15 +2108,28 @@ impl Shell {
             .into_any_element()
     }
 
-    /// 「上次扫描 · 刚刚」：静态文字 + 点击重扫。做成文字而不是一颗图标按钮，
-    /// 是因为"数据多旧"本身就是用户想知道的事，单独一个刷新图标把这句话藏起来了。
+    /// 「上次扫描 · 刚刚」：静态文字 + 点击重扫。
+    ///
+    /// 做成文字而不是一颗图标按钮，是因为"数据多旧"本身就是用户想知道的事，
+    /// 单独一个刷新图标把这句话藏起来了。
+    ///
+    /// ⚠️ **这一格刷的是当前这一屏的东西**：仓库页刷仓库状态，CLI 屏重扫工具。
+    /// 两屏各有自己的"扫过没有"（`last_scan_ts` / `cli.scanned_at`），所以
+    /// **文字、图标语气、点击目标三样一起按屏分**——只改点击不改文字，
+    /// 就会出现"写着『尚未扫描』、点下去刷的是另一边"那种两处对不上的话
     fn rescan_hint(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let text = if self.scanning {
+        let on_cli = self.page == Page::CliTools;
+        let (scanning, last_ts) = if on_cli {
+            (self.cli.scanning, self.cli.scanned_at)
+        } else {
+            (self.scanning, self.last_scan_ts)
+        };
+        let text = if scanning {
             "扫描中…".to_string()
-        } else if self.last_scan_ts == 0 {
+        } else if last_ts == 0 {
             "尚未扫描".to_string()
         } else {
-            format!("上次扫描 · {}", rel_time(self.last_scan_ts))
+            format!("上次扫描 · {}", rel_time(last_ts))
         };
         h_flex()
             .id("status-rescan")
@@ -2060,17 +2141,22 @@ impl Shell {
             .items_center()
             .gap(px(GAP_TIGHT))
             .cursor_pointer()
-            .child(icon_sm(AssetIcon::RefreshCw).text_color(if self.scanning {
+            .child(icon_sm(AssetIcon::RefreshCw).text_color(if scanning {
                 tier4(t)
             } else {
                 tier3(t)
             }))
             .child(meta_text(text, t))
-            .when(!self.scanning, |it| {
+            .when(!scanning, |it| {
                 it.hover(move |style| style.bg(hover_face(t)))
             })
-            .on_click(cx.listener(|this, _, _, cx| {
-                if !this.scanning {
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // 与界面那句文案同源：CLI 屏重扫工具，别的屏刷仓库状态
+                if on_cli {
+                    if !this.cli.scanning {
+                        this.scan_cli(cx);
+                    }
+                } else if !this.scanning {
                     this.refresh_status(cx);
                 }
             }))

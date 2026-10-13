@@ -3,13 +3,25 @@
 //! 沿用仓库屏的布局语言（设计 §10.1，2026-10-13 用户拍板）：**左栏工具列表
 //! → 右栏详情**，操作习惯零学习成本。
 //!
-//! ⚠️ **一点与仓库屏不同**：CLI 屏的左栏是它**自己的列表列**，不是仓库侧栏。
-//! 它不读 `side_focus`、不驱动 `sidebar`、宽度也不走那条 resizable——
-//! 两者互不干扰。所以这一屏的整个主区就是一个 `h_flex`：左列表 + 右详情。
+//! ⚠️ **内外距与左栏宽度一律照仓库屏那两栏，不自己定**（2026-10-13 实机返工）：
+//! - 左栏**不是这一屏自己拼的定宽 `div`**——它是壳层 `body-split` 的 **0 号面板**，
+//!   与仓库侧栏同一个位置、同一套机制（宽度来源同一个 `sidebar_w`、同一条
+//!   `SIDEBAR_W_RANGE`、朝向气口同一个 `side_shell` 的 `mr(GAP_TIGHT)`）。
+//!   自己拼一个的结果量出来是**宽 4px、右移 1px**，所以这里只提供**内容**
+//!   （[`Shell::cli_list`]），外壳与宽度全归壳层。折叠态由 `cli_collapsed` 管
+//!   （与 `sidebar_collapsed` 各一份，见 `state.rs`）。
+//! - 左栏内容 = [`side_shell`]（仓库侧栏同一颗：`card` + `p(GAP)`/`pt(GAP_LG)`/
+//!   `pb(GAP)`/`mt(GAP)` + 朝向气口 `mr(GAP_TIGHT)`）。树照 `sidebar()` 用负 `mx`
+//!   铺到卡边、行用 `SIDE_GUTTER` 缩进——**两个数都从 `tokens` 取**，
+//!   一个都不许在这儿写。
+//! - 右栏照 `detail_page`：`pt(GAP)` + `gap(GAP_TIGHT)`；两栏顶边靠
+//!   `side_shell.mt(GAP)` ↔ 这一列的 `pt(GAP)` **同源**对齐。
 //!
-//! 图标（阶段一）：设计里的三级降策略（Provider 自报 / 从 exe 提图标 / 终字符块）
-//! 中，**前两级依赖 `windows` crate，归阶段二**；阶段一对每个工具都画一个
-//! 终端图标占位（等于第三级"终字符块"的近似）。
+//! 右栏（预留的 AI 助理栏）也在：这一屏与仓库屏同走 `insp-split`
+//! （2026-10-13 用户令「100% 要」），顶栏那颗开关与仓库屏同一颗。
+//!
+//! 图标（阶段一）：设计里的三级降策略中，前两级（Provider 自报 / 从 exe 提图标）
+//! 依赖 `windows` crate，归阶段二；阶段一对每个工具都画一个终端图标占位。
 
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
@@ -23,6 +35,7 @@ use gpui_kit::{
 };
 use qingbird_core::cli::{CliPackage, ProviderId};
 
+use crate::sidebar::{side_shell, Facing};
 use crate::state::Shell;
 use crate::tokens::*;
 use crate::widgets::*;
@@ -32,29 +45,14 @@ use crate::widgets::*;
 const NONE: &str = "–";
 
 impl Shell {
-    /// CLI 屏整屏：左栏工具列表 + 右栏详情。
+    /// 左栏**内容**：工具列表（按 provider 分组，可折叠）+ 底部「重新扫描」。
     ///
-    /// 外层 `h_flex` 自己带 `p(GAP)`——内距落在**行**上、不落在每个子列上，
-    /// 这样两列的顶边由同一个数对齐（与仓库屏"侧栏 `mt(GAP)` / 主区 `pt(GAP)`"
-    /// 是同一个意思，只是这里行是我自己的，就一次给在行上）
-    pub(crate) fn cli_page(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
-        h_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .min_h_0()
-            // ⚠️ **`items_stretch` 不能省**（AGENTS：h_flex 与 v_flex 交叉轴不对称）：
-            // 默认 `items_center` 会让两列各拿内容高并被垂直居中，整屏上下各留一大块空
-            .items_stretch()
-            .bg(t.colors.background)
-            .p(px(GAP))
-            .gap(px(GAP_TIGHT))
-            .child(self.cli_list(t, cx))
-            .child(self.cli_detail(t, cx))
-    }
-
-    /// 左栏：工具列表（按 provider 分组，可折叠）+ 底部「重新扫描」。
-    fn cli_list(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
+    /// ⚠️ **宽度与外壳的位置不在这里**：它是 `body-split` 的 0 号面板（见模块头），
+    /// 与仓库侧栏共用同一套几何。所以这里只画 `side_shell` 里的三段。
+    ///
+    /// 结构照 `sidebar()`：`side_shell` → [树] → 分隔线 → 脚。
+    /// **没有标题行**（仓库侧栏也没有——分组标题已经说出这一列是什么）。
+    pub(crate) fn cli_list(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
         // 每个 provider 有几个——没有的**不画组标题**（"npm · 0" 是噪音）
         let counts: Vec<usize> = ProviderId::all()
             .iter()
@@ -62,24 +60,31 @@ impl Shell {
             .collect();
         let total: usize = counts.iter().sum();
 
-        // 头：标题 + 一句状态（扫描中 / 几个）
-        let note = if self.cli.scanning {
-            "扫描中…".to_string()
-        } else {
-            format!("{total} 个工具")
-        };
-        let mut head = CardHeader::new("CLI 工具").note(note, false);
-        if !self.cli.errors.is_empty() {
-            head = head.note(self.cli.errors.join(" · "), true);
-        }
-
-        // 身：分组 + 行。滚动容器要 `id`（`overflow_y_scroll` 只在 Stateful 上）
+        // 树：照 `sidebar()` 那三条（负 `mx` 铺到卡边 + `SIDE_GUTTER` 缩进 + 气口）。
+        // 行没有左侧品牌竖条，但那两条缩进数照抄——**行与仓库行左对齐靠的就是它们**
         let mut tree = v_flex()
             .id("cli-list-tree")
             .flex_1()
             .min_h_0()
+            .mx(px(-GAP))
+            .px(px(SIDE_GUTTER))
+            .py(px(GAP_TIGHT))
             .gap(px(GAP_DENSE))
             .overflow_y_scroll();
+
+        // 某台 provider 失败的一句话。**一行提示，不是"整屏没扫到"**——
+        // 别的 provider 的结果照常出
+        if !self.cli.errors.is_empty() {
+            tree = tree.child(
+                div()
+                    .px(px(SIDE_GUTTER))
+                    .pb(px(GAP_DENSE))
+                    .text_size(px(fs_meta()))
+                    .text_color(orange_text(t))
+                    .child(self.cli.errors.join(" · ")),
+            );
+        }
+
         if total == 0 {
             tree = tree.child(
                 empty_state(
@@ -103,43 +108,42 @@ impl Shell {
             }
         }
 
-        card_shell(
-            v_flex()
-                .w(px(CLI_LIST_W))
-                .flex_none()
-                .min_h_0()
-                .gap(px(GAP_TIGHT)),
-            t,
-        )
-        .child(head.build(t))
-        .child(tree)
-        .child(Separator::horizontal().color(edge(t)))
-        .child(self.cli_list_footer(t, cx))
+        side_shell(t, Facing::Left)
+            .child(tree)
+            .child(Separator::horizontal().color(edge(t)))
+            .child(self.cli_list_footer(t, cx))
     }
 
-    /// 左栏底部：一颗「重新扫描」。位置同仓库屏侧栏底部的动作键。
+    /// 左栏底部：「重新扫描」。位置与内距照 `sidebar_footer`（`px/py(GAP_LG)`）。
     fn cli_list_footer(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
         h_flex()
             .w_full()
             .flex_shrink_0()
-            .py(px(GAP_TIGHT))
+            .px(px(GAP_LG))
+            .py(px(GAP_LG))
+            .gap(px(GAP))
             .child(
                 Button::new("cli-rescan")
                     .flex_1()
                     .icon(icon_sm(AssetIcon::RefreshCw).text_color(tier3(t)))
-                    .label("重新扫描")
+                    .label(if self.cli.scanning {
+                        "扫描中…"
+                    } else {
+                        "重新扫描"
+                    })
                     .with_size(Size::Small)
                     .tooltip("重新扫描本机的 CLI 工具")
                     // 扫描进行中禁点：免得连点堆起几条并发的 `npm ls`。
-                    // ⚠️ 这里用 `disabled` 而**不是** `.loading(true)`——
-                    // 后者会让按钮完全不响应指针（AGENTS 记过），语义也不对
-                    // （loading 是"这个操作在跑"的指示器，而这里要表达的是"等它"）
+                    // ⚠️ 用 `disabled` 而**不是** `.loading(true)`——后者会让按钮
+                    // 完全不响应指针（AGENTS 记过），语义也不对（loading 答的是
+                    // "这个操作在跑"，而这里要表达的是"等它"）
                     .disabled(self.cli.scanning)
                     .on_click(cx.listener(|this, _, _, cx| this.scan_cli(cx))),
             )
     }
 
     /// 一个 provider 的分组标题：折叠箭头 + `名字 · 个数`，点一下折叠/展开。
+    /// 几何与 [`cli_row`](Self::cli_row) 同一套（`SIDE_ROW_H` + `px(SIDE_GUTTER)`）。
     fn cli_group_header(
         &self,
         id: ProviderId,
@@ -156,8 +160,8 @@ impl Shell {
             .items_center()
             .gap(px(GAP))
             .px(px(SIDE_GUTTER))
-            .text_color(tier4(t))
             .rounded(px(r_lg(t)))
+            .text_color(tier4(t))
             .hover(|s| s.bg(hover_face(t)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.cli.group_open[ix] = !this.cli.group_open[ix];
@@ -180,12 +184,11 @@ impl Shell {
             .into_any_element()
     }
 
-    /// 一行工具：终端图标 + 名字 + （可更新时）一个小圆点。
+    /// 一行工具：终端图标 + 名字。
     ///
-    /// 自绘而行（不走官方 `SidebarMenuItem`）：那个件把行高写死 28px、
-    /// 且渲染期读 `Shell` 会 panic（见 `sidebar.rs::repo_row` 与 `group_header`）。
-    /// 这里与 `sidebar::repo_row` 是同一副形状的**第二处**，但**两屏各管各的**
-    /// （CLI 屏不是仓库侧栏），不强行并成一颗——并了就得塞一堆"这一屏用不用"的开关。
+    /// 自绘而行（不走官方 `SidebarMenuItem`）：那个件把行高写死 28px、且渲染期
+    /// 读 `Shell` 会 panic。几何与 `sidebar::repo_row` 的**内层脸**同一套
+    /// （`SIDE_ROW_H` + `px(SIDE_GUTTER)` + `r_lg` + 选中 `wash`）。
     fn cli_row(&self, p: &CliPackage, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.cli.selected.as_deref() == Some(p.id.as_str());
         let id = p.id.clone();
@@ -209,9 +212,9 @@ impl Shell {
                     .text_size(px(fs_sec()))
                     .text_color(if selected { body(t) } else { tier3(t) })
                     .font_weight(if selected {
-                        FontWeight::MEDIUM
+                        FontWeight::BOLD
                     } else {
-                        FontWeight::NORMAL
+                        FontWeight::MEDIUM
                     })
                     .child(p.name.clone()),
             )
@@ -225,9 +228,21 @@ impl Shell {
             .into_any_element()
     }
 
-    /// 右栏：选中工具的只读详情。没选中就给一句提示。
-    fn cli_detail(&self, t: &Theme, _cx: &mut Context<Self>) -> Div {
-        let mut col = v_flex().flex_1().min_w_0().h_full().min_h_0().gap(px(GAP_TIGHT));
+    /// 右栏**主区**：选中工具的只读详情。没选中就给一句提示。
+    ///
+    /// ⚠️ **它是 `body-split` 的 1 号面板（主区）**，不是这一屏自己拼的一行——
+    /// 与仓库页的 `detail_page` 占同一个位置、走同一条 `keep_main_flexible`。
+    ///
+    /// 外形照 `detail_page`：`flex_1` + `pt(GAP)` + `gap(GAP_TIGHT)`，
+    /// **底部不给外边距**（与左栏一起贴到状态条上沿，用户 2026-10-08 定）
+    pub(crate) fn cli_detail(&self, t: &Theme, _cx: &mut Context<Self>) -> Div {
+        let mut col = v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .min_h_0()
+            .pt(px(GAP))
+            .gap(px(GAP_TIGHT));
         match self
             .cli
             .packages

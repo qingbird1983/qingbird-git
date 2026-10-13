@@ -977,6 +977,13 @@ pub(crate) struct Shell {
     /// CLI 扫描的代数：过期结果不许覆盖新结果
     pub(crate) cli_seq: u64,
     pub(crate) cli_task: Option<Task<()>>,
+    /// CLI 屏左栏（工具列表）是否收起。
+    ///
+    /// ⚠️ **与 `sidebar_collapsed` 各存一份，不是漏抄**：两屏的左栏共用同一套面板
+    /// 机制（`body-split` 的 0 号面板 + `self.sidebar_w` 宽度来源），但"折没折"
+    /// 是两个独立的意图——设计 §10.1 明写「两者互不干扰」。
+    /// **不落盘**：它是一屏的读法（与 `ov_sort` 同口径），不是偏好
+    pub(crate) cli_collapsed: bool,
     /// 「历史」页签的数据。只存一份在这里，页签与检视抽屉都从这儿读
     pub(crate) history: HistoryState,
     /// 提交列表（官方 `List`）。委托只带一个回指 `Shell` 的 Entity，
