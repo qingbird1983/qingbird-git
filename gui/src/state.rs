@@ -468,6 +468,15 @@ pub(crate) struct CliState {
     /// 每个 provider 分组展开没展开，下标同 `ProviderId::all()`
     /// （`[scoop, npm, pipx]`）。默认全展开
     pub(crate) group_open: [bool; 3],
+    /// 工具图标：包 id → 已经提到的那张 PNG 的绝对路径。
+    ///
+    /// **查不到这一条** = 这个工具没有自带图标（或者还没轮到它）⇒ 画终字符块
+    /// （设计 §10.1 三级降的第 ③ 级）。两种"没有"在界面上是同一句话，
+    /// 所以不拆两个值——**"还没提完"与"它就没有"，用户看到的都是那个块**。
+    ///
+    /// 首屏灌的是磁盘缓存（`icon::cached_icons`，一次 `read_dir`），
+    /// 后台那条提取再逐颗核对替换（`ops::scan_cli`）。
+    pub(crate) icons: HashMap<String, std::path::PathBuf>,
 }
 
 impl Default for CliState {
@@ -481,6 +490,7 @@ impl Default for CliState {
             // 默认全展开：**不是** `[false; 3]`——那会让首次进屏看到一列
             // 折叠着的组标题，以为"扫到了但里面是空的"
             group_open: [true; 3],
+            icons: HashMap::new(),
         }
     }
 }

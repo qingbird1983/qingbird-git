@@ -5600,6 +5600,7 @@ name = "qingbird-core"
 version = "0.4.1"
 dependencies = [
  "chrono",
+ "png 0.17.16",
  "rusqlite",
  "serde",
  "serde_json",

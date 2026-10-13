@@ -20,8 +20,15 @@
 //! 右栏（预留的 AI 助理栏）也在：这一屏与仓库屏同走 `insp-split`
 //! （2026-10-13 用户令「100% 要」），顶栏那颗开关与仓库屏同一颗。
 //!
-//! 图标（阶段一）：设计里的三级降策略中，前两级（Provider 自报 / 从 exe 提图标）
-//! 依赖 `windows` crate，归阶段二；阶段一对每个工具都画一个终端图标占位。
+//! 图标（阶段二落地）：三级降里【② 从 exe 提图标】+【③ 终字符块】两级都在——
+//! 提到了就画那张 PNG（`cli.icons`，由 `ops::scan_cli` 在后台逐颗填），
+//! 没提到就画终字符块。**① Provider 自报**那一级没接：三个 provider 都没有
+//! 图标字段，写它就是一个永不触发的分支（见 `crates/core/src/cli/icon.rs` 模块头）。
+//!
+//! ⛔ **提图标那一路不许挡住首屏**：磁盘缓存由 `ops::scan_cli` 在**进屏那一刻**
+//! 一次 `read_dir` 灌进来（只管已有图的那几颗），真正的提取在后台逐颗跑、
+//! 提完一颗 notify 一次。所以形成这一屏的两条路是「先画块 / 已经有图先画图」→
+//! 「提到图了换上去」，**没有任何一步等磁盘或 GDI**。
 
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
@@ -30,7 +37,7 @@ use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{Disableable as _, Sizable as _, Size, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, percentage, px, AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement,
+    div, img, percentage, px, AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement,
     ParentElement, StatefulInteractiveElement, Styled,
 };
 use qingbird_core::cli::{CliPackage, ProviderId};
@@ -203,7 +210,7 @@ impl Shell {
             .text_color(tier3(t))
             .when(selected, |s| s.bg(wash(t)))
             .hover(|s| s.bg(if selected { wash(t) } else { hover_face(t) }))
-            .child(icon_sm(AssetIcon::Terminal).text_color(tier3(t)))
+            .child(self.tool_icon(p, TOOL_ICON, t))
             .child(
                 div()
                     .flex_1()
@@ -226,6 +233,24 @@ impl Shell {
                 cx.notify();
             }))
             .into_any_element()
+    }
+
+    /// 这一颗工具的工具图标：提到了就画那张 PNG，没提到就画终字符块。
+    ///
+    /// `size` 只走 `TOOL_ICON`（左栏行）/ `TOOL_ICON_DETAIL`（右栏详情头部）两档——
+    /// **同一个包在两处是同一张图、两个尺寸**，不是两张图（设计 §10.1「同源复用」）。
+    ///
+    /// 图交给 gpui 自己读：`img(PathBuf)` → `Resource::Path` → `fs::read` → 解码
+    /// （`elements/img.rs:634`），不经我们的资产源。**也没有"读到旧的"这一档**：
+    /// 文件名里带着那颗 exe 的版本指纹（mtime + 大小），换版就是换名字。
+    fn tool_icon(&self, p: &CliPackage, size: f32, t: &Theme) -> AnyElement {
+        match self.cli.icons.get(&p.id) {
+            Some(path) => img(path.clone())
+                .size(px(size))
+                .flex_shrink_0()
+                .into_any_element(),
+            None => monogram_block(&p.name, size, t),
+        }
     }
 
     /// 右栏**主区**：选中工具的只读详情。没选中就给一句提示。
@@ -277,7 +302,7 @@ impl Shell {
         card(t)
             .child(
                 CardHeader::new(p.name.clone())
-                    .leading(icon_sm(AssetIcon::Terminal).text_color(tier3(t)).into_any_element())
+                    .leading(self.tool_icon(p, TOOL_ICON_DETAIL, t))
                     // 来源（哪个包管理器）作为标题右侧的附注
                     .note(p.provider.label(), false)
                     .build(t),
@@ -315,4 +340,85 @@ fn kv(label: &str, value: &str, t: &Theme) -> Div {
                 .text_color(body(t))
                 .child(value.to_string()),
         )
+}
+
+/// 三级降的第 ③ 级：**终字符块**（设计 §10.1）——工具名前两个字符画一块。
+///
+/// 底走 `wash`（`tokens` 里那一条的注释写的就是"选中面、**图标底块**、信息徽章底"，
+/// 即 v4 §5.3 靠底块面积撑重量的手法）、圆角走 `R_MD`（那一档的注释是
+/// "键帽、图标小底"）。
+///
+/// ⚠️ **它是同一个位置上的另一种画法，不是另一个尺寸**：宽高都由调用方给
+/// （与 `img()` 那一支同吃 `TOOL_ICON` / `TOOL_ICON_DETAIL`），两档之间只差缩放的量。
+///
+/// 字色给 `tier3`（中性档）而不是 `brand`：它表达的是"这颗工具没有自带图标"，
+/// 不是一个状态、更不是行动项——**中性态不许穿行动色**（阶段 16 那条）。
+pub(crate) fn monogram_block(name: &str, size: f32, t: &Theme) -> AnyElement {
+    div()
+        .w(px(size))
+        .h(px(size))
+        .flex_shrink_0()
+        .rounded(px(R_MD))
+        .bg(wash(t))
+        .flex()
+        .items_center()
+        .justify_center()
+        // 行盒 = 块高：11px 的字放进 16px 的块里，不设行高会被默认那档顶出格
+        .line_height(px(size))
+        .text_size(px(fs_meta()))
+        .text_color(tier3(t))
+        .child(monogram(name))
+        .into_any_element()
+}
+
+/// 终字符块里那两个字符。
+///
+/// 取**包名最后一段**的前两个字符：scoped 包名（`@larksuite/cli`）整串的头两个
+/// 字符是 `@l`，画出来谁都不认识；末段 `cli` → `cl` 才对得上用户嘴里那个名字。
+///
+/// 取不到 ASCII 字母数字就给 `?`——**不硬塞汉字**：16px 的块里一个汉字约 11px 宽，
+/// 两个字就被切一半，而那正是本项目最恨的"看着像坏了"（查不出、只能靠帧发现）。
+///
+/// 抽成纯函数是为了能单测：它是**这一屏唯一一处把名字翻译成别的东西**的地方，
+/// 猜错的表现只是"块里两个字符不对"，抓帧也未必看得清。
+pub(crate) fn monogram(name: &str) -> String {
+    let last = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let chars: String = last
+        .chars()
+        .skip_while(|c| !c.is_ascii_alphanumeric())
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .take(2)
+        .collect();
+    if chars.is_empty() {
+        "?".to_string()
+    } else {
+        chars
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::monogram;
+
+    /// 终字符块取哪两个字符：**scoped 包名要取最后一段**
+    /// （`@larksuite/cli` 上的 `@l` 是错的，`cl` 才对）
+    #[test]
+    fn monogram_takes_the_last_name_segment() {
+        assert_eq!(monogram("ripgrep"), "ri");
+        assert_eq!(monogram("rg"), "rg");
+        assert_eq!(monogram("@larksuite/cli"), "cl");
+        assert_eq!(monogram("@mimo-ai/cli"), "cl");
+        assert_eq!(monogram("feishu-cli"), "fe");
+        // 前导非字母（`@`、`_`、数字前的一串符号）要跳过去再取
+        assert_eq!(monogram("@wenyan-md/core"), "co");
+        assert_eq!(monogram("__x-tool"), "x");
+    }
+
+    /// 纯中文 / 空名字：退成 `?`，**不把汉字塞进 16px 的块里**（会被切一半）
+    #[test]
+    fn monogram_falls_back_for_names_without_ascii() {
+        assert_eq!(monogram("青鸟工具"), "?");
+        assert_eq!(monogram(""), "?");
+        assert_eq!(monogram("@scope/中文"), "?");
+    }
 }

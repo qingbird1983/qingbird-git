@@ -23,6 +23,14 @@ mod exec;
 mod model;
 mod provider;
 
+/// CLI 工具图标（阶段二第一件：从 exe 提图标 + 磁盘缓存）。
+///
+/// 这一档**不 re-export 到 `cli` 根**（别的模块都是 `pub use` 上来的）：
+/// 它的两个入口叫 `ensure` / `cached_index`，摊到 `cli` 这一层就成了
+/// `qingbird_core::cli::ensure(..)` —— 看不出是对谁 ensure。留着 `cli::icon::`
+/// 这一段，读调用处的人不用回来看定义。
+pub mod icon;
+
 pub use cache::{load_cached, save_cached};
 pub use model::{CliPackage, PackageKind, ProviderId, ScanReport};
 pub use provider::{providers, PackageProvider};

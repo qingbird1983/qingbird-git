@@ -537,10 +537,27 @@ pub fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
 
 fn config_path() -> Option<PathBuf> {
     // 与 src-tauri 版保持同一配置文件：%APPDATA%/com.qingbird.git/config.json
+    Some(app_dir()?.join("config.json"))
+}
+
+/// 应用数据目录：`%APPDATA%/com.qingbird.git`。
+///
+/// ⚠️ 这个字符串在仓库里**不止一处**（`scan_cache.rs` 落 `cache.db`、`diag.rs`
+/// 落 `app.log` 各自拼了一遍，后者的注释写明了理由：诊断通道不该长在配置读写
+/// 这条路上）。这一颗是给"新的那一类随手产物"用的入口，**别再就地拼第四遍**。
+pub fn app_dir() -> Option<PathBuf> {
     let appdata = std::env::var("APPDATA").ok()?;
-    Some(PathBuf::from(appdata)
-        .join("com.qingbird.git")
-        .join("config.json"))
+    Some(PathBuf::from(appdata).join("com.qingbird.git"))
+}
+
+/// CLI 工具图标的磁盘缓存目录：`<appdir>/icons`。
+///
+/// 归 `store` 而不是 `cli`：它要拼的正是上面那个目录名，让 `cli` 自己再拼一遍
+/// 就是同一件事的第二个出处（本项目为这条交过四次学费）。
+/// 目录**不在读的时候创建**——写的时候才建（`cli::icon::ensure`），
+/// 只读的那条路（首屏索引）碰不到磁盘。
+pub fn icons_dir() -> Option<PathBuf> {
+    Some(app_dir()?.join("icons"))
 }
 
 pub fn load() -> AppConfig {

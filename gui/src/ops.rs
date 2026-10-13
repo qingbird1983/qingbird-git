@@ -1441,6 +1441,14 @@ impl Shell {
             self.cli.packages = packages;
             self.cli.scanned_at = scanned_at;
         }
+        // 图标也先上屏缓存（**与上面那份包清单同一套语言**：先渲染、后台再刷）。
+        // 它只是一次 `read_dir`，不碰 Windows API、不 stat exe ⇒ 首屏不因此变慢。
+        // 取不到目录（环境里没有 APPDATA）就是空表：图标全部走终字符块
+        let icon_dir = qingbird_core::store::icons_dir();
+        self.cli.icons = icon_dir
+            .as_deref()
+            .map(|d| qingbird_core::cli::icon::cached_icons(&self.cli.packages, d))
+            .unwrap_or_default();
         self.cli.scanning = true;
         self.cli.errors.clear();
         self.cli_keep_selection();
@@ -1451,20 +1459,66 @@ impl Shell {
                 .background_executor()
                 .spawn(async move { qingbird_core::cli::scan() })
                 .await;
-            this.update(cx, |this, cx| {
-                if this.cli_seq != seq {
-                    return; // 已有新一轮，这批过期
+            let pkgs = report.packages.clone();
+            let landed = this
+                .update(cx, |this, cx| {
+                    if this.cli_seq != seq {
+                        return false; // 已有新一轮，这批过期
+                    }
+                    this.cli.scanning = false;
+                    this.cli.errors = report.errors.clone();
+                    this.cli.scanned_at = report.scanned_at;
+                    this.cli.packages = report.packages.clone();
+                    // 落库失败不报：缓存是加速器不是依赖（core 那条约定）
+                    qingbird_core::cli::save_cached(&report.packages, report.scanned_at);
+                    this.cli_keep_selection();
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !landed {
+                return;
+            }
+
+            // 图标提取：与扫描**同批派发**（设计 §10.1），**一颗一颗来、提完一颗
+            // 就 notify 一次** —— 行内先画终字符块，好了换图，绝不阻塞首屏。
+            // ⚠️ 这里与 `dialogs/clone.rs` 那条进度搬运是同一条纪律（D73 第三型）：
+            // 后台跑着而**没有人在搬**，界面上就是"永远停在准备中"。
+            let Some(dir) = icon_dir else {
+                return;
+            };
+            for pkg in pkgs {
+                let id = pkg.id.clone();
+                // 每一轮都克隆一次：`dir` 要搬进那条后台任务里，
+                // 而它下一轮还得用（搬走的是克隆，外面这颗一直是它的出处）
+                let dir = dir.clone();
+                let got = cx
+                    .background_executor()
+                    .spawn(async move { qingbird_core::cli::icon::ensure(&pkg, &dir) })
+                    .await;
+                let still = this
+                    .update(cx, |this, cx| {
+                        if this.cli_seq != seq {
+                            return false;
+                        }
+                        // 提到了就挂上；**没提到要把旧的那条摘掉**——
+                        // exe 换了版又变成没有图标时，留着旧图就是一句假话
+                        match got {
+                            Some(path) => {
+                                this.cli.icons.insert(id.clone(), path);
+                            }
+                            None => {
+                                this.cli.icons.remove(&id);
+                            }
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !still {
+                    return;
                 }
-                this.cli.scanning = false;
-                this.cli.errors = report.errors.clone();
-                this.cli.scanned_at = report.scanned_at;
-                this.cli.packages = report.packages.clone();
-                // 落库失败不报：缓存是加速器不是依赖（core 那条约定）
-                qingbird_core::cli::save_cached(&report.packages, report.scanned_at);
-                this.cli_keep_selection();
-                cx.notify();
-            })
-            .ok();
+            }
         }));
     }
 

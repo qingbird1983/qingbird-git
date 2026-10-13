@@ -21,6 +21,20 @@ chrono = "0.4"
 # `bundled` 把 sqlite3.c 静态编进来，不依赖系统装 SQLite，Windows 分发也干净。
 # 实测本机 7.5 秒编过、中文与 emoji 往返正常（SQLite 3.53.2）。
 rusqlite = { version = "0.40", features = ["bundled"] }
+# CLI 工具图标要**编码**一张 PNG 落盘（`cli/icon.rs`：GDI 取到的是裸像素，
+# 而界面那侧 `img()` 只认 gpui 解得开的图片格式）。
+# ⚠️ **不是新引入的编译单元**：`png` 0.17 本来就在依赖树里
+# （`tiny-skia` → `resvg` → `gpui-component` 那条链），纯 Rust、**无 build script**；
+# 加这条边只让它从传递依赖变成直接依赖，编一次的事。
+# 解码那半边不归我们：磁盘上那张图由 gpui 自己的 `ImageAssetLoader` 读
+# （`elements/img.rs:669` 的 `image::guess_format`），所以不引 `image`。
+png = "0.17"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# CLI 工具图标提取（阶段二）多要四组绑定：
+#   `Win32_UI_Shell`               → `ExtractIconExW`
+#   `Win32_UI_WindowsAndMessaging` → `GetIconInfo` / `DestroyIcon` / `ICONINFO`
+#   `Win32_Graphics_Gdi`           → `GetObjectW` / `GetDIBits` / `BI_RGB` / `BITMAPINFO`
+#   `Win32_Storage_FileSystem`     → `SHGetFileInfoW` 那个入参类型（`FILE_FLAGS_AND_ATTRIBUTES`）
+# 都是同一个 crate 多开几档 feature（windows-sys 是生成的绑定，**无 build script**）。
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
