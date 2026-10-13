@@ -318,9 +318,19 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
   `/DMyAppVersion=` 传进来。**绕开脚本直接跑 ISCC 会 `Compile aborted`（实测，退出码 2）**，
   这就是 D78 的落法：让"忘"没有选项，而不是靠人记得改三处。
   ⚠️ **旧版本这条写着"三处必须一起改，否则界面读出来的版本与包里不一致"——那是假话**：
-  全仓 `env!("CARGO_PKG_VERSION")` **零读者**，界面也没有"关于"那一格，三处里只有 `.iss`
-  那处有读者（包文件名 / 注册表显示名 / exe 的 FileVersion）。⇒ 反过来开 **Q38**：
-  用户手上没有任何地方能看出自己跑的是哪一版，要不要补一格由他拍
+  全仓 `env!("CARGO_PKG_VERSION")` 零读者（当时），界面也没有"关于"那一格，三处里只有 `.iss`
+  那处有读者（包文件名 / 注册表显示名）。
+  ⛔ **2026-10-13 更正：上面那句里「exe 的 FileVersion」这一项是假的**（发 v0.4.1 时
+  读产物量出来的）：`gui/build.rs` 里**没有** `VERSIONINFO` / `FILEVERSION` 任何一条，
+  `target/release/qingbird-git.exe` 的 `VersionInfo.FileVersion` **是空的**——PE 头
+  `Subsystem=2` 是对的、属性页"详细信息"却一栏都没有。⇒ 发版时**真正能读到版本的只有
+  「包文件名」与「注册表显示名」**（两者都在 `.iss` 那一处）⇒ 单源这件事仍然成立，
+  但**理由要按这一条收**：不是"三处都有读者"，是"只有安装器那一处有读者"。
+  ⚠️ 要不要给 exe 补一份版本资源（`build.rs` 喂一份带 `VERSIONINFO` 的 `.rc`）**是另一件事，
+  本轮没做**：它要重编重发才生效，归下一轮由他拍。
+  ⚠️ 同一段还有一处过期：「界面也没有"关于"那一格」**已经不成立**——**Q38 于 2026-10-11 落地**，
+  版本号现在显示在**设置页左栏底部**（`app_version_line`，`env!("CARGO_PKG_VERSION")`
+  全仓只许出现在那一颗函数里）。⇒ 反过来开 **Q38** 那条**已答并落**，别照这段旧文再开一次
   ② 提交 → ③ **附注**标签 `git tag -a vX.Y.Z`（附注才带说明，轻量标签在 Release 上读不出内容）
   → ④ `git push origin main vX.Y.Z` → ⑤ 在**标签那条提交**上 `pwsh scripts/build_installer.ps1`
   → ⑥ `gh release create vX.Y.Z dist/qingbird-git-Setup-X.Y.Z.exe --verify-tag`
