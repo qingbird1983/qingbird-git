@@ -75,13 +75,15 @@ impl ProviderId {
 
 /// 这个包跟桌面应用有没有关系（卸载会不会连带东西）。
 ///
-/// 阶段一（只有 JSON provider 时）永远是 [`Unknown`](PackageKind::Unknown)；
+/// 阶段一（只有 JSON provider 时）它恒为 [`Unknown`](PackageKind::Unknown)；
 /// **阶段二起由 [`crate::cli::desktop`] 按两个高置信信号判定**（包私有目录里
-/// 有没有 GUI 子系统的主程序、有没有快捷方式指进这个目录）。
+/// 有没有 GUI 子系统的主程序、有没有快捷方式指进这个目录——后者还没做）。
 ///
 /// [`Unknown`](PackageKind::Unknown) 仍会出现——**"没证据"是一种结论**，
 /// 比如 winget 那一档拿不到安装目录。存一个"没分类"比存一个"猜的分类"诚实
 /// （设计 §4：中置信度启发式一档不做，误报会让用户卸错东西）。
+/// 阶段三的卸载计划按它定风险（见 [`crate::cli::plan::uninstall_risk`]）：
+/// 没证据按**高**的一档报——不知道会连带什么，就按最坏的方向提醒。
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum PackageKind {
     #[default]
@@ -232,9 +234,12 @@ pub struct CliPackage {
     /// 包名（`ripgrep` / `@larksuite/cli`）。provider 内部唯一
     pub name: String,
     pub version: Option<String>,
-    /// 可更新到的版本。
-    /// ⚠️ **阶段一永远是 `None`**（不查更新，那是阶段三）——字段留着是为了
-    /// 阶段三不必迁移库表，界面读 `None` 时**不画"可更新"徽标**。
+    /// 可更新到的版本。`None` = 已最新**或未查询**（两种在界面上是同一句话：
+    /// 不画"可更新"徽标）。
+    ///
+    /// 两个出口填它：winget 的 `list()` 免费带回来（表里「可用」那一列）；
+    /// 别的 provider 靠阶段三的 [`crate::cli::check_updates`] 单独查（npm 有，
+    /// 其余查不了 ⇒ 它们的 `latest` 恒 `None`，升级键不出现）。
     #[serde(default)]
     pub latest: Option<String>,
     /// 安装目录（拿不到就是 `None`）

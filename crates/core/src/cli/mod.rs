@@ -1,8 +1,12 @@
-//! CLI 工具扫描（**只读**）。
+//! CLI 工具扫描（**只读**）与阶段三的管理动作（升级 / 卸载 / 清理）。
 //!
 //! 扫本机的包管理器（winget / scoop / npm / pipx / cargo），列出装了哪些 CLI 工具、
 //! 各自的版本、安装位置、提供的命令，并按 PE 子系统判一次**桌面关联**
-//! （[`desktop`]，设计 §4 的两个高置信信号之一）。升级 / 卸载属阶段三。
+//! （[`desktop`]，设计 §4 的两个高置信信号之一）。
+//!
+//! 阶段三起这里还管三件管理动作：**升级**（一条命令直接执行，设计 §6）、
+//! **卸载**（[`plan`] 的 OpPlan + [`execute`] 串行跑完）、**清理**
+//! （[`clean`]，只删内容不删目录，设计 §11）。
 //!
 //! ## 为什么在 core 而不另起一个 crate
 //!
@@ -17,10 +21,15 @@
 //! [`scan`] 把每个**探测得到**的 provider 丢到一条线程上跑（它们各是一条外部
 //! 命令、彼此无关），回来合并成一份 [`ScanReport`]。某个 provider 失败
 //! **不影响**别的——它那句话进 `errors`，界面上当成一条提示。
+//! 查更新（[`check_updates`]）是**另一趟**：它要走网络，压在这一趟里就是
+//! "进屏先等几秒"，所以扫描落地之后再由界面单独派发（与图标提取同一套语言：
+//! 先渲染、后台再刷）。
 
 mod cache;
+mod clean;
 mod exec;
 mod model;
+mod plan;
 mod provider;
 
 /// CLI 工具图标（阶段二第一件：从 exe 提图标 + 磁盘缓存）。
@@ -38,9 +47,16 @@ pub mod icon;
 /// 摊上去就成了 `qingbird_core::cli::detect(..)` —— 看不出在检测什么。
 pub mod desktop;
 
+/// 阶段三的执行器。**不摊到 `cli` 根**：入口 `run_plan` 摊上去就是
+/// `cli::run_plan(..)`，看不出跑的是谁的计划；界面经 `cli::execute::run_plan`
+/// 调它，计划那几格类型从 `cli::plan::` 来（根上那一层 `pub use` 是给它们的）。
+/// `clean` 那一格相反——它只有执行器一个读者，留成私有模块
+pub mod execute;
+
 pub use cache::{load_cached, save_cached};
 pub use model::{CliPackage, DirKind, PackageDir, PackageKind, ProviderId, ScanReport};
-pub use provider::{providers, PackageProvider};
+pub use plan::{clean_plan, OpPlan, RiskLevel, Step, StepKind, UpdateInfo};
+pub use provider::{provider_of, providers, PackageProvider};
 
 use crate::store::now_secs;
 
@@ -135,6 +151,44 @@ pub(crate) fn sort_packages(ps: &mut [CliPackage]) {
     });
 }
 
+/// 查一遍哪些包可更新（阶段三）。阻塞（要走网络）——**调用方放后台线程**。
+///
+/// 与 [`scan`] 分开的两趟：这一走 registry，慢且会失败；压进扫描那一趟就是
+/// "进屏先等几秒"，而扫描本该只等几条本地命令。界面落地后单独派发
+/// （与图标提取同一套语言：先渲染、后台再刷）。
+///
+/// provider 之间**线程并行**（与 `scan` 同构）；某个查不动 = 它的更新
+/// 一律"不知道"（`latest` 留 `None`），**不进 `errors`**——查不到更新不是故障。
+pub fn check_updates() -> Vec<plan::UpdateInfo> {
+    let mut handles = Vec::new();
+    for p in provider::providers() {
+        // 不先 `detect()`：查更新这一步对没装的 provider 就是空表
+        // （它们压根没覆写 `outdated`），而起 `where` 是白花时间
+        handles.push(std::thread::spawn(move || p.outdated()));
+    }
+    let mut out = Vec::new();
+    for h in handles {
+        if let Ok(mut ups) = h.join() {
+            out.append(&mut ups);
+        }
+    }
+    // 不去重：`UpdateInfo::id` 带 provider 前缀（`npm:pnpm`），两个 provider
+    // 报同一颗包的概率是零；真去重反而多一处"谁留谁不留"要解释
+    out
+}
+
+/// 把查到的更新**合并进**包清单（按 [`CliPackage::id`] 对）。
+///
+/// 纯函数：哪些包、哪些更新都由调用方给，单测在假世界里钉"对得上才写"——
+/// 对不上（provider 卸了/装了）就保持原样，**不按名字猜一个写上**
+pub fn merge_updates(packages: &mut [CliPackage], updates: &[plan::UpdateInfo]) {
+    for p in packages.iter_mut() {
+        if let Some(u) = updates.iter().find(|u| u.id == p.id) {
+            p.latest = Some(u.latest.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +224,33 @@ mod tests {
             got,
             vec!["scoop:fd", "scoop:jq", "npm:Bun", "npm:zlib", "pipx:black"]
         );
+    }
+
+    /// 合并查到的更新：**按 id 对，对不上就原样**。
+    /// 判据是"对不上的不动"——按名字猜一个写上，屏幕就会多一个假的可更新徽标
+    /// （那是让用户点一次升不动的升级）
+    #[test]
+    fn merge_updates_matches_by_id_only() {
+        use crate::cli::plan::UpdateInfo;
+        let mut ps = vec![
+            pkg("npm:pnpm", ProviderId::Npm, "pnpm"),
+            pkg("npm:ripgrep", ProviderId::Npm, "ripgrep"),
+        ];
+        merge_updates(
+            &mut ps,
+            &[
+                UpdateInfo {
+                    id: "npm:pnpm".into(),
+                    latest: "11.6.1".into(),
+                },
+                // 清单里没有的这一条：不该把谁改掉
+                UpdateInfo {
+                    id: "npm:gone".into(),
+                    latest: "9.9.9".into(),
+                },
+            ],
+        );
+        assert_eq!(ps[0].latest.as_deref(), Some("11.6.1"));
+        assert_eq!(ps[1].latest, None, "没被点到的那颗保持原样");
     }
 }

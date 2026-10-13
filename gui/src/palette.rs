@@ -53,7 +53,7 @@ const G_LOW: usize = 0;
 const G_CUR: usize = 1;
 const G_BATCH: usize = 2;
 const G_VIEW: usize = 3;
-/// CLI 工具那一组（阶段一：只有一个「重新扫描」）。
+/// CLI 工具那一组（阶段三：重新扫描 / 升级全部 / 清理共享缓存）。
 /// **排在「切到仓库」之前**——它也是固定长度的一组
 const G_CLI: usize = 4;
 const G_REPO: usize = 5;
@@ -96,6 +96,10 @@ pub(crate) enum PaletteAction {
     ToggleInspector,
     /// 重扫 CLI 工具（阶段一；CLI 屏左栏底部那颗键的键盘路径）
     ScanCli,
+    /// 升级全部可更新的 CLI 工具（阶段三）。**逐颗升级**在详情卡那颗键上
+    UpgradeAllCli,
+    /// 清理共享缓存（阶段三；⌘K 是**整批**那条路，逐颗的在汇总条每行尾巴）
+    CleanSharedCli,
 }
 
 impl Shell {
@@ -272,6 +276,13 @@ impl Shell {
             PaletteAction::ToggleInspector => self.toggle_inspector(cx),
             // 与 CLI 屏左栏底部那颗「重新扫描」走同一个入口
             PaletteAction::ScanCli => self.scan_cli(cx),
+            // 与详情卡那颗「升级」走同一个编排（`upgrade_cli_pkg` 的单包版）
+            PaletteAction::UpgradeAllCli => self.upgrade_all_cli(cx),
+            // 与汇总条「全部清理…」走同一个框（`open_cli_clean_dlg` 的整批版）
+            PaletteAction::CleanSharedCli => {
+                let targets = self.cli.shared.clone();
+                self.open_cli_clean_dlg(targets, window, cx);
+            }
         }
     }
 
@@ -540,15 +551,47 @@ impl Shell {
         ]);
         debug_assert_eq!(groups.len(), G_CLI);
 
-        // ---- CLI 工具（阶段一：只读展示，故只有「重新扫描」这一条动作） ----
-        // 「升级全部 / 清理共享缓存」属阶段三，**不在这里摆灰条目**——
-        // 一条点了没反应的命令比没有更糟（v4 铁律：不演拿不到的效果）
-        groups.push(CommandGroup::new().label("CLI 工具").items([plain(
-            "重新扫描 CLI 工具",
-            AssetIcon::Terminal,
-            &["cli", "工具", "扫描", "刷新"],
-        )]));
-        acts.push(vec![PaletteAction::ScanCli]);
+        // ---- CLI 工具（阶段三：重新扫描 / 升级全部 / 清理共享缓存） ----
+        // 「升级全部」的目标数 = **真有新版且 provider 给得出升级命令**的两重判据
+        // （与 `ops::upgrade_all_cli` 同一个口径——两处各数一遍迟早对不上）。
+        // cargo 不覆写 `outdated`（`latest` 恒 `None`），天然不在里面
+        let up_n = self
+            .cli
+            .packages
+            .iter()
+            .filter(|p| {
+                p.latest.is_some()
+                    && qingbird_core::cli::provider_of(p.provider)
+                        .and_then(|pr| pr.upgrade_step(p))
+                        .is_some()
+            })
+            .count();
+        let shared_n = self.cli.shared.len();
+        let cli_busy = self.cli_busy_any();
+        groups.push(CommandGroup::new().label("CLI 工具").items([
+            plain(
+                "重新扫描 CLI 工具",
+                AssetIcon::Terminal,
+                &["cli", "工具", "扫描", "刷新"],
+            ),
+            // **没东西可做时把理由写进标签**（同 `batch_line` 那条判据）：
+            // 一条灰着的命令什么都不说，读起来就是"坏了"
+            CommandItem::new()
+                .label(cli_upgrade_all_line(up_n))
+                .icon(cmd_icon(AssetIcon::ArrowUp))
+                .keywords(["cli", "工具", "升级", "更新", "upgrade"])
+                .disabled(up_n == 0 || cli_busy),
+            CommandItem::new()
+                .label(cli_clean_shared_line(shared_n))
+                .icon(cmd_icon(AssetIcon::Trash))
+                .keywords(["cli", "缓存", "清理", "共享", "clean"])
+                .disabled(shared_n == 0 || cli_busy),
+        ]));
+        acts.push(vec![
+            PaletteAction::ScanCli,
+            PaletteAction::UpgradeAllCli,
+            PaletteAction::CleanSharedCli,
+        ]);
         debug_assert_eq!(groups.len(), G_REPO);
 
         // ---- 切到仓库（**排最后**，理由见 `G_REPO` 的注释）----
@@ -612,6 +655,27 @@ fn batch_line(kind: BatchKind, n: usize) -> String {
 /// 两边由同一次 `palette_model` 产出，改一处必须改另一处
 fn with_groups(cmd: Command, groups: Vec<CommandGroup>) -> Command {
     groups.into_iter().fold(cmd, |cmd, g| cmd.group(g))
+}
+
+/// 「升级全部」那颗的标签。**没东西可升时把这件事写进标签**——
+/// 置灰的命令配一句「没有可升级的工具」，用户看到的是"现在都最新"
+/// 而不是"点了没反应"（同 `batch_line` 那条判据）。
+/// 抽成自由函数是为了能单测（挂在 `Shell` 上时得一整个 Shell 才调得了）
+fn cli_upgrade_all_line(n: usize) -> String {
+    if n == 0 {
+        "升级全部（没有可升级的工具）".to_string()
+    } else {
+        format!("升级全部 · {n} 个工具")
+    }
+}
+
+/// 「清理共享缓存」那颗的标签。同上：没有共享缓存时说出为什么
+fn cli_clean_shared_line(n: usize) -> String {
+    if n == 0 {
+        "清理共享缓存（没有共享缓存）".to_string()
+    } else {
+        format!("清理共享缓存 · {n} 个目录")
+    }
 }
 
 /// ⌘K 三种命令项的图标。**统一走本项目的 `ICON` 档（16px）**。
@@ -709,5 +773,15 @@ mod tests {
             lines,
             vec!["拉取全部 · 1 个仓库", "推送全部 · 1 个仓库", "检测全部 · 1 个仓库"]
         );
+    }
+
+    /// CLI 那两颗：**没东西可做时把理由写进标签**（同批量那条判据）。
+    /// 一条灰着的命令什么都不说，读起来就是"坏了"
+    #[test]
+    fn cli_palette_lines_say_why_they_are_disabled() {
+        assert_eq!(cli_upgrade_all_line(0), "升级全部（没有可升级的工具）");
+        assert_eq!(cli_upgrade_all_line(3), "升级全部 · 3 个工具");
+        assert_eq!(cli_clean_shared_line(0), "清理共享缓存（没有共享缓存）");
+        assert_eq!(cli_clean_shared_line(2), "清理共享缓存 · 2 个目录");
     }
 }

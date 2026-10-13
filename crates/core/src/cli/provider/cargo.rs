@@ -19,6 +19,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::cli::model::{CliPackage, PackageKind, ProviderId};
+use crate::cli::plan::Step;
 use crate::cli::provider::PackageProvider;
 
 /// cargo ≥ 1.42 写的账本（JSON，多几格安装时的 profile / target 细节）
@@ -79,6 +80,20 @@ impl PackageProvider for Cargo {
     fn shared_install_dir(&self) -> bool {
         true
     }
+
+    /// 卸载 = `cargo uninstall <包名>`（设计 §6）。**本机验过**：
+    /// `cargo uninstall` 读同一本账（`.crates2.json`），卸完那一条自己消失。
+    fn uninstall_step(&self, pkg: &CliPackage) -> Option<Step> {
+        Some(Step::uninstall("cargo", &["uninstall", &pkg.name]))
+    }
+
+    // ⚠️ **不覆写 `upgrade_step`**（设计稿的表格写 `cargo install <n>`，这里不接）：
+    // ① 上游 `cargo install` 对**已装**的包不是升级——它报 "already installed"
+    //    （`cargo install-update` 这个第三方工具存在的原因正是这个），照设计稿写
+    //    一条升不动的命令，屏上就是一个点了没反应的键；
+    // ② 真正的升级（`cargo install --force <n>`）每次全量重编，而我们又没有
+    //    `outdated` 那一格 ⇒ 没有 `latest` 的升级键同样是一条骗人的键
+    //    （v4 铁律：不演拿不到的效果）。真要做由他拍。
 }
 
 /// `$CARGO_HOME`，没设就退 `~\.cargo`（cargo 自己的规矩）。两边都不认识返回 `None`。

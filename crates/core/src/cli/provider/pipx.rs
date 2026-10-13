@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use super::LIST_TIMEOUT;
 use crate::cli::exec;
 use crate::cli::model::{CliPackage, PackageKind, ProviderId};
+use crate::cli::plan::Step;
 use crate::cli::provider::PackageProvider;
 
 pub struct Pipx;
@@ -49,6 +50,19 @@ impl PackageProvider for Pipx {
             }
         }
         Ok(pkgs)
+    }
+
+    /// 升级 = `pipx upgrade <venv 名>`（设计 §6；venv 名就是包名那一格，
+    /// `list` 的注释说明过：pipx 的 upgrade/uninstall 收的正是它）。
+    ///
+    /// ⚠️ **本机没装 pipx** ⇒ 命令形状照上游文档定的，没在本机跑过（同 scoop 那笔账）。
+    fn upgrade_step(&self, pkg: &CliPackage) -> Option<Step> {
+        Some(Step::uninstall("pipx", &["upgrade", &pkg.name]))
+    }
+
+    /// 卸载 = `pipx uninstall <venv 名>`（设计 §6）。同上，本机未验。
+    fn uninstall_step(&self, pkg: &CliPackage) -> Option<Step> {
+        Some(Step::uninstall("pipx", &["uninstall", &pkg.name]))
     }
 }
 

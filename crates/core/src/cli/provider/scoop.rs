@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use super::LIST_TIMEOUT;
 use crate::cli::exec;
 use crate::cli::model::{CliPackage, PackageKind, ProviderId};
+use crate::cli::plan::Step;
 use crate::cli::provider::PackageProvider;
 
 pub struct Scoop;
@@ -47,6 +48,19 @@ impl PackageProvider for Scoop {
             }
         }
         Ok(pkgs)
+    }
+
+    /// 升级 = `scoop update <app 名>`（设计 §6）。
+    ///
+    /// ⚠️ **本机没装 scoop** ⇒ 这条命令的形状照上游文档定的，没在本机跑过。
+    /// 与阶段二"图标/桌面关联那两档未验"同一笔账：真跑过要有台装了 scoop的机器
+    fn upgrade_step(&self, pkg: &CliPackage) -> Option<Step> {
+        Some(Step::uninstall("scoop", &["update", &pkg.name]))
+    }
+
+    /// 卸载 = `scoop uninstall <app 名>`（设计 §6）。同上，本机未验。
+    fn uninstall_step(&self, pkg: &CliPackage) -> Option<Step> {
+        Some(Step::uninstall("scoop", &["uninstall", &pkg.name]))
     }
 }
 

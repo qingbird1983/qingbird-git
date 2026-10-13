@@ -73,6 +73,15 @@ impl Render for Shell {
         if let Some(note) = self.pending_batch_note.take() {
             window.push_notification(note, cx);
         }
+        // CLI 管理操作跑完：收确认框 + 弹一句结论。后台任务里没有 `&mut Window`
+        // （`close_dialog` / `push_notification` 都挂在它上面），与上面同一条路
+        if self.pending_cli_dlg_close {
+            self.pending_cli_dlg_close = false;
+            window.close_dialog(cx);
+        }
+        if let Some(note) = self.pending_cli_note.take() {
+            window.push_notification(note, cx);
+        }
         // 关窗询问面板（阶段 22）。同样在 render 里兑现：
         // `on_window_should_close` 的回调跑在 Win32 的 `WM_CLOSE` 处理过程中，
         // 在那儿拉模态浮层等于消息循环嵌套，而它还必须同步返回一个值
@@ -1459,6 +1468,8 @@ impl Shell {
             pending_reveal: None,
             pending_folder: None,
             pending_batch_note: None,
+            pending_cli_dlg_close: false,
+            pending_cli_note: None,
             // 关窗那三档**只在构造期读一次**：`on_window_should_close` 的回调
             // 每次点 X 都会跑，而那个回调在消息处理里，多一次 `store::load()`
             // 就是一次同步读盘。改档的地方（面板 / 设置）会同步更新这个字段
@@ -1515,6 +1526,12 @@ impl Shell {
             clone_dlg: None,
             cmd_dlg: None,
             settings_dlg: None,
+            cli_uninstall_dlg: None,
+            cli_clean_dlg: None,
+            cli_log: LogState::default(),
+            cli_log_scroll: ScrollHandle::new(),
+            // 收起态（设计 §10.1 线框图那一格）：默认收起，点了才展开
+            cli_log_open: false,
             upd: Default::default(),
             sync_cfg,
             palette,
@@ -2041,8 +2058,8 @@ impl Shell {
             .gap(px(GAP_TIGHT))
             .child(
                 div()
-                    .w(px(6.0))
-                    .h(px(6.0))
+                    .w(px(DOT))
+                    .h(px(DOT))
                     .flex_shrink_0()
                     .rounded_full()
                     .bg(match (&batch, running.is_some()) {

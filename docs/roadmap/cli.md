@@ -311,3 +311,90 @@ npm `@larksuite/cli` 与 cargo `cargo-llvm-cov` 都是「纯命令行」（后�
 用户要求"先把完整版面原型设计出来再动"⇒ 原型**没交付**（他随后让"把目前的工作提交、收尾"）。
 ⇒ 下一轮若要接着做：先补 `docs/UI-DESIGN.md` 的 CLI 屏那一节（版面结构归那本），
 再照它改实现；本轮改完的版式**没有抓帧复验**（复抓那次扫描还没跑完，帧上是空态）。
+
+**升级 / 卸载 / 共享缓存清理 —— 2026-10-14 阶段三**
+
+**结论**：CLI 屏从"只读"变成"可操作"。**卸载走 OpPlan**（命令 + 勾选的清理步骤合成
+一条结构化计划，风险三档分级），升级就是一条命令（不进计划），共享缓存清理复用
+同一套计划模型（纯清理计划）。入口三处：详情卡卡底两颗键 + 右栏共享缓存卡的
+「清理」+ ⌘K 面板两条批量命令；**所有入口共一把串行锁**（任一 CLI 操作在跑，
+全部入口键禁）。两颗确认框都是"四段层级"（受影响对象 → 命令预览 → 风险与代价 →
+勾选清单），删前路径入日志，删完弹通知。
+
+**core 侧（`crates/core/src/cli/`）**：
+
+* **OpPlan 模型**（`plan.rs`）：`Step`（`program + args + kind`，卸载/升级/清理三类）
+  → `assemble(pkg, uninstall_step, cleanup)` 组装卸载计划，`clean_plan(targets)`
+  组装纯清理计划。**风险三档**（`uninstall_risk`）：`Safe`（有证据的纯缓存目录）
+  / `Moderate`（缓存 + 配置） / `High`（**没证据时按最坏报**——`PackageKind::Unknown`
+  或桌面关联两档，删前多说一句比漏说强）。`OpPlan::blocked` 给"给不出命令"的
+  情形（不开空执行）。**可释放合计有一项没量过就是 `None`**（界面显示"未知"，
+  不拿 0 冒充）。
+* **`run_steps` 的停止规则是旗标不是硬编码**：卸载计划传 `true`（卸载命令失败
+  即停，后面挂着的清理一步都不跑——卸都没卸掉，清什么缓存）；一批各自独立的
+  升级传 `false`（一颗升不动不连坐后面九颗）。**同一属性两个方向的那一族**：
+  写死任一个值，另一条路就是错的，且错得安静。
+* **provider trait 加三方法**（默认实现兜底）：`outdated()`（查更新，**返回空表
+  而不是 `Result`**——"没查到"升级成"这一台坏了"会把一次扫描判失败；
+  只有 npm 覆写，`npm outdated -g --depth=0 --json` 本机真输出当夹具）、
+  `upgrade_step(pkg)`（一条命令，cargo 不覆写——查不到有没有新版，没有 `latest`
+  的升级键是骗人的键）、`uninstall_step(pkg)`（卸载命令；组装逻辑五家相同，
+  收在默认的 `plan_uninstall` 里）。winget 的升级命令带 `--silent`（设计稿没写的
+  一颗：我们的子进程没有控制台，交互式安装器只会挂等到超时）；`--accept-package-
+  agreements` **没加**（沙箱里 winget 起不来，没验过的旗不如让日志报"请先接受协议"）。
+* **`check_updates` + `merge_updates`**（`mod.rs`）：查更新与扫描**分成两趟**
+  （这一趟走网络，压进扫描就是"进屏先等几秒"），provider 间线程并行；某个查不动
+  = 它的 `latest` 一律 `None`（`latest` 的语义本来就是"已最新**或未查询**"），
+  **不进 `errors`**。合并按 `id` 对，**对不上就原样**——按名字猜一个写上，
+  屏幕就会多一个假的可更新徽标。winget 的 `latest` 由 `list()` 免费带回，
+  不在这趟再查。
+* **清理只删内容不删目录**（`clean.rs`）：目录本身是工具自己的家，删了有的工具
+  启动报错。**逐项独立**（一个文件被占用不影响同目录别的项，与
+  `space::delete_cache_dirs` 同一条）。先量后删、只记删成功的（整目录先量再删，
+  删到一半失败会把没删的也算成"已释放"）；⚠️ 文件走 `metadata().len()`、
+  目录才走 `dirs::size_of`——那颗走盘器对**文件**返回 0。
+
+**GUI 侧**：
+
+* **两颗确认框**（`dialogs/cli.rs`，539 行）：卸载框（Cache 默认全勾、Config/Data
+  锁图标 + 红字禁勾——`Checkbox` 没有禁用档，画个灰勾选框比不画更糟）与共享缓存
+  清理框（一颗一条，整批共用）。**计划预览每帧重算**（勾选变合计变，footer 每帧
+  重跑 builder 是现成的）。确认后**不关框**、确认键转「执行中…」（winget uninstall
+  是分钟级；关了就只剩日志里一行，与 purge/clean 那两颗"点完即关"相反——设计 §11
+  的 Running 是独立档），跑完由 render 帧收框（`pending_cli_dlg_close`）+ 弹通知
+  （`pending_cli_note`，后台任务没有 `&mut Window`）。
+* **CLI 编排块**（`ops.rs`）：`spawn_cli_run` 三步（计划预览写进 `cli_log` → 后台
+  `run_steps`，每步 `diag::note` + 共享缓冲 → 收尾：清忙集、结论、收框/通知、
+  重新扫描或重量共享缓存）。**行搬运泛化成 `LogSink`**（`Repo(String)` / `Cli`），
+  CLI 日志复用仓库那一套 `output_stream` + 贴底跟随，不另起一轮询。
+* **三个出口一个判据**（`cli_tab.rs`）：左栏行尾点 / 组标题行尾点 / 详情卡徽章，
+  全部 `latest.is_some()`。**升级键双判据**：`latest.is_some()` +
+  `provider_of(...).upgrade_step(p).is_some()`（npm 有 `latest` 才有键；cargo 压根
+  没有 `latest` ⇒ 键不出现）。`cli_busy_any()` = `busy` 或 `shared_busy` 非空，
+  任一在跑所有入口全禁。
+* **⌘K 两条批量命令**（`palette.rs`）：升级全部（目标数与 `upgrade_all_cli` 同口径，
+  空表时把理由写进标签而不是画条死键）、清理全部共享缓存。
+
+**出口四闸**：`cargo check` 双 crate 零警（`CARGO_INCREMENTAL=0` 复核过——incremental
+锁文件拒绝访问是外部进程持有会话锁的环境噪音，与代码无关）；core **324** 条 /
+gui **149** 条全绿；`python scripts/check_design_tokens.py` 干净。
+**四条变异各自精确红、还原后 sha 逐字节相同、全量复跑绿**：
+M1 风险真值表（没证据按最坏报）/ M2 升级批次逐项独立（`if step.kind == Uninstall`
+恒停）/ M3 合计 None 口径（有一项没量过不许拿 0 冒充）/ M4 灰条目理由
+（palette 空表标签）。⚠️ M3 第一版锚点命中 2 次（`assemble` 与 `clean_plan` 同形
+折叠），多行锚点消歧后才精确。
+
+**偏差登记（三条，都不改设计稿、只记实情）**：
+
+1. 共享缓存清理框**不给"影响包数"**：`rules.toml` 的 shared 规则只有 label，
+   按 label 猜 provider 是编映射（本项目不为"按名字猜"背书——阶段二那两个
+   反例刚交过学费），改成说后果（"这些目录里的内容可再生产"）。
+2. 卸载/清理确认框**确认后不关**（上面说了理由）。
+3. `CliUninstallDialog` / `CliCleanDialog` **删掉 `error` 字段**：失败路径是
+   关框 + 通知，没有第二个产出者——无产出者的字段就是"永不触发的分支"
+   （比没有更糟）。
+
+**未做**：升级/卸载**没有抓帧复验**（GUI 进程要在计划任务/用户终端里跑，
+agent shell 拉起的随命令结束被回收）；winget 的卸载命令沙箱里验不了
+（winget 起不来那条老账）——判据只有"命令拼得对"（单测 + 日志预览），
+"卸得成"要他在真机上点。

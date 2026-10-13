@@ -231,6 +231,20 @@ impl Op {
     }
 }
 
+/// 后台线程的行搬进哪个日志槽（阶段三：CLI 屏也有了自己的动作流）。
+///
+/// CLI 那一槽**不按仓库**——工具是整台机器上的，没有"当前仓库"可以挂
+/// （见 `Shell::cli_log` 字段注释）。做成枚举而不是让 CLI 那边另起一套
+/// 「共享缓冲 + 120ms 轮询」：两套迟早漂，而漂了的症状是"某一屏永远不动"
+/// （本项目为同一属性两个出处交过四次学费）
+#[derive(Clone)]
+pub(crate) enum LogSink {
+    /// 某个仓库自己的那一槽（`Shell::logs` 的键）
+    Repo(String),
+    /// CLI 屏那一槽（全局一份）
+    Cli,
+}
+
 /// 一个仓库的日志。
 ///
 /// **按仓库路径存**（D7），不是单份全局：切仓库不该把上一个仓库正在跑的输出
@@ -451,7 +465,7 @@ pub(crate) struct HistoryState {
     pub(crate) task: Option<Task<()>>,
 }
 
-/// CLI 工具屏的状态（阶段一：只读扫描展示）。
+/// CLI 工具屏的状态（阶段一：只读扫描展示；阶段三起带管理动作）。
 ///
 /// **一份全局**，不按仓库——CLI 工具是整台机器上的，与"当前选中哪个仓库"无关。
 pub(crate) struct CliState {
@@ -484,6 +498,11 @@ pub(crate) struct CliState {
     /// 共享缓存（provider 级，不属于任何一颗包）。设计 §9：它们只进右栏底部那条汇总。
     /// 体积同样是惰性的（`size` 为 `None` = 界面显「计算中…」）
     pub(crate) shared: Vec<qingbird_core::cli::PackageDir>,
+    /// 正在升级 / 卸载的包 id（阶段三）。行与按钮据此转"忙"态——
+    /// **同一时刻只放一个 CLI 操作**（设计 §11 串行），所以这颗集合实际最多一颗
+    pub(crate) busy: std::collections::HashSet<String>,
+    /// 正在清理的共享缓存路径（阶段三）。同上，最多一条
+    pub(crate) shared_busy: std::collections::HashSet<String>,
 }
 
 impl Default for CliState {
@@ -499,8 +518,38 @@ impl Default for CliState {
             group_open: [true; ProviderId::all().len()],
             icons: HashMap::new(),
             shared: Vec::new(),
+            busy: std::collections::HashSet::new(),
+            shared_busy: std::collections::HashSet::new(),
         }
     }
+}
+
+/// CLI 卸载确认对话框（阶段三，设计 §10.1 四段信息层级）。
+///
+/// `Clone` 是因为对话框的 `content` builder 每帧现读快照（`purge.rs` 同一套写法：
+/// 不现读的话勾选框行为是对的、画面上的方块不动）。
+#[derive(Clone)]
+pub(crate) struct CliUninstallDialog {
+    /// 目标包的**快照**。对话框开着的时候后台可能重扫，清单会变——
+    /// 执行前 core 再按 id 核一遍（见 `ops::run_cli_uninstall`）
+    pub(crate) pkg: qingbird_core::cli::CliPackage,
+    /// 勾选上的清理目录路径。**`Cache` 默认全勾**（设计 §8：删了不影响功能）；
+    /// `Config` / `Data` 压根不进这个集合（灰显禁勾）
+    pub(crate) picked: std::collections::HashSet<String>,
+    /// 正在跑：确认键转「执行中…」并禁用（防连点）。**执行前的失败不往这儿写**——
+    /// 包没了 / 给不出命令那两条路是「关框 + 一句通知」，不在框里摆错误态
+    /// （一颗开着却确认不了的框，比一句通知难懂）
+    pub(crate) running: bool,
+}
+
+/// 共享缓存清理确认对话框（阶段三，设计 §9）。
+/// 一颗一条地清，也支持 ⌘K「清理共享缓存」整批地清（`targets` 多条）
+#[derive(Clone)]
+pub(crate) struct CliCleanDialog {
+    /// 要清的那些（快照：路径 + 名字 + 体积）
+    pub(crate) targets: Vec<qingbird_core::cli::PackageDir>,
+    /// 同 `CliUninstallDialog::running`
+    pub(crate) running: bool,
 }
 
 /// 总览表格的一行。**扁平化成值类型**而不是存 `(&RepoEntry, &RepoView)`：
@@ -1056,6 +1105,19 @@ pub(crate) struct Shell {
     /// 静默丢掉」那一档（AGENTS 记过两次，症状都是"点了完全没反应"）。
     /// 两条路共用这一个出口，就不用去判断"我是从哪条路收尾的"
     pub(crate) pending_batch_note: Option<String>,
+    /// CLI 管理操作（卸载 / 清理）跑完之后要收掉的那颗确认框。
+    ///
+    /// 为什么绕一圈 render：后台任务那条 `update` 闭包里只有 `&mut Context`，
+    /// **没有 `&mut Window`**——`close_dialog` 挂在 `WindowExt` 上，拿不到。
+    /// 与 `pending_batch_note` / `pending_folder` 同一条路（shell.rs render 开头那一批）。
+    ///
+    /// ⚠️ **Esc 中途关过框也不要紧**：官方 `close_dialog` 在空栈上只是
+    /// `pop()` 返回 `None` + 清一次选择区 + notify（`root.rs:275` 实测读过），
+    /// 不会 panic。所以这里不判"框还开着没有"，直接置
+    pub(crate) pending_cli_dlg_close: bool,
+    /// 同上，那一句结论通知（成功 / 失败都要说——用户可能已经切到别的屏，
+    /// 而日志区在 CLI 屏里，不弹一句他就此不知道结果）
+    pub(crate) pending_cli_note: Option<String>,
     /// 应用级日志。**只有跨仓库的批次往这里写**——按仓库存的那份在 `logs`，
     /// 一条都不该混进这个槽
     pub(crate) app_log: LogState,
@@ -1091,6 +1153,21 @@ pub(crate) struct Shell {
     pub(crate) cmd_dlg: Option<CmdDialog>,
     /// 设置对话框；None = 未打开。导航轨那颗齿轮与 ⌘K「设置」共用这一个入口
     pub(crate) settings_dlg: Option<SettingsDialog>,
+    /// CLI 卸载确认对话框（阶段三）；None = 未打开
+    pub(crate) cli_uninstall_dlg: Option<CliUninstallDialog>,
+    /// CLI 共享缓存清理确认对话框（阶段三）；None = 未打开
+    pub(crate) cli_clean_dlg: Option<CliCleanDialog>,
+    /// CLI 屏的操作日志（阶段三）。**不按仓库**——CLI 工具是整台机器上的，
+    /// 没有"当前仓库"可以挂。与 `app_log` 分开：那个是跨仓库批量的汇总，
+    /// 这个是这一屏自己的动作流（升级 / 卸载 / 清理）
+    pub(crate) cli_log: LogState,
+    /// CLI 日志输出流的滚动句柄。**必须与 `log_scroll` 分开**：gpui 的滚动状态
+    /// 按 `ElementId` 存，两个元素共用一个 id 会共用同一个滚动句柄——
+    /// 在 CLI 屏滚一下，概览页的日志会跟着跳（阶段 21-1 同一条）
+    pub(crate) cli_log_scroll: ScrollHandle,
+    /// CLI 日志区展开没展开（设计 §10.1：收起态）。**不落盘**：
+    /// 它是一屏的读法，不是偏好（与 `ov_sort` 同口径）
+    pub(crate) cli_log_open: bool,
     /// 软件自更新这条链的状态（Q44）。**挂在 Shell 上不挂在设置弹窗上**：
     /// 下载是几十秒的长活，弹窗关了下载照走、重开进度还在
     pub(crate) upd: crate::self_update::UpdFlow,
@@ -1446,6 +1523,14 @@ impl Shell {
     /// 仓库去了，`log()` 会把结果写进别人的日志里
     pub(crate) fn log_of(&mut self, path: &str) -> &mut LogState {
         self.logs.entry(path.to_string()).or_default()
+    }
+
+    /// 按 [`LogSink`] 取可写日志。**后台搬运（`drain_log_until_done`）只认这一个出口**
+    pub(crate) fn log_sink(&mut self, sink: &LogSink) -> &mut LogState {
+        match sink {
+            LogSink::Repo(p) => self.log_of(p),
+            LogSink::Cli => &mut self.cli_log,
+        }
     }
 
     /// 某分组里的第一个仓库路径。导航轨第 2、3 个按钮用它落选中项。

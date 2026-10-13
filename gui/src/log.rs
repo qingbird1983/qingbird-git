@@ -693,7 +693,10 @@ impl Shell {
 impl Shell {
     /// 结论行：成功 ✓ / 失败 ✗ + 走代理标记。
     /// 「走代理」单列是因为它是"连上了但绕了一圈"——混在成功里会让人以为一切正常
-    fn log_verdict_row(&self, t: &Theme, lg: &LogState) -> Div {
+    ///
+    /// `pub(crate)`（阶段三）：CLI 屏的操作日志也是同一颗 `LogState`，
+    /// 结论行**只此一份画法**——两个渲染处各画一遍，改配色只会改到一处
+    pub(crate) fn log_verdict_row(&self, t: &Theme, lg: &LogState) -> Div {
         let mut row = v_flex().w_full().flex_shrink_0().gap(px(GAP_TIGHT));
 
         if let Some(e) = &lg.error {

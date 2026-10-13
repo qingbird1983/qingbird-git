@@ -67,16 +67,18 @@ enum LogEvent {
 /// ——2026-10-10 那条缺陷（进度条滑、文字停在「准备中…」、百分比与网速一个都
 /// 上不了屏）就是只有第二条路径。`run_slot` 与 `run_sync` 两条链共用它：
 /// 那两段原来是**逐字相同的两份**（审查台账 §1 第三条，pwsh 逐行 `-ceq`
-/// 实测 identical=True），判据（空 stage 不清、空 detail 不清）因此也只有这一份
+/// 实测 identical=True），判据（空 stage 不清、空 detail 不清）因此也只有这一份。
+///
+/// `sink` 决定搬进哪个日志槽（阶段三起 CLI 屏也有动作流，见 [`LogSink`]）——
+/// **不按屏另起一套**：两套轮询迟早漂，而漂了的症状是"某一屏永远不动"
 fn drain_log_until_done(
     cx: &mut Context<Shell>,
     buf: &Arc<Mutex<Vec<LogEvent>>>,
     done: &Arc<AtomicBool>,
-    path: &str,
+    sink: LogSink,
 ) {
     let ui_buf = Arc::clone(buf);
     let ui_done = Arc::clone(done);
-    let ui_path = path.to_string();
     cx.spawn(async move |this, cx| loop {
         cx.background_executor().timer(PROGRESS_POLL).await;
         let batch = {
@@ -85,7 +87,7 @@ fn drain_log_until_done(
         };
         let finished = ui_done.load(Ordering::SeqCst);
         this.update(cx, |this, cx| {
-            let lg = this.log_of(&ui_path);
+            let lg = this.log_sink(&sink);
             for ev in batch {
                 match ev {
                     LogEvent::Line(l) => lg.lines.push(l),
@@ -213,7 +215,7 @@ impl Shell {
             r
         });
 
-        drain_log_until_done(cx, &buf, &done, &path);
+        drain_log_until_done(cx, &buf, &done, LogSink::Repo(path.clone()));
         let fin_path = path.clone();
         settle_after(cx, runner, fin_path.clone(), move |this, _cx, result| {
             let lg = this.log_of(&fin_path);
@@ -296,7 +298,7 @@ impl Shell {
             r
         });
 
-        drain_log_until_done(cx, &buf, &done, &path);
+        drain_log_until_done(cx, &buf, &done, LogSink::Repo(path.clone()));
         let fin_path = path.clone();
         settle_after(cx, runner, fin_path.clone(), move |this, _cx, result: OpResult| {
             {
@@ -1488,6 +1490,10 @@ impl Shell {
                         &this.cli.shared,
                         scanned_at,
                     );
+                    // 查更新**单独派发**（设计 §10.1「先渲染、后台再刷」）：
+                    // 它要走网络（`npm outdated`），压进这一趟就是"进屏先等几秒"。
+                    // 合并按 id 对，期间又重扫了也对不坏（见 `check_cli_updates`）
+                    this.check_cli_updates(cx);
                     cx.notify();
                     true
                 })
@@ -1654,4 +1660,280 @@ impl Shell {
             self.cli.selected = self.cli.packages.first().map(|p| p.id.clone());
         }
     }
+
+    // ---------- CLI 工具管理（阶段三） ----------
+
+    /// 此刻有没有一个 CLI 操作在跑（卸载 / 升级 / 清理都算）。
+    ///
+    /// **设计 §11 串行**：同一时刻只放一个。界面侧据此禁掉所有入口键
+    /// （详情卡那两颗、汇总条的「清理」、⌘K 那两条）——不是只禁正在忙的那一颗：
+    /// 两颗一起跑会在同一个 `npm` 上撞车（一个卸一个升），而用户点的是两颗键
+    pub(crate) fn cli_busy_any(&self) -> bool {
+        !self.cli.busy.is_empty() || !self.cli.shared_busy.is_empty()
+    }
+
+    /// 查一遍哪些包可更新（阶段三）。**由 `scan_cli` 落地时顺手派发**——
+    /// 设计 §10.1「先渲染、后台再刷」的同一套语言：查更新要走网络
+    /// （`npm outdated`），压进扫描那一趟就是"进屏先等几秒"。
+    ///
+    /// 合并是 core 的纯函数（按 id 对）：期间用户又重扫了一次也对不坏——
+    /// 对不上的条目原样不动，**不按名字猜一个写上**（那会多一个假徽标）
+    pub(crate) fn check_cli_updates(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let ups = cx
+                .background_executor()
+                .spawn(async move { qingbird_core::cli::check_updates() })
+                .await;
+            this.update(cx, |this, cx| {
+                qingbird_core::cli::merge_updates(&mut this.cli.packages, &ups);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 跑一颗卸载 / 清理计划（确认框那颗「卸载 / 清理」调它）。
+    ///
+    /// 三步：① 计划预览**先写进 `cli_log`**（执行前用户必须看得见将要发生什么）
+    /// ② 后台 `run_plan`，每步一行经共享缓冲搬进日志（与 `run_slot` 同一套管道）
+    /// ③ 收尾：清忙、写结论、收框 + 一句通知（render 兑现）、刷新数据。
+    ///
+    /// ⚠️ **执行前用当下清单按 id 重建计划**在调用方做（见 `run_cli_uninstall`）：
+    /// 对话框开着的时候后台可能重扫，快照里的版本与目录可能已经变了
+    fn spawn_cli_run(
+        &mut self,
+        cx: &mut Context<Self>,
+        summary: String,
+        steps: Vec<qingbird_core::cli::Step>,
+        stop_on_command_failure: bool,
+        after: CliAfter,
+    ) {
+        if steps.is_empty() {
+            // 结构上到不了（调用方都先判过 `steps.is_empty()`）——到了就当
+            // 什么都没发生，不开一个空执行
+            let lg = &mut self.cli_log;
+            lg.lines.push(format!("· {summary}：没有可执行的步骤"));
+            lg.running = false;
+            cx.notify();
+            return;
+        }
+
+        // ① 预览。每步一行等宽命令——**这是用户点确认之前看到的同一份**
+        // （对话框里那段预览），执行后再原样进日志，两边不会对不上
+        let lg = &mut self.cli_log;
+        lg.lines.push(format!("· {summary}"));
+        for s in &steps {
+            lg.lines.push(format!("  {}", s.preview()));
+        }
+        lg.running = true;
+        lg.error = None;
+        lg.verdict = None;
+        lg.ts = store::now_secs();
+        cx.notify();
+
+        // ② 后台跑。每步结论**同时**进两处：`cli_log`（屏上看得见）与
+        // `diag::note`（release 无 stderr，app.log 是显式捕获通道，设计 §11）
+        let buf: Arc<Mutex<Vec<LogEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let done = Arc::new(AtomicBool::new(false));
+        let sink_buf = Arc::clone(&buf);
+        let sink_done = Arc::clone(&done);
+        let runner = cx.background_executor().spawn(async move {
+            let on_step = move |o: &qingbird_core::cli::execute::StepOutcome| {
+                crate::diag::note(&o.line());
+                if let Ok(mut g) = sink_buf.lock() {
+                    g.push(LogEvent::Line(o.line()));
+                }
+            };
+            let ok = qingbird_core::cli::execute::run_steps(&steps, stop_on_command_failure, on_step);
+            sink_done.store(true, Ordering::SeqCst);
+            ok
+        });
+        drain_log_until_done(cx, &buf, &done, LogSink::Cli);
+
+        // ③ 收尾
+        cx.spawn(async move |this, cx| {
+            let ok = runner.await;
+            this.update(cx, |this, cx| {
+                // 同一时刻只放一个 ⇒ 两个忙集一起清（不会误伤别的操作）
+                this.cli.busy.clear();
+                this.cli.shared_busy.clear();
+                let verdict = if ok {
+                    format!("{summary}：完成")
+                } else {
+                    format!("{summary}：有步骤没成功，详见上面")
+                };
+                let lg = &mut this.cli_log;
+                lg.running = false;
+                lg.verdict = Some((ok, verdict.clone()));
+                lg.ts = store::now_secs();
+                // 收框 + 一句结论。通知必须弹：用户可能已经切到别的屏，
+                // 而日志区在 CLI 屏里——不弹一句他就此不知道结果
+                if this.cli_uninstall_dlg.take().is_some()
+                    || this.cli_clean_dlg.take().is_some()
+                {
+                    this.pending_cli_dlg_close = true;
+                }
+                this.pending_cli_note = Some(verdict);
+                match after {
+                    // 包清单变了（卸掉一颗 / 升了一颗）：整屏重扫
+                    // （`scan_cli` 落地时会顺手再查一遍更新）
+                    CliAfter::Rescan => this.scan_cli(cx),
+                    // 只清了共享缓存：目录还在、内容没了 ⇒ 把那一批体积重量
+                    CliAfter::RemeasureShared => this.spawn_dir_sizes(cx, true),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 卸载（卸载确认框那颗「卸载」）。**执行前用当下清单按 id 重建计划**：
+    /// 对话框开着的时候后台可能重扫，快照里的版本 / 目录可能已经变了
+    /// （`CliUninstallDialog::pkg` 字段注释）
+    pub(crate) fn run_cli_uninstall(&mut self, cx: &mut Context<Self>) {
+        // 整份克隆出来再动手：下面几处要**改** `cli_uninstall_dlg`（置空 / 置
+        // running），而 `d` 还借在它身上——克隆一份快照，借用当场结束
+        let Some(d) = self.cli_uninstall_dlg.clone() else {
+            return;
+        };
+        if d.running {
+            return;
+        }
+        let id = d.pkg.id.clone();
+        // 包没了（重扫之后被卸掉 / 改名）：关框说清楚，**不开空执行**
+        let Some(pkg) = self.cli.packages.iter().find(|p| p.id == id).cloned() else {
+            self.cli_uninstall_dlg = None;
+            self.pending_cli_dlg_close = true;
+            self.pending_cli_note = Some(format!("{} 已经不在清单里了，没有动任何东西", d.pkg.name));
+            cx.notify();
+            return;
+        };
+        // 勾上的清理目录：**只认当下清单里还对得上的那些**。快照里勾了、
+        // 重扫之后没了的路径，不猜一个继续删
+        let picked: Vec<qingbird_core::cli::PackageDir> = pkg
+            .dirs
+            .iter()
+            .filter(|x| d.picked.contains(&x.path))
+            .cloned()
+            .collect();
+        let plan = match qingbird_core::cli::provider_of(pkg.provider) {
+            Some(p) => p.plan_uninstall(&pkg, &picked),
+            None => qingbird_core::cli::OpPlan::blocked(&pkg, "认不出这个包是从哪个包管理器装的"),
+        };
+        if plan.steps.is_empty() {
+            // 给不出卸载命令：**不开确认框、也不开执行**（一颗确认了却
+            // 什么都没做的键比没有更糟）。关框 + 把 core 给的那句话说出来
+            self.cli_uninstall_dlg = None;
+            self.pending_cli_dlg_close = true;
+            self.pending_cli_note = Some(plan.summary);
+            cx.notify();
+            return;
+        }
+        if let Some(d) = self.cli_uninstall_dlg.as_mut() {
+            d.running = true;
+        }
+        self.cli.busy.insert(id);
+        let summary = plan.summary.clone();
+        self.spawn_cli_run(cx, summary, plan.steps, true, CliAfter::Rescan);
+    }
+
+    /// 升级一颗（详情卡那颗「升级」）。**不进 OpPlan**（设计 §6）：升级就是
+    /// 一条命令，没有清理步骤可言
+    pub(crate) fn upgrade_cli_pkg(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.cli_busy_any() {
+            return;
+        }
+        let Some(pkg) = self.cli.packages.iter().find(|p| p.id == id).cloned() else {
+            return;
+        };
+        let step = qingbird_core::cli::provider_of(pkg.provider).and_then(|p| p.upgrade_step(&pkg));
+        let Some(step) = step else {
+            // 这颗键只在"有新版且 provider 给得出命令"时画（`cli_tab.rs`）——
+            // 真到了这里是状态变了（重扫之后 cargo 也有了 latest？不可能，
+            // 但判据不该依赖"不可能"）
+            self.pending_cli_note = Some(format!("{}：这个包管理器给不出升级命令", pkg.name));
+            cx.notify();
+            return;
+        };
+        self.cli.busy.insert(id.to_string());
+        let summary = format!("升级 {}（{} → {}）", pkg.name, pkg.provider.label(),
+            pkg.latest.clone().unwrap_or_else(|| "最新".into()));
+        self.spawn_cli_run(cx, summary, vec![step], true, CliAfter::Rescan);
+    }
+
+    /// 升级全部可更新的（⌘K 那条）。
+    ///
+    /// 目标 = **真有新版且 provider 给得出升级命令**的两重判据都过：
+    /// cargo 压根不覆写 `outdated`（`latest` 恒 `None`），天然不在里面——
+    /// "没有 latest 的升级键是一条骗人的键"（v4 铁律）
+    pub(crate) fn upgrade_all_cli(&mut self, cx: &mut Context<Self>) {
+        if self.cli_busy_any() {
+            return;
+        }
+        let mut steps = Vec::new();
+        for p in self.cli.packages.iter() {
+            if p.latest.is_none() {
+                continue;
+            }
+            let Some(pr) = qingbird_core::cli::provider_of(p.provider) else {
+                continue;
+            };
+            if let Some(s) = pr.upgrade_step(p) {
+                steps.push(s);
+                self.cli.busy.insert(p.id.clone());
+            }
+        }
+        if steps.is_empty() {
+            self.pending_cli_note = Some("没有可升级的工具".to_string());
+            cx.notify();
+            return;
+        }
+        let n = steps.len();
+        // `stop_on_command_failure = false`：一颗升不动不挡住其余那些
+        self.spawn_cli_run(
+            cx,
+            format!("升级 {n} 个工具"),
+            steps,
+            false,
+            CliAfter::Rescan,
+        );
+    }
+
+    /// 清理共享缓存（共享缓存清理确认框那颗「清理」）。一颗一条地清与
+    /// ⌘K 整批地清都走这儿——`targets` 几条就跑几步
+    pub(crate) fn run_cli_clean(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.cli_clean_dlg.clone() else {
+            return;
+        };
+        if d.running {
+            return;
+        }
+        let plan = qingbird_core::cli::clean_plan(&d.targets);
+        if plan.steps.is_empty() {
+            self.cli_clean_dlg = None;
+            self.pending_cli_dlg_close = true;
+            self.pending_cli_note = Some("没有要清理的共享缓存".to_string());
+            cx.notify();
+            return;
+        }
+        if let Some(d) = self.cli_clean_dlg.as_mut() {
+            d.running = true;
+        }
+        for t in d.targets.iter() {
+            self.cli.shared_busy.insert(t.path.clone());
+        }
+        let summary = plan.summary.clone();
+        self.spawn_cli_run(cx, summary, plan.steps, true, CliAfter::RemeasureShared);
+    }
+}
+
+/// 一颗 CLI 计划跑完之后要做的收尾。**三种动作只有这两处分岔**
+/// （卸载 / 升级改的是包清单 ⇒ 重扫；清理只动了共享缓存的内容 ⇒ 重量）
+enum CliAfter {
+    /// 整屏重扫（`scan_cli` 落地时会顺手再查一遍更新）
+    Rescan,
+    /// 只把共享缓存那一批体积重新量（目录还在、内容没了）
+    RemeasureShared,
 }

@@ -19,6 +19,7 @@ pub use winget::Winget;
 use std::time::Duration;
 
 use crate::cli::model::{CliPackage, ProviderId};
+use crate::cli::plan::{assemble, OpPlan, Step, UpdateInfo};
 
 /// 单个 provider 那条外部命令最多等多久。
 ///
@@ -26,6 +27,13 @@ use crate::cli::model::{CliPackage, ProviderId};
 /// 整个扫描拖死。取 30 秒：比本机实测的正常耗时高一个量级，又短到
 /// 用户不会以为界面卡了
 pub(crate) const LIST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 查更新的那条命令最多等多久（阶段三）。
+///
+/// 比列清单宽：`npm outdated` 要走一遍 registry（网络），慢机器 / 弱网上
+/// 是秒级到十几秒。超时 = "这次不知道谁可更新"（`latest` 留 `None`），
+/// **不是错误**——查不动更新不该让列表本身失败
+pub(crate) const OUTDATED_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 一个包管理器。
 pub trait PackageProvider: Send + Sync {
@@ -63,6 +71,49 @@ pub trait PackageProvider: Send + Sync {
     fn shared_install_dir(&self) -> bool {
         false
     }
+
+    // ---------- 阶段三：升级 / 卸载 / 查更新 ----------
+
+    /// 有哪些包可更新（`latest` 那一列）。
+    ///
+    /// ⚠️ **返回空表而不是 `Result`**（设计稿写的是 `Result`）：查不动更新
+    /// 不等于这一台坏了——`latest` 的语义本来就是"已最新**或未查询**"
+    /// （模型注释原话）。返回 `Err` 会把"没查到"升级成一次扫描失败。
+    ///
+    /// 默认空表：查不了就说不知道。**现在只有 npm 覆写**
+    /// （`npm outdated -g --json` 是机器可读的）；winget 的"可用版本"在
+    /// `list()` 那一趟就免费带回来了，不在这儿再查一遍。
+    fn outdated(&self) -> Vec<UpdateInfo> {
+        Vec::new()
+    }
+
+    /// 升级这一颗的那条命令。`None` = 这个 provider 升不了它。
+    ///
+    /// 升级**不进 OpPlan**（设计 §6）：它就是一条命令，没有清理步骤可言，
+    /// 直接执行 + 日志即可。cargo 不覆写这一颗——它查不到"有没有新版"
+    /// （outdated 空表），没有 `latest` 的升级键是一条骗人的键
+    /// （v4 铁律：不演拿不到的效果）。
+    fn upgrade_step(&self, _pkg: &CliPackage) -> Option<Step> {
+        None
+    }
+
+    /// 卸载这一颗的**那条命令**。认不出它（id 缺前缀那种）返回 `None`。
+    ///
+    /// 与 `upgrade_step` 分开是因为卸载要走 OpPlan（可能带清理步骤），
+    /// 而组装逻辑（风险、合计、清单）五家完全相同 ⇒ 收在默认的
+    /// [`plan_uninstall`](Self::plan_uninstall) 里，各家只答"命令是什么"
+    fn uninstall_step(&self, pkg: &CliPackage) -> Option<Step>;
+
+    /// 卸载计划 = 卸载命令 + 勾选的清理目录（设计 §8）。
+    ///
+    /// 默认实现就是那套五家通用的组装；provider 只实现 [`uninstall_step`](Self::uninstall_step)。
+    /// `cleanup` 是用户在对话框里勾上的那几条（只有 `Cache` 能被勾上）。
+    fn plan_uninstall(&self, pkg: &CliPackage, cleanup: &[crate::cli::model::PackageDir]) -> OpPlan {
+        match self.uninstall_step(pkg) {
+            Some(step) => assemble(pkg, step, cleanup),
+            None => OpPlan::blocked(pkg, "这个包管理器给不出卸载命令"),
+        }
+    }
 }
 
 /// 阶段二的五个 provider（顺序见 [`ProviderId::all`]）。
@@ -74,4 +125,19 @@ pub fn providers() -> Vec<Box<dyn PackageProvider>> {
         Box::new(Pipx),
         Box::new(Cargo),
     ]
+}
+
+/// 按 provider 取一个实例（界面侧拼卸载计划 / 升级命令用）。
+///
+/// 认不出的 provider（未来版本写进库的键）返回 `None`——调用方就当
+/// "这一颗什么都做不了"，不 panic
+pub fn provider_of(id: ProviderId) -> Option<Box<dyn PackageProvider>> {
+    providers().into_iter().find(|p| p.id() == id)
+}
+
+/// 一颗包在 winget 那边的 Id（`winget:Git.Git` → `Git.Git`）。
+/// 别的 provider 的 `id` 前缀就是自己的 key，用同一个函数反查也行，
+/// 但只有 winget 的卸载/升级要 `--id` 那个值，别的用的都是包名
+pub(crate) fn winget_id_of(pkg: &CliPackage) -> Option<&str> {
+    pkg.id.strip_prefix("winget:")
 }

@@ -4,9 +4,10 @@
 
 use std::path::Path;
 
-use super::LIST_TIMEOUT;
+use super::{LIST_TIMEOUT, OUTDATED_TIMEOUT};
 use crate::cli::exec;
 use crate::cli::model::{CliPackage, DirKind, PackageDir, PackageKind, ProviderId};
+use crate::cli::plan::{Step, UpdateInfo};
 use crate::cli::provider::PackageProvider;
 
 pub struct Npm;
@@ -77,6 +78,37 @@ impl PackageProvider for Npm {
             None => Vec::new(),
         }
     }
+
+    /// 查哪些全局包有新版：`npm outdated -g --depth=0 --json`（设计 §6）。
+    ///
+    /// ⚠️ 与 `npm ls` 同一条纪律：**有可更新项时退出码非零但 JSON 完整**——
+    /// 照样用 stdout，不拿退出码判成败。输出形状（上游 `lib/commands/outdated.js`
+    /// 的 `--json` 分支）：`{"<包名>": {"current": …, "wanted": …, "latest": …}}`。
+    fn outdated(&self) -> Vec<UpdateInfo> {
+        let Ok(out) = exec::run_program(
+            "npm",
+            &["outdated", "-g", "--depth=0", "--json"],
+            OUTDATED_TIMEOUT,
+        ) else {
+            return Vec::new();
+        };
+        let text = if out.stdout.trim().is_empty() {
+            out.stderr.trim()
+        } else {
+            out.stdout.trim()
+        };
+        parse_npm_outdated(text)
+    }
+
+    /// 升级 = `npm update -g <包名>`（设计 §6：一条命令，不进 OpPlan）。
+    fn upgrade_step(&self, pkg: &CliPackage) -> Option<Step> {
+        Some(Step::uninstall("npm", &["update", "-g", &pkg.name]))
+    }
+
+    /// 卸载 = `npm uninstall -g <包名>`（设计 §6）。
+    fn uninstall_step(&self, pkg: &CliPackage) -> Option<Step> {
+        Some(Step::uninstall("npm", &["uninstall", "-g", &pkg.name]))
+    }
 }
 
 /// `npm ls -g --depth=0 --json` 的输出 → 包清单（名字 + 版本）。
@@ -110,6 +142,43 @@ pub(crate) fn parse_npm_ls(text: &str) -> Result<Vec<CliPackage>, String> {
         });
     }
     Ok(out)
+}
+
+/// `npm outdated -g --depth=0 --json` 的输出 → 可更新清单（阶段三）。
+///
+/// 纯解析，单测喂**本机真输出**（判据是真形态，不是我以为的形态）。
+/// 形状：`{"<包名>": {"current": …, "wanted": …, "latest": …, …}}`。
+/// 解析不动 / 不是对象 / 空输出 ⇒ 空表（"不知道谁可更新"，不是错误）。
+pub(crate) fn parse_npm_outdated(text: &str) -> Vec<UpdateInfo> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(obj) = v.as_object() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (name, info) in obj {
+        let latest = info
+            .get("latest")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty());
+        let current = info.get("current").and_then(|x| x.as_str());
+        // current == latest 的那条不进清单：outdated 理论上只列真有新版的，
+        // 但 npm 自己（跟着 node 走的那颗）偶尔会把同版本也列进来——
+        // 进清单就是屏上多一个"可更新"而升完还是那个版本
+        let (Some(latest), Some(current)) = (latest, current) else {
+            continue;
+        };
+        if latest == current {
+            continue;
+        }
+        out.push(UpdateInfo {
+            // 键与 `CliPackage::id` 同形（`npm:<包名>`）：合并按它对，不按名字
+            id: format!("{}:{}", ProviderId::Npm.key(), name),
+            latest: latest.to_string(),
+        });
+    }
+    out
 }
 
 /// 一个 npm 全局包提供的命令名，读它自己的 `package.json` 的 `bin`。
@@ -211,5 +280,55 @@ mod tests {
     #[test]
     fn no_bin_means_no_commands() {
         assert!(bins_from_package_json(r#"{"name":"@wenyan-md/core"}"#, "core").is_empty());
+    }
+
+    /// ⚠️ 这段是**本机真输出**（2026-10-14，`npm outdated -g --depth=0 --json`，
+    /// PATH 上是 WorkBuddy 托管的那颗 node 22.22.2）。纯解析单测只能证明
+    /// "我以为的形态解析得动"，证不了 npm 真的这么吐——本项目为这条交过学费。
+    const REAL_OUTDATED: &str = r#"{
+      "corepack": {
+        "current": "0.34.6",
+        "wanted": "0.36.0",
+        "latest": "0.36.0",
+        "dependent": "global",
+        "location": "C:\\Users\\x\\node\\node_modules\\corepack"
+      },
+      "npm": {
+        "current": "10.9.7",
+        "wanted": "12.2.0",
+        "latest": "12.2.0",
+        "dependent": "global",
+        "location": "C:\\Users\\x\\node\\node_modules\\npm"
+      }
+    }"#;
+
+    #[test]
+    fn parses_a_real_outdated_payload() {
+        let ups = parse_npm_outdated(REAL_OUTDATED);
+        assert_eq!(ups.len(), 2, "两个可更新包一条都不能少");
+        let npm = ups.iter().find(|u| u.id == "npm:npm").expect("npm 应在");
+        assert_eq!(npm.latest, "12.2.0");
+        // 键与 `CliPackage::id` 同形：合并按 id 对，scoped 包名原样进键
+        assert!(ups.iter().any(|u| u.id == "npm:corepack"));
+    }
+
+    /// `current == latest` 的那条不进清单：屏上多一个"可更新"而升完还是
+    /// 那个版本，是一条骗人的徽标（npm 对自己偶尔会这样）
+    #[test]
+    fn an_already_current_entry_is_not_an_update() {
+        let ups = parse_npm_outdated(
+            r#"{"pnpm":{"current":"11.5.3","wanted":"11.5.3","latest":"11.5.3"}}"#,
+        );
+        assert!(ups.is_empty(), "同版本不该算可更新");
+    }
+
+    /// 坏输出 / 空 / 不是对象 ⇒ 空表（"不知道谁可更新"不是错误）
+    #[test]
+    fn unparsable_outdated_is_empty_not_an_error() {
+        assert!(parse_npm_outdated("").is_empty());
+        assert!(parse_npm_outdated("npm outdated crashed").is_empty());
+        assert!(parse_npm_outdated("[1,2,3]").is_empty());
+        // 一个可更新的都没有：npm 打 `{}`
+        assert!(parse_npm_outdated("{}").is_empty());
     }
 }

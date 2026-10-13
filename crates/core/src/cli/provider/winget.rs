@@ -65,6 +65,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::{PackageProvider, LIST_TIMEOUT};
 use crate::cli::exec;
 use crate::cli::model::{CliPackage, PackageKind, ProviderId};
+use crate::cli::plan::Step;
+use crate::cli::provider::winget_id_of;
 
 /// 五个表头，**顺序就是切片的顺序**。zh-CN 与 en-US 两套：中文机器上 winget 打的是前者，
 /// 别人机器上可能是后者；两套都不认就报错（不猜、不硬凑）。
@@ -93,6 +95,27 @@ impl PackageProvider for Winget {
             ));
         }
         parse_list(&out.stdout)
+    }
+
+    /// 升级 = `winget upgrade --id <Id> --silent`（设计 §6）。
+    ///
+    /// ⚠️ `--silent` 是设计稿没写的一颗：我们的子进程**没有控制台**
+    /// （`CREATE_NO_WINDOW` + stdin 为 null），交互式卸载器/安装器在那儿只会挂死。
+    /// 挂了的表现是这一步等到 `OP_TIMEOUT` 被杀——不如一开始就别让它问。
+    /// `--accept-package-agreements` 那两颗**没加**：没在本机验过（沙箱里 winget
+    /// 起不来），加一颗没验过的旗不如让它在日志里报"请先接受协议"。
+    ///
+    /// ⚠️ Id 从 [`CliPackage::id`] 的后半段取（`winget:Git.Git` → `Git.Git`）：
+    /// `list()` 那一趟就是把显示名与 Id 分开存的（表里 Name 列不是 Id）
+    fn upgrade_step(&self, pkg: &CliPackage) -> Option<Step> {
+        let id = winget_id_of(pkg)?;
+        Some(Step::uninstall("winget", &["upgrade", "--id", id, "--silent"]))
+    }
+
+    /// 卸载 = `winget uninstall --id <Id> --silent`（设计 §6；`--silent` 同上）。
+    fn uninstall_step(&self, pkg: &CliPackage) -> Option<Step> {
+        let id = winget_id_of(pkg)?;
+        Some(Step::uninstall("winget", &["uninstall", "--id", id, "--silent"]))
     }
 }
 
