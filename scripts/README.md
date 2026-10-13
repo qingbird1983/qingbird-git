@@ -79,7 +79,7 @@
 | `audit.py` | 界面体检：从截图量出客观数字（A 画布利用率 / B 卡片对齐 / C 竖向节奏 / D 边框一致性 / E 字号阶梯 / F 对比度 / G 触达密度），把「看着粗糙」翻译成能改的条目 | `python scripts/audit.py docs/shots/live-01.png`；要与设计稿对比加 `--ref docs/03-我的仓库工作台.png`；`--theme` 默认 `gui/theme.json` | **只报告，不拦任何东西**：`main()` 没有返回值 ⇒ `sys.exit(main())` 恒 0；检到问题只打印「检出 N 条」 |
 | `measure_status_cost.py` | 32-12 的前置实测：量「状态检测合并成一条命令」省多少——A 现状逐条 / B 合并候选 / C 合并后仍必须的两条（`stash list` + `remote get-url origin`），进程数 6→3；夹具 `%TEMP%\qbg3212-repos`（含一颗 2 万文件的仓库） | `python scripts/measure_status_cost.py make\|time\|sign\|equiv\|clean`（默认 `make`；`time` 每档 15 轮取中位数） | **真闸只在 `sign` 模式**：方向不一致 ⇒ `sys.exit(0 if (ok1 and ok2) else 1)`（红在「领先/落后的正负号两种读法方向一致」）；不懂的模式 `sys.exit(2)`；`make` / `time` / `equiv` / `clean` 恒 0 ⇒ 这四个模式**只报告，不拦任何东西** |
 | `measure_mincontent.py` | 量 `MAIN_MIN_W` 的真值：中间那一列压到多窄开始切内容；每档取主区卡的右边界 1px 边框 x 与最右内容 x，气口掉到 14 以下 = 压过头 | `python scripts/measure_mincontent.py`（无参数；`TMP=%TEMP%\qb_v4`、`demo-dirty`、debug exe，逐档 `drag_right_border(dx=20)` 共 6 档） | **只报告，不拦任何东西（唯一非零出口是 assert 前提）**：沙箱配置 / `find_window` / `ensure_focus` 各 assert；量到的「切了 +N / 没切」只打印 |
-| `measure_backslash.py` | D92「改完报三个数」的测量语义核对：对 `README.md` / `docs/UI-ROADMAP.md` / `AGENTS.md` 各出「行数 / 块引用行 / 反斜杠总数 / 连续两处 / CRLF」，工作树与 `git show HEAD:` 并排 | `python scripts/measure_backslash.py`（无参数） | **只报告，不拦任何东西**：无退出码 |
+| `measure_backslash.py` | D92「改完报三个数」的测量语义核对：对 `README.md` / `AGENTS.md` / 路线表那一套（入口 `docs/UI-ROADMAP.md` + `docs/roadmap/` 四册 + `docs/CHANGELOG.md`）各出「行数 / 块引用行 / 反斜杠总数 / 连续两处 / CRLF」，工作树与 `git show HEAD:` 并排（HEAD 里还没有的那几份会明说，不印一排 0） | `python scripts/measure_backslash.py`（无参数） | **只报告，不拦任何东西**：无退出码 |
 
 ## 8. 共用隔离模块
 

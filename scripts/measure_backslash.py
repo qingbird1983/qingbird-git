@@ -32,6 +32,21 @@ def git_show(p):
     return subprocess.run(["git", "show", "HEAD:" + p], capture_output=True).stdout
 
 
-for p in ["README.md", "docs/UI-ROADMAP.md", "AGENTS.md"]:
+DOCS = [
+    "README.md",
+    "AGENTS.md",
+    "docs/UI-ROADMAP.md",
+    "docs/CHANGELOG.md",
+    "docs/roadmap/archive.md",
+    "docs/roadmap/31-v4-redesign.md",
+    "docs/roadmap/32-gaps.md",
+    "docs/roadmap/cli.md",
+]
+
+for p in DOCS:
     stat(p + " 工作树", open(p, "rb").read())
-    stat(p + " HEAD 版", git_show(p))
+    head = git_show(p)
+    if head:
+        stat(p + " HEAD 版", head)
+    else:
+        print("%-26s HEAD 里还没有这一份（本轮新加的，没有可比的一版）" % (p + " HEAD 版"))

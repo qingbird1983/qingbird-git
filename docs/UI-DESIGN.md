@@ -221,7 +221,7 @@ let min_w = if animating || target_w <= px(0.5) { px(0.0) } else { px(SIDEBAR_MI
 > 代码现状：synced 绿 / dirty 蓝 / ahead 蓝 / behind 橙 / **fork 也橙**。
 > 另有一点：这张表把"已同步"定成蓝色，但已同步是**占比最高且无需动手**的一档，
 > 满屏蓝反而像都在报错。**建议以旧 React 版三档为基线，fork 改 `danger` 红**——
-> 三套说法的完整对照见 `UI-ROADMAP.md` Q7 长说明。拍板前代码保持现状。
+> 三套说法的完整对照见 `docs/UI-ROADMAP.md` 的「Q7 长说明」。拍板前代码保持现状。
 
 | 状态 | 语义 | 取色 |
 |---|---|---|
@@ -1288,7 +1288,7 @@ FS_BODY 13 / R_LG 8 / R_XL 12 / GAP_LG「卡片内区块」**全是旧值**：�
 
 **标题栏与状态条也不许手搓** —— 官方 `TitleBar` 自带窗口控件（`WindowControls`）与拖拽区，
 `StatusBar` 自带分区分隔。 自己拼这两个是最常见的"看着差不多但细节全错"的地方。
-（以上全部路径已于 2026-10-02 对基座源码逐个核过，见 `UI-ROADMAP.md` 阶段 0。）
+（以上全部路径已于 2026-10-02 对基座源码逐个核过，见 `docs/roadmap/archive.md` 的阶段 0。）
 
 **允许自研的只有三处**（官方确实没有，且本文已登记原因）：
 
@@ -1303,7 +1303,8 @@ FS_BODY 13 / R_LG 8 / R_XL 12 / GAP_LG「卡片内区块」**全是旧值**：�
 ## 10\. 实施顺序
 
 按依赖从壳到面，每步可独立验收。**逐项勾选与阶段验收口径见
-[`UI-ROADMAP.md`](./UI-ROADMAP.md)**，本节只定顺序：
+[`docs/UI-ROADMAP.md`](./UI-ROADMAP.md)（入口；阶段 0–30 的正文在
+[`roadmap/archive.md`](./roadmap/archive.md)）**，本节只定顺序：
 
 0. **地基核对**：`cargo check --workspace` 通过、确认官方 API 在当前依赖版本可用。
 1. **壳**：标题栏 + 导航轨（总览 / 我的仓库 / 第三方仓库，顺序见第 1 节）

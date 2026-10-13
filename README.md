@@ -71,7 +71,9 @@
 | `crates/core/` | 业务逻辑（git 子进程封装、网络编排、仓库读写、同步、克隆、磁盘扫描、定时器、配置持久化）。**纯 Rust，不认识 gpui** |
 | `gui/` | 界面（gpui-kit 组件、五个页签、对话框、托盘） |
 | `gui/theme.json` | **配色与字号档位的唯一真源**（点号 token，两套主题：`qingbird-light` / `qingbird-dark`） |
-| `docs/UI-ROADMAP.md` | 路线表与决策台账——**改界面前先读它**，那是唯一施工真源 |
+| `docs/UI-ROADMAP.md` | 路线表**入口**与决策台账（D/Q 编号）——**改界面前先读它**，那是唯一施工真源；正文分五册，它顶上有表 |
+| `docs/roadmap/` | 路线表的四本分册：`archive.md`（阶段 0–30）/ `31-v4-redesign.md` / `32-gaps.md` / `cli.md` |
+| `docs/CHANGELOG.md` | 逐轮变更记录（append-only，只增不改） |
 | `docs/UI-DESIGN-v4.md` | **v4 视觉契约**：颜色 / 圆角 / 间距 / 阴影 / 动效 / 图标这六类数值**只写在这里** |
 | `docs/UI-DESIGN.md` | 设计规范：版面结构 / 侧栏 / 内容区 / 功能分层与唯一入口 / 文案 / 键盘 / 官方组件对照——**"哪里放什么"这一层仍然有效**；它的第 4、5 章（颜色与交互状态）已被 v4 取代 |
 | `docs/CODE.md` | **代码规范**：文件与函数尺寸、命名、错误处理、日志、注释、提交信息、依赖 |
