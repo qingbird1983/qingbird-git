@@ -1482,6 +1482,7 @@ impl Shell {
             cli: CliState::default(),
             cli_seq: 0,
             cli_task: None,
+            cli_size_task: None,
             // 左栏默认展开，与仓库侧栏同一档：收起的左栏是一屏的读法，
             // 不是偏好，所以不进配置、每次进屏都是展开的
             cli_collapsed: false,

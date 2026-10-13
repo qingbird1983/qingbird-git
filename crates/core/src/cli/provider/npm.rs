@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::LIST_TIMEOUT;
 use crate::cli::exec;
-use crate::cli::model::{CliPackage, PackageKind, ProviderId};
+use crate::cli::model::{CliPackage, DirKind, PackageDir, PackageKind, ProviderId};
 use crate::cli::provider::PackageProvider;
 
 pub struct Npm;
@@ -50,6 +50,33 @@ impl PackageProvider for Npm {
         }
         Ok(pkgs)
     }
+
+    /// npm 的缓存目录**问它自己**（设计 §8 第 2 级：包管理器文件清单）。
+    ///
+    /// 为什么不只靠 `rules.toml` 那条环境变量 + 默认值：`cache` 是 npm 的一个配置项，
+    /// 用户能在 `.npmrc` 里改到别处去，那时默认路径不存在 ⇒ 规则那条落空 ⇒
+    /// **屏幕上会少一整条 18 GB 的缓存**（本机 `npm config get cache` 实测就是默认那个，
+    /// 所以两条路在这一台上给出同一个答案；差别只在改过配置的机器上）。
+    ///
+    /// 拿不到就返回空表 —— 规则库那一份照常生效，**不因为这条挂了就少报**
+    fn cache_dirs(&self) -> Vec<PackageDir> {
+        let path = exec::run_program("npm", &["config", "get", "cache"], LIST_TIMEOUT)
+            .ok()
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("undefined"))
+            .filter(|s| Path::new(s).is_dir());
+        match path {
+            Some(path) => vec![PackageDir {
+                path,
+                kind: DirKind::SharedCache,
+                // 名字留空：有名字的那一份在 `rules.toml`（合并时按路径去重，
+                // 有名字的那条会留下来）。**同一句话不许有两个出处**
+                label: String::new(),
+                size: None,
+            }],
+            None => Vec::new(),
+        }
+    }
 }
 
 /// `npm ls -g --depth=0 --json` 的输出 → 包清单（名字 + 版本）。
@@ -77,6 +104,9 @@ pub(crate) fn parse_npm_ls(text: &str) -> Result<Vec<CliPackage>, String> {
             install_path: None,
             executables: Vec::new(),
             kind: PackageKind::Unknown,
+            // 数据目录归扫描协调器统一解析（`cli::dirs::for_package`），
+            // provider 只管"有哪些包"——规则库不该有第二个出处
+            dirs: Vec::new(),
         });
     }
     Ok(out)

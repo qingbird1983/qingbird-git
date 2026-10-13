@@ -40,7 +40,8 @@ use gpui_kit::{
     div, img, percentage, px, AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement,
     ParentElement, StatefulInteractiveElement, Styled,
 };
-use qingbird_core::cli::{CliPackage, ProviderId};
+use qingbird_core::cli::{CliPackage, PackageDir, ProviderId};
+use qingbird_core::space::human_bytes;
 
 use crate::sidebar::{side_shell, Facing};
 use crate::state::Shell;
@@ -230,6 +231,9 @@ impl Shell {
             // 会骗人的话。阶段三把 `latest` 接上时再加回（连它的尺寸档一起进 tokens）
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.cli.selected = Some(id.clone());
+                // 刚选中的那颗，它的数据目录可能还没量过体积（惰性，设计 §4）——
+                // 点上就把它那几条补量（已经量过的不会重来）
+                this.spawn_dir_sizes(cx, false);
                 cx.notify();
             }))
             .into_any_element()
@@ -284,6 +288,12 @@ impl Shell {
                 )
             }
         }
+        // 共享缓存汇总：**压在这一列的底部**（设计 §9 的"右栏底部汇总条"），
+        // 所以前面垫一个撑满的空白。没有共享缓存就整块不画
+        col = col.child(div().flex_1());
+        if let Some(box_) = self.shared_box(t) {
+            col = col.child(box_);
+        }
         col
     }
 
@@ -311,6 +321,32 @@ impl Shell {
             .child(kv("来源", p.provider.label(), t))
             .child(kv("命令", &commands, t))
             .child(kv("安装目录", &install, t))
+            .child(dirs_section(&p.dirs, t))
+    }
+
+    /// 右栏底部那条「共享缓存」汇总（设计 §9）。
+    ///
+    /// ⚠️ **本轮没有「清理」键**：清理要走 OpPlan + 确认对话框，那是阶段三。
+    /// v4 铁律——**不演拿不到的效果**，一颗点了没反应的键比没有更糟
+    /// （同一屏上「升级 / 卸载…」两颗也是这个理由没画）。
+    fn shared_box(&self, t: &Theme) -> Option<Div> {
+        if self.cli.shared.is_empty() {
+            return None;
+        }
+        let mut col = v_flex()
+            .w_full()
+            .p(px(GAP))
+            .gap(px(GAP_TIGHT))
+            .child(
+                div()
+                    .text_size(px(fs_meta()))
+                    .text_color(tier3(t))
+                    .child("共享缓存"),
+            );
+        for d in self.cli.shared.iter() {
+            col = col.child(shared_row(d, t));
+        }
+        Some(sunken_box(col, t))
     }
 }
 
@@ -396,9 +432,141 @@ pub(crate) fn monogram(name: &str) -> String {
     }
 }
 
+/// 右栏详情里那块「数据目录」（阶段二）。**只读**：勾选与清理是阶段三的事，
+/// 这一块只把"这颗工具在盘上留了什么、多大、能不能删"说清楚。
+///
+/// 一条都没发现时也要写一句：**空着会被读成"还在算"**，而真相是"规则库里没有它"
+/// （我们宁可少报也不按名字猜，见 `crates/core/src/cli/rules.toml` 头那两个反例）
+fn dirs_section(dirs: &[PackageDir], t: &Theme) -> Div {
+    let col = v_flex().w_full().gap(px(GAP_TIGHT)).child(
+        div()
+            .text_size(px(fs_meta()))
+            .text_color(tier3(t))
+            .child("数据目录"),
+    );
+    if dirs.is_empty() {
+        return col.child(sunken_box(
+            v_flex().w_full().p(px(GAP)).child(
+                div()
+                    .text_size(px(fs_meta()))
+                    .text_color(tier3(t))
+                    .child("没有发现这颗工具的独立数据目录"),
+            ),
+            t,
+        ));
+    }
+    let mut inner = v_flex().w_full().p(px(GAP)).gap(px(GAP_DENSE));
+    for d in dirs.iter() {
+        inner = inner.child(dir_row(d, t));
+    }
+    col.child(sunken_box(inner, t))
+}
+
+/// 数据目录里的一行：类别 · 体积 · 路径 · 那句话。
+fn dir_row(d: &PackageDir, t: &Theme) -> Div {
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap(px(GAP))
+        .child(
+            div()
+                .w(px(FORM_LABEL_W))
+                .flex_shrink_0()
+                .text_size(px(fs_meta()))
+                .text_color(tier3(t))
+                .child(d.kind.label()),
+        )
+        .child(
+            div()
+                .w(px(DIR_SIZE_W))
+                .flex_shrink_0()
+                .text_size(px(fs_meta()))
+                .text_color(body(t))
+                .child(size_text(d.size)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(fs_meta()))
+                .text_color(tier3(t))
+                .child(d.path.clone()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(fs_meta()))
+                .text_color(if d.kind.note_is_warning() {
+                    t.colors.danger
+                } else {
+                    tier3(t)
+                })
+                .child(d.kind.note()),
+        )
+}
+
+/// 共享缓存汇总里的一行：名字 · 路径 · 体积。
+///
+/// 名字是**这一条的身份**（`npm 缓存` 与 `pnpm store` 是两样东西），
+/// 所以它排在最前面、用的是正文色；路径压到后面去
+fn shared_row(d: &PackageDir, t: &Theme) -> Div {
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap(px(GAP))
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(fs_meta()))
+                .text_color(body(t))
+                .child(d.label.clone()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(fs_meta()))
+                .text_color(tier3(t))
+                .child(d.path.clone()),
+        )
+        .child(
+            div()
+                .w(px(DIR_SIZE_W))
+                .flex_shrink_0()
+                .text_size(px(fs_meta()))
+                .text_color(body(t))
+                .child(size_text(d.size)),
+        )
+}
+
+/// 体积那一格的字。
+///
+/// ⚠️ **`None`（还没量）与 `Some(0)`（量过、里面就是空的）是两句话**——
+/// 这正是 Q39 / 32-11 那一族：**"量到 0" 不许渲染成"没量"**，反过来更不许：
+/// 没量过写成"0 B"就是把"我还不知道"说成了一个结论
+pub(crate) fn size_text(size: Option<u64>) -> String {
+    match size {
+        Some(b) => human_bytes(b),
+        None => "计算中…".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::monogram;
+    use super::size_text;
+
+    /// 体积那一格：**没量过**与**量到 0** 必须是两句话
+    #[test]
+    fn size_text_separates_not_measured_from_zero() {
+        assert_eq!(size_text(None), "计算中…");
+        assert_eq!(size_text(Some(0)), "0 B", "量过就是量过——里面空也是 0 B");
+        let kb = size_text(Some(1536));
+        assert!(kb.contains("KB"), "1536 字节该读成 KB 档，实际 {kb}");
+        assert_ne!(kb, "计算中…");
+    }
 
     /// 终字符块取哪两个字符：**scoped 包名要取最后一段**
     /// （`@larksuite/cli` 上的 `@l` 是错的，`cl` 才对）

@@ -1,0 +1,82 @@
+# CLI 数据目录规则库（设计 §8「规则库（TOML）→ 包管理器文件清单 → 环境变量推断」的第 1 级）。
+#
+# ## 一条规则凭什么能进这张表
+#
+# **只有两类背书**，别的一律不写：
+#   ① 工具/包管理器**自己的官方环境变量名**（`DENO_DIR`、`BUN_INSTALL`、`CARGO_HOME`…）
+#      ——那是它的契约：谁去读它、它自己就认哪条路径；
+#   ② 工具**自己的源码里写死**的那条路径（在注释里注明出处）。
+#
+# ⛔ **不许按名字猜目录**。本机实测过两个反例，都是"名字对上了、东西不是它的"：
+#   * `%LOCALAPPDATA%\feishu` 有 **1723 MB**，那是**飞书桌面版**的数据目录；
+#     `feishu-cli` 这个 npm 包自己的配置在 `~/.feishu-cli`（见下面那条规则的出处）。
+#     猜错的表现是"给 feishu-cli 记了 1.7 GB"——而阶段三一旦把它当缓存勾上，删的是
+#     用户飞书客户端的本地数据。
+#   * `~/.kimi-code` 有 **127.8 MB**，看着最像"`@moonshot-ai/kimi-code` 的缓存"，
+#     拆开看里面是 `bin/`（**工具自己的二进制**）+ `config.toml` + `credentials/`
+#     + `sessions/` ⇒ 它是这颗工具的**安装与数据根**，删了等于删工具。
+#     ⇒ **本轮不给它写规则**（没有 ① 也没有 ② 的背书），宁可少报。
+#
+# ## 两个字段怎么读
+#
+#   * `paths`：候选路径**按序取第一个存在的**。`$VAR` 读环境变量（没设就跳过），
+#     `~/`、`%APPDATA%`、`%LOCALAPPDATA%`、`%USERPROFILE%` 由解析器展开。
+#     **环境变量在前**是故意的：用户把它指到别处去了，工具真的在用那一个。
+#   * `[[rule]].package`：**全等匹配**包名末段或它的任一命令名（小写、不做前缀/模糊）。
+#     模糊匹配就是把上面那两个反例请回来。
+#
+# ⚠️ `%LOCALAPPDATA%/npm-cache` 是本机跑 `npm config get cache` 量出来的默认值
+# （不是从别处抄的）。用户若在 `.npmrc` 里改过 `cache`：`$NPM_CONFIG_CACHE` 没设、
+# 默认目录不存在 ⇒ **这一条不出现**（少报），而 npm provider 会自己再问一次
+# npm（设计 §8.2 第 2 级「包管理器文件清单」），两条路取先到的。
+
+# ── 共享缓存：跨包共用一份，不属于任何一颗工具（设计 §9：不上卸载流，只进汇总条）──
+
+[[shared]]
+label = "npm 缓存"
+paths = ["$NPM_CONFIG_CACHE", "%LOCALAPPDATA%/npm-cache"]
+
+[[shared]]
+label = "pnpm store"
+# pnpm 的内容寻址仓库：跨项目共用，删了只是下次装包要重下。
+# `$PNPM_HOME` 是它的全局根，store 在它下面（本机实测 `%LOCALAPPDATA%/pnpm/store`
+# 占 2700 MB / 88684 个文件，而它旁边的 `bin/` 是空的）
+paths = ["$PNPM_HOME/store", "%LOCALAPPDATA%/pnpm/store"]
+
+[[shared]]
+label = "cargo registry"
+# ⚠️ **不能写成 `$CARGO_HOME` 整棵**：那里还有 `bin/`（用户 `cargo install` 装的工具，
+# 删了就是删工具）。本机实测 `~/.cargo` 整棵 3658 MB 里 registry 占 3604 MB
+paths = ["$CARGO_HOME/registry", "%USERPROFILE%/.cargo/registry"]
+
+[[shared]]
+label = "cargo 下载的仓库"
+paths = ["$CARGO_HOME/git", "%USERPROFILE%/.cargo/git"]
+
+[[shared]]
+label = "scoop 缓存"
+paths = ["$SCOOP/cache", "%USERPROFILE%/scoop/cache"]
+
+[[shared]]
+label = "pip 缓存"
+paths = ["$PIP_CACHE_DIR", "%LOCALAPPDATA%/pip/cache"]
+
+# ── 每颗工具自己的目录 ──
+
+[[rule]]
+package = ["deno"]
+# 出处 ①：`DENO_DIR` 是 deno 自己的环境变量，Windows 默认 `%LOCALAPPDATA%\deno`。
+# 本机实测那个目录里是 `*_cache_v2*` / `gen/` / `npm/` —— 全是缓存，判 Cache 有据
+cache = ["$DENO_DIR", "%LOCALAPPDATA%/deno"]
+
+[[rule]]
+package = ["bun"]
+# 出处 ①：`BUN_INSTALL` 是 bun 自己的环境变量（默认 `~/.bun`），包缓存落在它下面的
+# `install/cache`。⚠️ **根不能当缓存**：`~/.bun/bin` 里是它的可执行文件
+cache = ["$BUN_INSTALL/install/cache", "%USERPROFILE%/.bun/install/cache"]
+
+[[rule]]
+package = ["feishu-cli"]
+# 出处 ②：这个包自己的 `dist/lib/config.js:4` 写死
+# `const CONFIG_DIR = join(homedir(), ".feishu-cli")`
+config = ["~/.feishu-cli"]

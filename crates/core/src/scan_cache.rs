@@ -147,6 +147,28 @@ CREATE TABLE IF NOT EXISTS cli_packages (
     executables  TEXT NOT NULL DEFAULT '[]',
     scanned_at   INTEGER NOT NULL DEFAULT 0
 );
+-- ⚠️ **两张新表而不是给 `cli_packages` 加列**：`CREATE TABLE IF NOT EXISTS`
+-- 只会建新表，**不会给已存在的表加列** —— 老用户库里那张 `cli_packages` 是阶段一
+-- 建的、没有 `dirs` 列，往它的 CREATE 里添一列就是**静默失效**：新装用户没事，
+-- 老用户读不到、也写不进去，而一句错都不报（本项目最恨的那一类）。
+-- 新表则新老两份库都建得出来，零迁移。
+-- `size` 可空 = **还没算**（体积是惰性算的，界面显「计算中…」）。
+CREATE TABLE IF NOT EXISTS cli_package_dirs (
+    package_id TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    label      TEXT NOT NULL DEFAULT '',
+    size       INTEGER,
+    PRIMARY KEY (package_id, path)
+);
+-- 共享缓存（provider 级，不属于任何一颗包）。跟着整表替换走
+CREATE TABLE IF NOT EXISTS cli_shared_dirs (
+    path       TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    label      TEXT NOT NULL DEFAULT '',
+    size       INTEGER,
+    scanned_at INTEGER NOT NULL DEFAULT 0
+);
 ";
 
 /// 并发写这张表时，让第二个连接**等多久**再放弃（毫秒）。

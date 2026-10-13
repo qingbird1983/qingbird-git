@@ -104,6 +104,9 @@ pub(crate) fn parse_pipx_list(text: &str) -> Result<Vec<CliPackage>, String> {
                 })
                 .unwrap_or_default(),
             kind: PackageKind::Unknown,
+            // 数据目录由扫描协调器统一解析（`cli::dirs::for_package`）——
+            // provider 只负责"有哪些包"，**规则库不该有第二个出处**
+            dirs: Vec::new(),
         });
     }
     Ok(out)

@@ -486,6 +486,7 @@ mod tests {
             install_path: install.map(|p| p.to_string_lossy().into_owned()),
             executables: cmds.iter().map(|s| s.to_string()).collect(),
             kind: PackageKind::Unknown,
+            dirs: Vec::new(),
         }
     }
 

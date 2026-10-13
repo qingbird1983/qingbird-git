@@ -29,6 +29,10 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # 解码那半边不归我们：磁盘上那张图由 gpui 自己的 `ImageAssetLoader` 读
 # （`elements/img.rs:669` 的 `image::guess_format`），所以不引 `image`。
 png = "0.17"
+# CLI 数据目录的**规则库**读一份 `rules.toml`（设计 §8.1：规则库是数据不是代码）。
+# ⚠️ **不是新引入的编译单元**：`toml` 0.8 本来就在依赖树里
+# （`rust-i18n-support` → `rust-i18n-macro` → `gpui-component` 那条链），纯 Rust、无 build script。
+toml = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 # CLI 工具图标提取（阶段二）多要四组绑定：

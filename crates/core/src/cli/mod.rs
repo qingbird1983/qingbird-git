@@ -29,10 +29,11 @@ mod provider;
 /// 它的两个入口叫 `ensure` / `cached_index`，摊到 `cli` 这一层就成了
 /// `qingbird_core::cli::ensure(..)` —— 看不出是对谁 ensure。留着 `cli::icon::`
 /// 这一段，读调用处的人不用回来看定义。
+pub mod dirs;
 pub mod icon;
 
 pub use cache::{load_cached, save_cached};
-pub use model::{CliPackage, PackageKind, ProviderId, ScanReport};
+pub use model::{CliPackage, DirKind, PackageDir, PackageKind, ProviderId, ScanReport};
 pub use provider::{providers, PackageProvider};
 
 use crate::store::now_secs;
@@ -49,24 +50,46 @@ pub fn scan() -> ScanReport {
             continue;
         }
         let id = p.id();
-        handles.push((id, std::thread::spawn(move || p.list())));
+        // 共享缓存也在**同一条 provider 线程**里取：npm 那一档要再问它自己一次
+        // （`npm config get cache`，设计 §8 第 2 级「包管理器文件清单」）。
+        // 串在收集结果那一趟上会让它白白多等一条命令
+        handles.push((id, std::thread::spawn(move || (p.list(), p.cache_dirs()))));
     }
 
     let mut packages = Vec::new();
     let mut errors = Vec::new();
+    let mut reported = Vec::new();
     for (id, h) in handles {
         match h.join() {
-            Ok(Ok(mut ps)) => packages.append(&mut ps),
-            Ok(Err(e)) => errors.push(format!("{}：{e}", id.label())),
+            Ok((Ok(mut ps), dirs)) => {
+                packages.append(&mut ps);
+                reported.extend(dirs);
+            }
+            Ok((Err(e), dirs)) => {
+                errors.push(format!("{}：{e}", id.label()));
+                // 列表挂了不代表它不知道自己的缓存在哪——自报的那份照样收
+                reported.extend(dirs);
+            }
             Err(_) => errors.push(format!("{}：扫描线程异常退出", id.label())),
         }
     }
+
+    // 数据目录（设计 §8 的三级降）落到这里：规则库 + provider 自报 + 环境变量推断。
+    // ⚠️ **体积这一趟不算**（`size` 全是 `None`，界面显「计算中…」）——走盘归界面
+    // 那条后台通道（`ops::scan_cli`）：本机 npm 缓存 9.7 万个文件，压在这一趟里
+    // 就是"进屏先等几秒"，而这一趟本来只该等几条命令
+    let ctx = dirs::Ctx::live();
+    for p in packages.iter_mut() {
+        p.dirs = dirs::for_package(p, &ctx);
+    }
+    let shared = dirs::merge_shared(reported, dirs::shared(&ctx));
 
     sort_packages(&mut packages);
     ScanReport {
         packages,
         errors,
         scanned_at: now_secs(),
+        shared,
     }
 }
 
@@ -103,6 +126,7 @@ mod tests {
             install_path: None,
             executables: Vec::new(),
             kind: PackageKind::Unknown,
+            dirs: Vec::new(),
         }
     }
 

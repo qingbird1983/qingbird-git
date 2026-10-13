@@ -1437,9 +1437,11 @@ impl Shell {
         self.cli_task = None;
 
         // 先上屏缓存。重扫时它会被后台结果替换，但**首屏不空、也不闪**
-        if let Some((packages, scanned_at)) = qingbird_core::cli::load_cached() {
-            self.cli.packages = packages;
-            self.cli.scanned_at = scanned_at;
+        if let Some(cached) = qingbird_core::cli::load_cached() {
+            self.cli.packages = cached.packages;
+            // 共享缓存与**每颗工具的数据目录**（连上次算好的体积）也一起上屏
+            self.cli.shared = cached.shared;
+            self.cli.scanned_at = cached.scanned_at;
         }
         // 图标也先上屏缓存（**与上面那份包清单同一套语言**：先渲染、后台再刷）。
         // 它只是一次 `read_dir`，不碰 Windows API、不 stat exe ⇒ 首屏不因此变慢。
@@ -1453,25 +1455,39 @@ impl Shell {
         self.cli.errors.clear();
         self.cli_keep_selection();
         cx.notify();
+        // 缓存里那份体积先摆上；共享缓存那一批**重新量**（见 `spawn_dir_sizes`）
+        self.spawn_dir_sizes(cx, true);
 
         self.cli_task = Some(cx.spawn(async move |this, cx| {
             let report = cx
                 .background_executor()
                 .spawn(async move { qingbird_core::cli::scan() })
                 .await;
-            let pkgs = report.packages.clone();
+            let mut fresh = report.packages.clone();
+            let mut shared = report.shared.clone();
+            let scanned_at = report.scanned_at;
             let landed = this
                 .update(cx, |this, cx| {
                     if this.cli_seq != seq {
                         return false; // 已有新一轮，这批过期
                     }
+                    // 体积接力：路径与类别都对上就把上一份算好的接回来
+                    // （不然每重扫一次，屏上就齐刷刷闪一遍「计算中…」）。
+                    // 后台那一趟再逐条重算——**接力不等于不重算**
+                    qingbird_core::cli::dirs::carry_sizes(&mut fresh, &this.cli.packages);
+                    qingbird_core::cli::dirs::carry_dir_sizes(&mut shared, &this.cli.shared);
                     this.cli.scanning = false;
                     this.cli.errors = report.errors.clone();
-                    this.cli.scanned_at = report.scanned_at;
-                    this.cli.packages = report.packages.clone();
-                    // 落库失败不报：缓存是加速器不是依赖（core 那条约定）
-                    qingbird_core::cli::save_cached(&report.packages, report.scanned_at);
+                    this.cli.scanned_at = scanned_at;
+                    this.cli.packages = fresh;
+                    this.cli.shared = shared;
                     this.cli_keep_selection();
+                    // 落库失败不报：缓存是加速器不是依赖（core 那条约定）
+                    qingbird_core::cli::save_cached(
+                        &this.cli.packages,
+                        &this.cli.shared,
+                        scanned_at,
+                    );
                     cx.notify();
                     true
                 })
@@ -1480,6 +1496,10 @@ impl Shell {
                 return;
             }
 
+            // 数据目录的体积：扫完之后那一条通道（共享缓存那一批每次都重量）
+            this.update(cx, |this, cx| this.spawn_dir_sizes(cx, false))
+                .ok();
+
             // 图标提取：与扫描**同批派发**（设计 §10.1），**一颗一颗来、提完一颗
             // 就 notify 一次** —— 行内先画终字符块，好了换图，绝不阻塞首屏。
             // ⚠️ 这里与 `dialogs/clone.rs` 那条进度搬运是同一条纪律（D73 第三型）：
@@ -1487,8 +1507,10 @@ impl Shell {
             let Some(dir) = icon_dir else {
                 return;
             };
-            for pkg in pkgs {
+            for pkg in report.packages.iter() {
                 let id = pkg.id.clone();
+                // 提起图来的那条路要拿走一个**独立的** `CliPackage`（后台任务里用）
+                let pkg = pkg.clone();
                 // 每一轮都克隆一次：`dir` 要搬进那条后台任务里，
                 // 而它下一轮还得用（搬走的是克隆，外面这颗一直是它的出处）
                 let dir = dir.clone();
@@ -1522,8 +1544,103 @@ impl Shell {
         }));
     }
 
-    /// 清单换了之后，把选中项收到一个**还存在于清单里**的 id 上。
+    /// 把**还没算过体积**的数据目录在后台一条一条量出来（算完一条 notify 一次）。
     ///
+    /// 两个口子由 `all_shared` 分开：
+    /// * **共享缓存**那一批 —— 每次进屏都重量。它是整屏的头号数字（本机 npm 缓存
+    ///   18.8 GB），装一个包它就变了；拿缓存里那份顶到底，界面上就是一句假话。
+    /// * **每颗工具**那一批 —— 只量 `size` 还是 `None` 的（设计 §4 那个
+    ///   `Option<u64>` 说的"惰性"）：第一次量完就随缓存接力，之后进屏不再走盘。
+    ///
+    /// 守卫与扫描共用一颗 `cli_seq`：重扫一次这一趟就作废（不写回、也不再往下跑）。
+    ///
+    /// ⚠️ 句柄**必须存进 `cli_size_task`**：gpui 的 `Task` 是 **drop 即取消**，
+    /// 扔了等于这条通道当场没了（症状是那几条永远停在「计算中…」）
+    pub(crate) fn spawn_dir_sizes(&mut self, cx: &mut Context<Self>, all_shared: bool) {
+        let seq = self.cli_seq;
+        // 要量的清单**现在**取定（路径 + 属于哪颗包）：后台只认这两个数回来写，
+        // 期间列表变了（重扫）由 `seq` 挡住
+        let mut targets: Vec<(Option<String>, String)> = Vec::new();
+        for d in self.cli.shared.iter() {
+            if all_shared || d.size.is_none() {
+                targets.push((None, d.path.clone()));
+            }
+        }
+        let sel = self.cli.selected.clone();
+        for p in self
+            .cli
+            .packages
+            .iter()
+            .filter(|p| Some(&p.id) == sel.as_ref())
+        {
+            for d in p.dirs.iter().filter(|d| d.size.is_none()) {
+                targets.push((Some(p.id.clone()), d.path.clone()));
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+
+        // 每个目标一条后台任务（**不是串行**）。实测本机：npm 缓存 9.7 万文件、
+        // cargo registry 12.4 万、pnpm store 8.9 万，串行量一遍 ~16 秒；而
+        // `background_executor` 是多线程池 ⇒ `spawn` 一调用就把活丢给各自的线程，
+        // 并发已经发生，后面逐个 `await` 只是**逐个收结果**（不是逐个干活），
+        // wall time 落到**最慢那一条**（~9 秒），快的那些早把数摆上屏了。
+        // ⚠️ 这里曾经写成"一个 async 块里 for 一圈 await"（真串行），
+        // 界面 16 秒不出一行数字，看着像"没在搬"（D73 那一族的反面）
+        let mut tasks: Vec<(Task<u64>, Option<String>, String)> = Vec::new();
+        for (pkg, path) in targets {
+            let probe = std::path::PathBuf::from(&path);
+            let task = cx
+                .background_executor()
+                .spawn(async move { qingbird_core::cli::dirs::size_of(&probe) });
+            tasks.push((task, pkg, path));
+        }
+
+        self.cli_size_task = Some(cx.spawn(async move |this, cx| {
+            for (task, pkg, path) in tasks {
+                let size = task.await;
+                let written = this
+                    .update(cx, |this, cx| {
+                        if this.cli_seq != seq {
+                            return false;
+                        }
+                        let hit = match &pkg {
+                            None => this.cli.shared.iter_mut().find(|d| d.path == path),
+                            Some(id) => this
+                                .cli
+                                .packages
+                                .iter_mut()
+                                .find(|p| &p.id == id)
+                                .and_then(|p| p.dirs.iter_mut().find(|d| d.path == path)),
+                        };
+                        if let Some(d) = hit {
+                            d.size = Some(size);
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !written {
+                    return;
+                }
+            }
+            // 体积量完**再落一次库**（第一次落库时体积还没算出来）
+            this.update(cx, |this, _cx| {
+                if this.cli_seq != seq {
+                    return;
+                }
+                qingbird_core::cli::save_cached(
+                    &this.cli.packages,
+                    &this.cli.shared,
+                    this.cli.scanned_at,
+                );
+            })
+            .ok();
+        }));
+    }
+
+    /// 清单换了之后，把选中项收到一个**还存在于清单里**的 id 上。
     /// 两条：选中的那个还在 ⇒ 一个字段都不动（重扫不该把用户的选择抖掉）；
     /// 不在（或压根没选）⇒ 落到第一个。**别让右栏空着**——"扫到了却点不开"
     /// 比"没扫到"更难懂。

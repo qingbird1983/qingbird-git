@@ -477,6 +477,9 @@ pub(crate) struct CliState {
     /// 首屏灌的是磁盘缓存（`icon::cached_icons`，一次 `read_dir`），
     /// 后台那条提取再逐颗核对替换（`ops::scan_cli`）。
     pub(crate) icons: HashMap<String, std::path::PathBuf>,
+    /// 共享缓存（provider 级，不属于任何一颗包）。设计 §9：它们只进右栏底部那条汇总。
+    /// 体积同样是惰性的（`size` 为 `None` = 界面显「计算中…」）
+    pub(crate) shared: Vec<qingbird_core::cli::PackageDir>,
 }
 
 impl Default for CliState {
@@ -491,6 +494,7 @@ impl Default for CliState {
             // 折叠着的组标题，以为"扫到了但里面是空的"
             group_open: [true; 3],
             icons: HashMap::new(),
+            shared: Vec::new(),
         }
     }
 }
@@ -987,6 +991,9 @@ pub(crate) struct Shell {
     /// CLI 扫描的代数：过期结果不许覆盖新结果
     pub(crate) cli_seq: u64,
     pub(crate) cli_task: Option<Task<()>>,
+    /// 量数据目录体积那条后台通道（与 `cli_task` **分开一个句柄**：扫描一结束
+    /// 它就没了，而体积是扫完之后才一条一条量的）
+    pub(crate) cli_size_task: Option<Task<()>>,
     /// CLI 屏左栏（工具列表）是否收起。
     ///
     /// ⚠️ **与 `sidebar_collapsed` 各存一份，不是漏抄**：两屏的左栏共用同一套面板

@@ -514,7 +514,11 @@ pub fn delete_cache_dirs(path: &str, names: &[String]) -> CleanOutcome {
 }
 
 /// 只算大小、不收集大文件（删除前统计释放量用）
-fn dir_size(p: &Path) -> u64 {
+///
+/// ⚠️ **`pub` 是给 CLI 那边复用的**（`cli::dirs::size_of`：量一个数据目录多大）——
+/// "走一棵树求和"这件事在仓库里只许有一个出处，别在 `cli` 里再写一份。
+/// 走盘可能很贵（CLI 缓存实测 9.7 万个文件），**调用方自己保证在后台线程里跑**
+pub fn dir_size(p: &Path) -> u64 {
     let mut sink = Vec::new();
     walk_size(p, false, "", &mut sink)
 }

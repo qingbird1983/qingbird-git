@@ -88,6 +88,8 @@ pub(crate) fn parse_scoop_export(text: &str) -> Result<Vec<CliPackage>, String> 
             install_path: None,
             executables: Vec::new(),
             kind: PackageKind::Unknown,
+            // 数据目录归扫描协调器统一解析（`cli::dirs::for_package`）
+            dirs: Vec::new(),
         });
     }
     Ok(out)
