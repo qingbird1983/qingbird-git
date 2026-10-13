@@ -327,6 +327,14 @@ GUI 大部分要窗口才能测，判据是抓帧 + 实机点，见下面的「�
       （⚠️ **标签带 `v`、包名不带 `v`**：`installer.iss` 里
       `OutputBaseFilename=qingbird-git-Setup-{#MyAppVersion}` 而 `MyAppVersion` 是裸的 `0.1.0`，
       照 `Setup-vX.Y.Z.exe` 去拼会得到一个不存在的文件）
+      ⚠️ **2026-10-13 v0.3.1 实测：这步建出的 Release body 是空的**——附注标签的
+      message **不会**自动带过去（上面那句"轻量标签在 Release 上读不出内容"只对了
+      一半：附注标签也读不出，除非显式传）。要说明就补一步：
+      `git tag -l --format='%(contents)' vX.Y.Z > msg.txt` 然后
+      `gh release edit vX.Y.Z --title "qingbird-git vX.Y.Z" --notes-file msg.txt`。
+      另 ① 里 bump 版本后 `cargo build` 会顺手把 `Cargo.lock` 里两处版本号改掉——
+      **② 提交时记得把它一起 `git add`**，别只加 `Cargo.toml`（v0.3.1 就漏了，
+      只能发版后补一颗）。
   （本机 `gh` 已登录 `qingbird1983`、token scope 含 `repo`，所以建 Release 不用动手点网页）。
   ⚠️ `dist/` 与 `target/` 都在 `.gitignore` 里：**安装包从不进仓库**，唯一的去处是 Release 资产。
   ⚠️ **末端校验是把 Release 上那个包下回来与本地比 sha256**——它一并挡住"挂错文件"与
