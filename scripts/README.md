@@ -7,7 +7,7 @@
 - **真闸** —— 判据不过就非零；括号里点名的就是它 `sys.exit` / `raise SystemExit` 之前打印的那一句。
 - **只报告，不拦任何东西** —— 判据本身不接退出码；凡非零出口**只覆盖"跑不起来 / 用法错"**（找不到窗口、参数不足、assert 前提）的，一律归到这里，并在括号里点明那个非零出口。
 
-命令行一律在仓库根执行。共 37 个文件 = 36 个 `.py` + 1 个 `.ps1`。
+命令行一律在仓库根执行。共 36 个文件 = 35 个 `.py` + 1 个 `.ps1`。
 
 ---
 
@@ -38,7 +38,6 @@
 | `click.py` | 按**客户区**坐标点 gpui 窗口（gpui 自绘标题栏，客户区原点 ≠ 窗口左上角） | `python scripts/click.py --hwnd <int> --at x,y [--button left\|right] [--wheel 格数] [--hold] [--first] [--no-focus] [--probe out.png] [--click]` | **只报告，不拦任何东西（唯一非零出口是操作失败）**：打印 CLICKED / HELD / PROBED；只有 `ClientToScreen` 失败 `raise SystemExit("ClientToScreen 失败")` |
 | `steps.py` | 跑一串点击 token 并逐步抓帧（`a11y_stress.py` / `verify_grow.py` 的点击与找窗口都从它这里取） | `python scripts/steps.py "nav:105" "row:121,120" "wait:2" "tab:474" "shot:qb_a"`——token：`nav:<y>`（概览 71 / 我的 113 / 第三方 155）、`row:<x>,<y>`、`tab:<x>`（y=150）、`click:<x>,<y>[,settle]`、`wait:<秒>`、`shot:<名>`、`wheel:<x>,<y>,档数`；先设 `QB_APPDATA` | **只报告，不拦任何东西（非零是前提与安全闸）**：没窗口打「NO WINDOW」`return 1`；拿不到前台 `raise RuntimeError("click(...) 中止：拿不到前台…，不动鼠标")`（安全闸，不点别人窗口）。⚠️ 文件头明写**送不进按键**，⌘K / 快捷键这条路它验不到 |
 | `scancols.py` | 逐列扫暗像素，给一个矩形找回内容块的像素 x 范围（不要从 `frame.py` 的放大图反算，倍数还会被显示再缩放，曾偏 52px） | `python scripts/scancols.py <png> <x0> <y0> <x1> <y1> [--thr 150]` | **只报告，不拦任何东西**：只 print run / center / width，无退出码 |
-| `scanrow.py` | 说要在**一行 / 一列里扫亮像素连续段**、量标签真实位置 | 文件头写的用法：`python scripts\scanrow.py <png> <y> <x0> <x1> [阈值] [--col]`（阈值默认 140） | **不可运行**：全文件只有一段**没有闭合 `"""`** 的 docstring（1276 字节 / 25 行），一个字节的代码都没有 ⇒ 既不是真闸也不是只报告，是**存根** |
 | `rowpitch.py` | 量一列东西的行距（逐行数"与背景不同的像素数"成剖面，取各凸起中心之差） | `python scripts/rowpitch.py <in.png> <x0> <y0> <x1> <y1> [最小凸起高度=4]` | **只报告，不拦任何东西（唯一非零出口是用法错）**：参数 < 6 个 ⇒ `print(__doc__)` `return 1`；量完只 print「行距取值 = […] -> 一致」或「**N 种，不齐**」并 `return 0` ⇒ 不齐也不红 |
 | `shot_now.py` | 沙箱起 debug exe 抓总览页一帧，量 2026-10-08 那四条缩进；三道闸：`QB_APPDATA` 沙箱 + `assert env["APPDATA"] == SANDBOX` + 收尾 `check_real_cfg`；出图前打 exe 的 md5 + mtime | `python scripts/shot_now.py`（无参数；硬编码 `TMP=%TEMP%\qb_v4`、`EXE=target\debug\qingbird-git.exe`） | **只报告，不拦任何东西（唯一非零出口是 assert 前提）**：APPDATA 没指到沙箱、40 次没找到窗口各 assert；缩进对不对它只出图 |
 | `shot_wb.py` | 抓「我的仓库」工作台（或第三方）一帧，沙箱里 `ui_scale` / `theme` / `inspector_open` / `sidebar_*` 一律抄真实 config | `python scripts/shot_wb.py [仓库名=demo-dirty] [输出名=wb] [view=mine\|third]`；地标表：`demo-clean` 108 / `demo-behind` 146 / `demo-ahead` 184 / `demo-dirty` 222 / `no-upstream` 260，导航轨 y 概览 50 / 我的 94 / 三方 138 / 设置 755 | **只报告，不拦任何东西（唯一非零出口是 assert 前提）**：沙箱里没这颗仓库、APPDATA 没指沙箱、找不到窗口、拿不到前台各 assert |
@@ -106,4 +105,3 @@
 - `verify_type_tiers.py`：③ 那条超阈值只登记数值。
 - `verify_dark_five.py`：单帧层面 `MUST_APPEAR` 四档只报数（由整档自检 ⓪b 兜底）。
 - `verify_grow.py`：`--parse-only` 的盲区自证只打印；八腿的地标只打印。
-- `scanrow.py`：**存根，不可运行**，既不是真闸也不是报告。

@@ -414,10 +414,10 @@ PNG **不能**喂给 `gpui_kit::component::Icon`——它只会 `svg().data(..)`
 | 卡内分隔线 | `widgets::card_split(t)` | 自拼 `border_t_1 + 负 margin` | 同上 |
 | 两档灰（`line` / `line-soft`） | `tokens::edge(t)` 与 `tokens::track(t)`——**一档一个入口** | 直写 `t.colors.border` / `t.colors.table_row_border` | 闸 **R7**：`colors.border` 只许出现在 `tokens.rs` 定义处。⚠️ **给"档"起名字时别把用途写死**：`edge()` 的注释以前写着"次按钮描边"，于是分隔线、中性状态点以为不归它管、各自直写，同一个值长了两个名字（补十五实测：改前 5 别名 / 6 直写，改后 11 : 0，零视觉变化） |
 | 选中面 | `tokens::wash(t)` | 各页自挑一个灰 | 闸：`bg(` 后跟字面色值的，白名单外一律报 |
-| 悬停面 | ⚠️ **这一档还没有唯一出处**（2026-10-11 逐行核对：`tokens::hover_face` 只存在于 `tokens.rs:63` 的一句预告注释里，函数没写）。现状 **4 个出处、3 个档**：`settings.rs:720` = `secondary_hover`、`shell.rs:2054` = `colors.list_hover`、`shell.rs:902` = 调用方传入的 `hover_bg`、`sidebar.rs:466` = `wash` / `track`。落地归 **32-18** | 在收成一颗之前，**别新写第五个档**：新屏要跟上面某一处对齐，并说清跟哪一处 | ~~收敛后闸：全站 `wash_soft` 只出现在此函数~~ ⇒ **`wash_soft` 这个名字全仓 0 处，这条闸从来没存在过**（原来那一行写的是计划，读起来像现状） |
+| 悬停面 | ✅ **`tokens::hover_face(t)`**（2026-10-13 落地，= 官方 `secondary_hover`，即 §1 色板的 `wash-soft` 档） | 再手挑灰——原来 4 出处 3 档（`secondary_hover` / `colors.list_hover` / 调用方传参 / 侧栏 `track`）已全部归到这一颗；选中面用 `wash`，与悬停面不许互换 | `grep` gui/src 的 `list_hover` 应 0 命中 |
 | 图标底块 | `widgets::glyph(...)`，一档 40/12/20 | 42 / 46 / 圆角混用 | 闸：只允许一组常量 |
 | 徽章 / 胶囊 | `widgets::pill(text, fg, bg)`（⚠️ 表里原来写的 `pill(kind, text)` **不是它的签名**，2026-10-11 核对时才发现。同族 `pill_icon` / `pill_out` / `pill_with` 是它的内部复用，**算一个家**） | 各页自拼 `bg + rounded + text_size` | ⚠️ **这条禁止项目前没有机器判据**：`fg` / `bg` 由**调用方**传进来，闸 R3 只挡字面色，**挡不住"传一档自己挑的"**。`pill_h()` 只在此构件 ✓ |
-| 空态 | ⚠️ **这一档也还没有唯一出处**（`widgets::empty_state` 代码里 **0 处**，与上面那行同一种"计划写成了现状"）。现状 **3 种写法**：`overview.rs:606` 用官方 `EmptyHeader` + `EmptyTitle`、`sidebar.rs:827` 裸 `child(format!)`、`dialogs/purge.rs:279` 用 `meta_text`。落地归 **32-18** | 各页再自写第 4 种；**"没扫过"那一档写成"已同步"**（这条与形状无关，归 §12.6） | 抓帧：每屏空态逐像素同构 ⇒ ⚠️ **这条判据现在没有构件承载**，它只能算"落地之后"的验收，别当成已经在跑的闸 |
+| 空态 | ✅ **`widgets::empty_state(主句, 副句, t)`**（2026-10-13 落地：包装官方 `Empty`，`border_0` 去虚线框，主句进 `EmptyTitle`、副句 `fs_meta`+`tier4`；`note` 空串即无副句格；返回 `Empty` 本体，少数派在调用方接着 `.child()` / `.flex_grow(0.)`）。原来 4 处散写（总览两处官方 `Empty`、侧栏裸三行、purge 的 `meta_text`）已全部归到这一颗 | 各页再自写第 N 种（裸 `child` 文本、拿 `meta_text` 当空态）；**"没扫过"那一档写成"已同步"**（这条与形状无关，归 §12.6） | 抓帧：dlg-purge 帧已录（2026-10-13，28k px 差异 = 有意的形态归一） |
 | 表单行 | `widgets::FormRows`（`.row(label, control)` → `.build(t)`） | 标签在上、输入框在下；**两种对齐混在一页** | 控件列 `justify_end` 是**唯一**对齐口径：按内容宽的控件（开关、单选组、按钮）自动贴行末，**要占满的必须自己写 `w_full()`**（不给就塌成 0 宽，见 D92 那轮抓帧）。标签列宽 `tokens::FORM_LABEL_W`，别在调用方再写一个 `w(px(..))` |
 | 互斥单选 | 官方 `RadioGroup`（勾选态由一个 `Option<usize>` 算出来） | 三颗 `Checkbox` 当单选；**`ToggleGroup::segmented()`**（只改外观，仍允许零选/多选） | 判据见 D88：让"非法态"没有选项，而不是补一段兜底 |
 | 说明气泡 | `widgets::info_dot(id, text, t, gv)`（一颗 ghost 图标键 + `.tooltip()`） | 裸 `Div` 挂 tooltip（**基座没这条路**）；气泡正文写 `**加粗**` / 反引号（纯文本，会连符号画出来） | 判据：**这句话不看会不会让用户做错事**——会就不许进气泡，留在界面上（"即时生效"因此是一枚可见胶囊） |
@@ -474,7 +474,7 @@ R5 第一版把 `↑ ↓ → ←` 也算"文字冒充图标"，于是"到「设�
 | **图标底块** | `GLYPH` 一档：40×40 / r12 / `wash` / 内图标 20 / `brand` | 见 5.3 |
 | **气泡** | `ink` 底 + `canvas` 字 + `R_LG` + `SH_3` + 4px 进场位移 | 出现 `duration_normal`+`enter`，消失 `fast`+`exit` |
 | **告警** | **行内 `warn_dot`（18px 圆 + `warn` 色）+ 悬停气泡** | ⛔ 整块 wash 横贯全宽 = 一条提示的优先级抬到操作之上 |
-| **空态** | `GLYPH` + 主句 + 副句，居中 | 副句用 `line` 色（比 `faint` 更退），**不许用等宽字体容器装中文** |
+| **空态** | `widgets::empty_state`（官方 `Empty`，无图标位）+ 主句 + 副句，居中 | 副句用 `fs_meta` + `tier4`（**2026-10-13 照实现更正**：原写 `GLYPH` + `line` 色——官方 `Empty` 没有默认图标位，`line` 色与已验收的总览空态不符），**不许用等宽字体容器装中文** |
 | **日志输出流** | `stream` 墨底 + `stream-fg` 正文 + `stream-dim` 噪音 | 空态提示语**不放**这个容器（会掉字重） |
 
 ---
