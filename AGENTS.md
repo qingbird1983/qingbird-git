@@ -212,6 +212,13 @@ Windows 桌面工具：本地 Git 仓库一键同步。**Rust 原生 GPUI 界面
     纪律的**反向**：**计数器为 0 = 什么都没测 = 绿**，同样必须自己报红。
     ⇒ 两条新自检各配一条**只红它自己**的窄变异（写侧不计数 / 读数不记账），
     再加一条"落盘退回裸 write"证明**判据本体的红不由新自检代劳**（三条各自精确红）
+  - ⚠️ **同一个坑的第五种触发：应用自己会写回来的界面状态，也是"外包给环境"**
+    （2026-10-13 实锤，抓 CLI 屏的四张帧时白跑两次）：CLI 列表的**滚动位置与选中项**
+    跟着沙箱 `config.json` 活到了下一次运行，于是第二次跑时"分组头在客户 y=75"这个
+    **量自上一次的坐标**不成立，点下去选中的是 winget 的别的行（`OpenCode` / `usbipd-win`，
+    而我要的是 npm / cargo）——**脚本不报错、帧也抓到了，只是抓的不是我以为的那一屏**。
+    ⇒ 抓界面帧的脚本三条：① **先删沙箱目录**再拷配置；② **每点一下抓一帧**，下一个坐标
+    只按本帧量；③ 判据里写清"这一帧上选中的是谁"（本轮是靠帧上第一行那颗包名认出来的）。
 - ⛔ **「跑完测试核对它没往真实目录写」这条闸 2026-10-09 真的抓到了事，抓出的是一条
   在用户数据里长了两周的垃圾**：`repos::init_repo` 的 doc 明写「`git init` → 写 `.gitignore`
   → 初始提交 → **加入管理列表**」，末尾无条件 `store::save`，而 `init_tests` 那三条
@@ -1597,7 +1604,7 @@ core（纯业务，不认识 gpui，单测 221 个都在这）：
 | `crates/core/src/history.rs` | 提交列表 / 详情 / patch + 三个纯解析函数 |
 | `crates/core/src/scan_cache.rs` | **阶段 16 的缓存层**：`scan_cache`（覆盖写）+ `op_history`（追加）两张表。⚠️ **别叫它 `history.rs`**——那个名字已被上一行的提交历史占了，`write` 工具当时明写了 `overwrote existing file` 是我漏看。**它是加速器不是依赖**：库打不开/表损坏/磁盘满一律降级（读返 `None`、写返 `false`），一次都不 panic |
 | `crates/core/src/space.rs` `run_cmd.rs` `fork.rs` `proxy.rs` `scheduler.rs` `store.rs` `types.rs` | 磁盘 / 一键命令 / 变基 / 代理探测 / **后台自动同步的到期判定与执行** / 配置持久化 / 共享类型 |
-| `crates/core/src/cli/` | **CLI 工具扫描（阶段一：只读）**：provider 抽象（`scoop` / `npm` / `pipx`，输出全是 JSON）+ SQLite 缓存（**与仓库缓存同一份库、同一条打开路径**）。子进程一律 `git::CREATE_NO_WINDOW`。⚠️ 与界面侧 `cli_tab.rs` 是一对；升级 / 卸载 / 数据目录 / 图标提取归后续阶段 |
+| `crates/core/src/cli/` | **CLI 工具扫描（只读）**：provider 抽象（`winget` / `scoop` / `npm` / `pipx` / `cargo`）+ 数据目录规则库（`rules.toml`）+ 图标提取（`icon.rs`）+ 桌面关联（`desktop.rs`，**只做 PE 子系统那一个信号**）+ SQLite 缓存（**与仓库缓存同一份库、同一条打开路径**）。子进程一律 `git::CREATE_NO_WINDOW`。⚠️ 与界面侧 `cli_tab.rs` 是一对；升级 / 卸载归阶段三。逐条账在 `docs/roadmap/cli.md` |
 
 GUI（`gui/src`）：
 

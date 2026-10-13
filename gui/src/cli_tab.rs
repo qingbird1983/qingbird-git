@@ -97,7 +97,7 @@ impl Shell {
             tree = tree.child(
                 empty_state(
                     "未发现 CLI 工具",
-                    "装了 scoop / npm / pipx 里的工具后会出现在这里",
+                    "装了 winget / scoop / npm / pipx / cargo 里的工具后会出现在这里",
                     t,
                 )
                 .py(px(GAP_XL)),
@@ -262,8 +262,11 @@ impl Shell {
     /// ⚠️ **它是 `body-split` 的 1 号面板（主区）**，不是这一屏自己拼的一行——
     /// 与仓库页的 `detail_page` 占同一个位置、走同一条 `keep_main_flexible`。
     ///
-    /// 外形照 `detail_page`：`flex_1` + `pt(GAP)` + `gap(GAP_TIGHT)`，
-    /// **底部不给外边距**（与左栏一起贴到状态条上沿，用户 2026-10-08 定）
+    /// 外形照 `detail_page`：`flex_1` + `pt(GAP)`，**底部不给外边距**
+    /// （与左栏一起贴到状态条上沿，用户 2026-10-08 定）。
+    ///
+    /// 块间距取 `GAP_LG`（"两个不同东西"那一档）而不是 `GAP_TIGHT`：这一列只装
+    /// 两块（详情卡 + 共享缓存汇总），4px 让白卡与灰盒看着像连体
     pub(crate) fn cli_detail(&self, t: &Theme, _cx: &mut Context<Self>) -> Div {
         let mut col = v_flex()
             .flex_1()
@@ -271,7 +274,7 @@ impl Shell {
             .h_full()
             .min_h_0()
             .pt(px(GAP))
-            .gap(px(GAP_TIGHT));
+            .gap(px(GAP_LG));
         match self
             .cli
             .packages
@@ -288,16 +291,20 @@ impl Shell {
                 )
             }
         }
-        // 共享缓存汇总：**压在这一列的底部**（设计 §9 的"右栏底部汇总条"），
-        // 所以前面垫一个撑满的空白。没有共享缓存就整块不画
-        col = col.child(div().flex_1());
+        // 共享缓存汇总：**紧跟在详情卡下面**。没有共享缓存就整块不画。
+        //
+        // ⚠️ 原来这里在它前面垫了一个 `div().flex_1()`（"把汇总条压到这一列的底部"），
+        // 2026-10-13 用户指着帧上那块空白问"是留给更新卸载的吗"——**它不是预留，
+        // 是那个垫子撑出来的洞**。设计 §9 只说共享缓存上右栏那条汇总，
+        // 没说中间要空一大截；阶段三的升级/卸载键会挂在**详情卡自己身上**
+        // （表头右侧或卡底），不占这块空。
         if let Some(box_) = self.shared_box(t) {
             col = col.child(box_);
         }
         col
     }
 
-    /// 详情卡：名称 / 版本 / 来源 / 命令 / 安装目录。
+    /// 详情卡：名称 / 版本 / 来源 / 桌面关联 / 命令 / 安装目录。
     ///
     /// **阶段一只读**：升级 / 卸载按钮属阶段三，这里不画（v4 铁律：
     /// 不演拿不到的效果——一颗点了没反应的键比没有更糟）。
@@ -319,12 +326,16 @@ impl Shell {
             )
             .child(kv("版本", &version, t))
             .child(kv("来源", p.provider.label(), t))
+            // 桌面关联（core 按 PE 子系统判的两档之一）：**它是给用户看的卸载前提**
+            // ——「命令行 + 桌面程序」这一颗不能只当命令行卸。判不出证据时是「未确定」，
+            // 那句话照写：**"没证据"本身也是一句该让用户知道的话**
+            .child(kv("桌面关联", p.kind.label(), t))
             .child(kv("命令", &commands, t))
             .child(kv("安装目录", &install, t))
             .child(dirs_section(&p.dirs, t))
     }
 
-    /// 右栏底部那条「共享缓存」汇总（设计 §9）。
+    /// 右栏那条「共享缓存」汇总（设计 §9）——**紧跟在详情卡下面**，不压到底部。
     ///
     /// ⚠️ **本轮没有「清理」键**：清理要走 OpPlan + 确认对话框，那是阶段三。
     /// v4 铁律——**不演拿不到的效果**，一颗点了没反应的键比没有更糟
@@ -333,20 +344,29 @@ impl Shell {
         if self.cli.shared.is_empty() {
             return None;
         }
-        let mut col = v_flex()
-            .w_full()
-            .p(px(GAP))
-            .gap(px(GAP_TIGHT))
-            .child(
-                div()
-                    .text_size(px(fs_meta()))
-                    .text_color(tier3(t))
-                    .child("共享缓存"),
-            );
+        let mut rows = v_flex().w_full().gap(px(GAP_DENSE));
         for d in self.cli.shared.iter() {
-            col = col.child(shared_row(d, t));
+            rows = rows.child(shared_row(d, t));
         }
-        Some(sunken_box(col, t))
+        Some(sunken_box(
+            v_flex()
+                .w_full()
+                // ⚠️ 内边距取 `GAP_XL`——与上面那张白卡**同一档**。这一块是那一列的
+                // 同级孩子、不是"卡内盒"（卡内盒那一档是 `GAP`），用 `GAP` 会让它的字
+                // 比卡里的字左移 8px：用户 2026-10-13 说的"文字太靠边、没让出边留白"
+                // 就是这 8px（帧上量过：白卡内容 x=314、这一块 x=306）
+                .p(px(GAP_XL))
+                // 标题与行之间是"两个不同东西" ⇒ `GAP_LG`（卡内块间距同一档）
+                .gap(px(GAP_LG))
+                .child(
+                    div()
+                        .text_size(px(fs_meta()))
+                        .text_color(tier3(t))
+                        .child("共享缓存"),
+                )
+                .child(rows),
+            t,
+        ))
     }
 }
 

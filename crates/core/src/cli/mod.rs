@@ -1,8 +1,8 @@
-//! CLI 工具扫描（阶段一：只读）。
+//! CLI 工具扫描（**只读**）。
 //!
-//! 扫本机的包管理器（阶段一：scoop / npm / pipx），列出装了哪些 CLI 工具、
-//! 各自的版本、安装位置、提供的命令。**只读**——升级 / 卸载 / 数据目录 /
-//! 桌面关联 / 图标提取都是后续阶段的事。
+//! 扫本机的包管理器（winget / scoop / npm / pipx / cargo），列出装了哪些 CLI 工具、
+//! 各自的版本、安装位置、提供的命令，并按 PE 子系统判一次**桌面关联**
+//! （[`desktop`]，设计 §4 的两个高置信信号之一）。升级 / 卸载属阶段三。
 //!
 //! ## 为什么在 core 而不另起一个 crate
 //!
@@ -32,6 +32,12 @@ mod provider;
 pub mod dirs;
 pub mod icon;
 
+/// 桌面关联检测（阶段二第三件：PE 子系统那一档高置信信号）。
+///
+/// 与 `icon` 同理**不 re-export 到 `cli` 根**：入口叫 `detect`，
+/// 摊上去就成了 `qingbird_core::cli::detect(..)` —— 看不出在检测什么。
+pub mod desktop;
+
 pub use cache::{load_cached, save_cached};
 pub use model::{CliPackage, DirKind, PackageDir, PackageKind, ProviderId, ScanReport};
 pub use provider::{providers, PackageProvider};
@@ -53,7 +59,24 @@ pub fn scan() -> ScanReport {
         // 共享缓存也在**同一条 provider 线程**里取：npm 那一档要再问它自己一次
         // （`npm config get cache`，设计 §8 第 2 级「包管理器文件清单」）。
         // 串在收集结果那一趟上会让它白白多等一条命令
-        handles.push((id, std::thread::spawn(move || (p.list(), p.cache_dirs()))));
+        //
+        // 桌面关联同样落在这条线程上：它要读盘（走一遍安装目录 + 每颗 exe 读 1 KB），
+        // 串到收集那一趟就是"全部包排队等"——而 provider 之间本来就是并行的。
+        // `shared_install_dir` 要在 `p` 被搬进线程**之前**问：那一档决定桌面关联
+        // 敢不敢看整个目录（cargo 的 `$CARGO_HOME\bin` 里躺着别人的 exe）
+        let shared_dir = p.shared_install_dir();
+        handles.push((
+            id,
+            std::thread::spawn(move || {
+                let mut listed = p.list();
+                if let Ok(ps) = listed.as_mut() {
+                    for pkg in ps.iter_mut() {
+                        pkg.kind = desktop::detect(pkg, shared_dir);
+                    }
+                }
+                (listed, p.cache_dirs())
+            }),
+        ));
     }
 
     let mut packages = Vec::new();

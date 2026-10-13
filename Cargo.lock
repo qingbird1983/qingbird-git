@@ -5605,6 +5605,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 0.8.23",
+ "unicode-width",
  "windows-sys 0.61.2",
  "winreg",
 ]

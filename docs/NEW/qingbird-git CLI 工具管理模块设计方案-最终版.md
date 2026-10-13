@@ -379,7 +379,11 @@ PATH 推测表保留 1.0 §6.3（`~\scoop\apps\…` → scoop 等），用于给
 
 ⚠️ **2026-10-13 实际排期**：阶段二里的**工具图标提取**先单独发了一版（v0.5.0）——
 它与 "winget + cargo" 那几项没有依赖关系，而它是用户当场拍的关键决策（§10.1）。
-**阶段二余下四项（winget / cargo / 目录规则库 / 桌面关联）未动**，
+⚠️ **2026-10-13 收工时的状态**（逐条账在 `docs/roadmap/cli.md`，这一行只报一句）：
+阶段二那四项**都已落盘**——目录规则库 / 共享缓存与图标提取随 v0.5.0，winget + cargo
+两个 provider 与桌面关联随后落。**桌面关联只落了 PE 子系统那一个信号**：`.lnk` 扫描
+那一档因为 `windows-sys` 0.61 里没有 `IShellLinkW` / `IPersistFile` 绑定（只有 CLSID 常量）
+而缓做，理由与"留给下一轮拍"都写在路线表那一格。
 阶段三、四原样。候选依赖的实测记录：`windows` crate 那条禁令**用不上**——
 本项目 core 一直用的 `windows-sys` 本来就在依赖树里、纯生成的绑定、无 build script
 （本轮只为图标提取多开了 `Win32_UI_Shell` / `Win32_UI_WindowsAndMessaging` /

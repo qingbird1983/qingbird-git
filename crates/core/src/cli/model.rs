@@ -4,14 +4,17 @@ use serde::{Deserialize, Serialize};
 
 /// 这个包是从哪个包管理器扫出来的。
 ///
-/// 阶段一只做三个**输出全是 JSON**的 provider（解析最干净）；
-/// winget / cargo / brew 属阶段二、值也是那时才加——**枚举里现在没有它们**，
-/// 免得有人以为已经支持了。
+/// 顺序 = 界面分组顺序 = 包排序时的第一关键字（见 [`ProviderId::all`]）。
+/// brew 属"阶段二+"、本轮没做——**枚举里现在没有它**，免得有人以为已经支持了。
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum ProviderId {
+    /// Windows 系统自带的那个（`winget list`，输出是给人看的表格）
+    Winget,
     Scoop,
     Npm,
     Pipx,
+    /// Rust 工具链自带的（读 `$CARGO_HOME` 下那两本账）
+    Cargo,
 }
 
 impl ProviderId {
@@ -19,20 +22,24 @@ impl ProviderId {
     /// ⚠️ **改它等于换一批记录**（与 `Op::key` 同一条纪律：落库的键不是文案）。
     pub fn key(self) -> &'static str {
         match self {
+            ProviderId::Winget => "winget",
             ProviderId::Scoop => "scoop",
             ProviderId::Npm => "npm",
             ProviderId::Pipx => "pipx",
+            ProviderId::Cargo => "cargo",
         }
     }
 
-    /// 界面上显示的名字。阶段一恰好与 [`key`](Self::key) 同形，
+    /// 界面上显示的名字。现在恰好与 [`key`](Self::key) 同形，
     /// 但这是两件事（一个落库、一个给人看），留着两个出口以免以后想改文案时
     /// 顺手把库里的键也改了。
     pub fn label(self) -> &'static str {
         match self {
+            ProviderId::Winget => "winget",
             ProviderId::Scoop => "scoop",
             ProviderId::Npm => "npm",
             ProviderId::Pipx => "pipx",
+            ProviderId::Cargo => "cargo",
         }
     }
 
@@ -40,9 +47,11 @@ impl ProviderId {
     /// 而不是 panic）
     pub fn from_key(s: &str) -> Option<Self> {
         match s {
+            "winget" => Some(ProviderId::Winget),
             "scoop" => Some(ProviderId::Scoop),
             "npm" => Some(ProviderId::Npm),
             "pipx" => Some(ProviderId::Pipx),
+            "cargo" => Some(ProviderId::Cargo),
             _ => None,
         }
     }
@@ -51,17 +60,28 @@ impl ProviderId {
     ///
     /// 收成一颗是为了让"provider 的先后"只有一个出处——界面按它排组、
     /// [`crate::cli::sort_packages`] 按它排包，两处各写一份迟早对不上。
-    pub fn all() -> [ProviderId; 3] {
-        [ProviderId::Scoop, ProviderId::Npm, ProviderId::Pipx]
+    ///
+    /// `winget` 在最前（系统级那一档），`cargo` 在最后（跟语言工具链走）。
+    pub const fn all() -> [ProviderId; 5] {
+        [
+            ProviderId::Winget,
+            ProviderId::Scoop,
+            ProviderId::Npm,
+            ProviderId::Pipx,
+            ProviderId::Cargo,
+        ]
     }
 }
 
 /// 这个包跟桌面应用有没有关系（卸载会不会连带东西）。
 ///
-/// ⚠️ **阶段一永远是 [`Unknown`](PackageKind::Unknown)**：桌面关联检测
-/// （快捷方式扫描 + PE 主程序）属阶段二。现在**不在界面上显示它**，
-/// 存一个"没分类"比存一个"猜的分类"诚实——`CliOnly` 是一句有值的结论，
-/// 而阶段一还没有证据下这个结论。
+/// 阶段一（只有 JSON provider 时）永远是 [`Unknown`](PackageKind::Unknown)；
+/// **阶段二起由 [`crate::cli::desktop`] 按两个高置信信号判定**（包私有目录里
+/// 有没有 GUI 子系统的主程序、有没有快捷方式指进这个目录）。
+///
+/// [`Unknown`](PackageKind::Unknown) 仍会出现——**"没证据"是一种结论**，
+/// 比如 winget 那一档拿不到安装目录。存一个"没分类"比存一个"猜的分类"诚实
+/// （设计 §4：中置信度启发式一档不做，误报会让用户卸错东西）。
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum PackageKind {
     #[default]
@@ -90,6 +110,21 @@ impl PackageKind {
             "cli_with_desktop" => PackageKind::CliWithDesktop,
             "desktop_with_cli" => PackageKind::DesktopWithCli,
             _ => PackageKind::Unknown,
+        }
+    }
+
+    /// 界面上显示的那一句话（右栏详情里"桌面关联"那一行的值）。
+    ///
+    /// 抽成函数而不是写在界面里：**同一句话至少有两个落点**（右栏详情卡、
+    /// 阶段三卸载对话框里那句"卸载会一并移除…"的前提），各写一遍就是两处会漂的东西。
+    /// ⚠️ **卸载建议那句话（设计 §7.3 第三列）本轮没写**——它只有对话框一个读者，
+    /// 跟着阶段三一起落
+    pub fn label(self) -> &'static str {
+        match self {
+            PackageKind::Unknown => "未确定",
+            PackageKind::CliOnly => "纯命令行",
+            PackageKind::CliWithDesktop => "命令行 + 桌面程序",
+            PackageKind::DesktopWithCli => "桌面程序（附带命令）",
         }
     }
 }
@@ -279,5 +314,50 @@ mod tests {
         // 出现在"可清理"那一行上
         let notes: std::collections::HashSet<&str> = all.iter().map(|k| k.note()).collect();
         assert_eq!(notes.len(), 4, "四档的话不该有重复：{notes:?}");
+    }
+
+    /// provider 那张表：键往返、标签非空、`all()` 的档数与顺序。
+    ///
+    /// 为什么值得一条单测：`all()` 是**分组顺序 / 包排序 / 扫描派发**的唯一出处，
+    /// 而界面按它的下标索引（`group_open[ix]`）。加一档忘了改固定长度，编译器只在
+    /// `[ProviderId; N]` 那一处报，**按它下标的那些数组要自己数**
+    #[test]
+    fn the_provider_table_is_complete() {
+        let all = ProviderId::all();
+        assert_eq!(all.len(), 5, "档数变了就把这张表与 state.rs 的 group_open 一起补全");
+        for id in all {
+            assert_eq!(ProviderId::from_key(id.key()), Some(id), "{:?} 的键往返断了", id);
+            assert!(!id.label().is_empty());
+        }
+        assert_eq!(ProviderId::from_key("brew"), None, "没做的 provider 不该认");
+        // 顺序就是界面分组顺序：winget 在最前、cargo 在最后
+        assert_eq!(all[0], ProviderId::Winget);
+        assert_eq!(all[4], ProviderId::Cargo);
+    }
+
+    /// 四档桌面关联的**真值表**：键往返 + 界面那句话各不相同。
+    ///
+    /// ⚠️ 与「给 enum 加一档要重查每一处按档分文案的 `match`」同族（本项目为
+    /// `Bucket::AbUnknown` 交过学费）：`from_key` 那个 `_` 兜底臂**不会**报漏，
+    /// 新档只能由这张表钉住
+    #[test]
+    fn the_package_kind_truth_table() {
+        let all = [
+            PackageKind::Unknown,
+            PackageKind::CliOnly,
+            PackageKind::CliWithDesktop,
+            PackageKind::DesktopWithCli,
+        ];
+        for k in all {
+            assert_eq!(PackageKind::from_key(k.key()), k, "{:?} 的键往返断了", k);
+            assert!(!k.label().is_empty());
+        }
+        // 认不出的键退成 Unknown（老库 / 未来版本写进来的那一行）
+        assert_eq!(PackageKind::from_key("nope"), PackageKind::Unknown);
+        assert_eq!(PackageKind::from_key(""), PackageKind::Unknown);
+        // 四句话必须各不相同：共用一句会让"连带桌面程序"这种要紧话
+        // 出现在"纯命令行"那一行上
+        let labels: std::collections::HashSet<&str> = all.iter().map(|k| k.label()).collect();
+        assert_eq!(labels.len(), 4, "四档的话不该有重复：{labels:?}");
     }
 }

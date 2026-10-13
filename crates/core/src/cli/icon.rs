@@ -153,18 +153,16 @@ pub fn ensure(pkg: &CliPackage, dir: &Path) -> Option<PathBuf> {
 ///
 /// 分两段：**与命令名同名的 exe** 在前，其余 `*.exe` 按路径排在后。
 /// 收成一颗独立函数是为了能单测顺序——**没量过顺序的搜索 = 谁先撞上算谁**。
-fn exe_candidates(pkg: &CliPackage) -> Vec<PathBuf> {
+///
+/// `pub(crate)` 是因为 [`crate::cli::desktop`] 要用同一趟走盘（"这颗包的 exe 在哪"
+/// 只允许有一个出处）；它**不**走共用安装目录——那一档由调用方自己按命令名取。
+pub(crate) fn exe_candidates(pkg: &CliPackage) -> Vec<PathBuf> {
     let Some(dir) = pkg.install_path.as_deref().map(Path::new) else {
         return Vec::new();
     };
     if !dir.is_dir() {
         return Vec::new();
     }
-    let wants: Vec<String> = pkg
-        .executables
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
 
     let mut matched = Vec::new();
     let mut others = Vec::new();
@@ -188,9 +186,9 @@ fn exe_candidates(pkg: &CliPackage) -> Vec<PathBuf> {
                 if depth < MAX_DEPTH && !SKIP_DIRS.contains(&name.as_str()) {
                     stack.push((entry.path(), depth + 1));
                 }
-            } else if let Some(stem) = name.strip_suffix(".exe") {
+            } else if name.ends_with(".exe") {
                 let path = entry.path();
-                if wants.iter().any(|w| w == stem) {
+                if matches_command(&path, &pkg.executables) {
                     matched.push(path);
                 } else {
                     others.push(path);
@@ -203,6 +201,24 @@ fn exe_candidates(pkg: &CliPackage) -> Vec<PathBuf> {
     others.sort();
     matched.extend(others);
     matched
+}
+
+/// 这颗 exe 的文件名词干是不是这颗包自报的某条命令（小写比，只去一层 `.exe`）。
+///
+/// **两个消费方**：挑图标候选（同名的排前）与 [`crate::cli::desktop`] 判
+/// "这支 GUI 主程序就是那条命令"。判据只写一份——各写一遍就会各漂一遍，
+/// 而两处给出的结论不一样时，界面会说"这颗包是纯命令行"、图标却从它那颗 exe 上取。
+pub(crate) fn matches_command(exe: &Path, executables: &[String]) -> bool {
+    let Some(stem) = exe
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .and_then(|n| n.strip_suffix(".exe").map(str::to_string))
+    else {
+        return false;
+    };
+    executables
+        .iter()
+        .any(|c| c.to_ascii_lowercase() == stem)
 }
 
 /// 一个 exe 的"这一版"指纹：路径 + 修改时间 + 大小。

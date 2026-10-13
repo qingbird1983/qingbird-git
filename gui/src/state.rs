@@ -1,4 +1,4 @@
-﻿//! 界面状态与纯逻辑：仓库视图、操作类别、对话框状态、分档口径。
+//! 界面状态与纯逻辑：仓库视图、操作类别、对话框状态、分档口径。
 //!
 //! `bucket_of` 是全站唯一的仓库分档口径——侧栏徽标、总览、⌘K 状态点
 //! 都从这儿取。别在别处另写一套判断。
@@ -19,6 +19,7 @@ use gpui_kit::component::text::TextViewState;
 use crate::tokens::UiScale;
 use gpui_kit::component::Theme;
 use gpui_kit::{AnyWindowHandle, Entity, FocusHandle, Hsla, ScrollHandle, SharedString, Task};
+use qingbird_core::cli::ProviderId;
 use qingbird_core::history::{CommitDetail, CommitPatch, CommitSummary};
 use qingbird_core::repos::{self, ActivityDay, ChangeEntry, LangStat};
 // ⚠️ **取别名而不是直接 `scan_cache`**：本 crate 自己也有一份 `scan_cache`
@@ -466,8 +467,11 @@ pub(crate) struct CliState {
     /// 它**不影响别的 provider 的结果**——一句话提示，不是"整屏没扫到"
     pub(crate) errors: Vec<String>,
     /// 每个 provider 分组展开没展开，下标同 `ProviderId::all()`
-    /// （`[scoop, npm, pipx]`）。默认全展开
-    pub(crate) group_open: [bool; 3],
+    /// （`winget / scoop / npm / pipx / cargo`）。默认全展开
+    ///
+    /// ⚠️ 长度**跟着 `ProviderId::all` 走**（它是 `const fn`）：加一台 provider
+    /// 时这里不用记得改。写死过 `3` 的地方，加完两台就会 `group_open[3]` 越界 panic
+    pub(crate) group_open: [bool; ProviderId::all().len()],
     /// 工具图标：包 id → 已经提到的那张 PNG 的绝对路径。
     ///
     /// **查不到这一条** = 这个工具没有自带图标（或者还没轮到它）⇒ 画终字符块
@@ -490,9 +494,9 @@ impl Default for CliState {
             scanning: false,
             scanned_at: 0,
             errors: Vec::new(),
-            // 默认全展开：**不是** `[false; 3]`——那会让首次进屏看到一列
+            // 默认全展开：**不是** `[false; …]`——那会让首次进屏看到一列
             // 折叠着的组标题，以为"扫到了但里面是空的"
-            group_open: [true; 3],
+            group_open: [true; ProviderId::all().len()],
             icons: HashMap::new(),
             shared: Vec::new(),
         }

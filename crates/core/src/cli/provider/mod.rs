@@ -4,13 +4,17 @@
 //! 界面侧用 `background_executor().spawn` 把 [`PackageProvider::list`] 包进线程，
 //! 与现有 git 操作编排同构。
 
+mod cargo;
 mod npm;
 mod pipx;
 mod scoop;
+mod winget;
 
+pub use cargo::Cargo;
 pub use npm::Npm;
 pub use pipx::Pipx;
 pub use scoop::Scoop;
+pub use winget::Winget;
 
 use std::time::Duration;
 
@@ -46,9 +50,28 @@ pub trait PackageProvider: Send + Sync {
     fn cache_dirs(&self) -> Vec<crate::cli::model::PackageDir> {
         Vec::new()
     }
+
+    /// 这个 provider 的 `install_path` 是不是**好几颗包共用**的目录。
+    ///
+    /// 默认 `false`：scoop / npm / pipx 的安装目录各自一格，里面出现的 exe 就是
+    /// 这颗包自己的。**cargo 覆写成 `true`**：它把所有 `cargo install` 出来的 exe
+    /// 都丢进同一个 `$CARGO_HOME\bin`，把整目录当"这颗包自己的"会让同目录里
+    /// 别人的 GUI 主程序算到**每一颗** cargo 包头上——而那是"卸载会带走一个桌面
+    /// 程序"这种会让用户卸错东西的误报（设计 §4 唯一不许犯的错）。
+    ///
+    /// 消费它的是 [`crate::cli::desktop`]
+    fn shared_install_dir(&self) -> bool {
+        false
+    }
 }
 
-/// 阶段一固定的三个 provider。
+/// 阶段二的五个 provider（顺序见 [`ProviderId::all`]）。
 pub fn providers() -> Vec<Box<dyn PackageProvider>> {
-    vec![Box::new(Scoop), Box::new(Npm), Box::new(Pipx)]
+    vec![
+        Box::new(Winget),
+        Box::new(Scoop),
+        Box::new(Npm),
+        Box::new(Pipx),
+        Box::new(Cargo),
+    ]
 }

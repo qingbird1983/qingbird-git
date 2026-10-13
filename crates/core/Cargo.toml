@@ -33,6 +33,12 @@ png = "0.17"
 # ⚠️ **不是新引入的编译单元**：`toml` 0.8 本来就在依赖树里
 # （`rust-i18n-support` → `rust-i18n-macro` → `gpui-component` 那条链），纯 Rust、无 build script。
 toml = "0.8"
+# winget 的 `list` **只有给人看的表格**（上游 `ListCommand` 没有 `--output`，
+# Issue #3051 还开着），切列位得按**显示宽度**算：winget 用 utf8proc 的
+# `UTF8ColumnWidth` 排表，一个汉字占**两列**——按字节或字符数切都会把 ID 切掉半个词。
+# ⚠️ **不是新引入的编译单元**：`unicode-width` 0.2 本来就在依赖树里
+# （gpui-component 那条链），纯 Rust、**无 build script**。
+unicode-width = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # CLI 工具图标提取（阶段二）多要四组绑定：

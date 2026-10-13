@@ -189,3 +189,125 @@
   体积真搬来了、路径与规则逐字一致；右栏底部共享缓存条五条齐全（npm 19.78 GB / pnpm 2.44 GB /
   cargo registry 3.78 GB / cargo git 8.1 MB / pip 40 KB）。⚠️ 帧是**人眼看的**，
   没配机器判据；截图与取证脚本在 `target/qb_dirs_evidence/`。
+
+**winget + cargo 两个 provider —— 2026-10-13（阶段二第三件之一）**
+
+**结论**：provider 从三个变五个：`ProviderId` 加 `Winget`（排最前）与 `Cargo`（排最后），
+`all()` 从 `[ProviderId; 3]` 变 `[ProviderId; 5]`（界面分组、包排序、扫描派发都读它）。
+cargo 读它自己的账本；winget 只能解析那张**给人看的表格**。
+
+**cargo（读盘，不起子进程）**：
+* `detect()` 只问 `$CARGO_HOME`（环境变量 → `%USERPROFILE%\.cargo`）下那两本账在不在——
+  `.crates2.json` 优先，`.crates.toml` 是 v1 老形态（两本都读得动，各有夹具）。
+  连 `where cargo` 都不起：账本在就说明这台机器 `cargo install` 过东西。
+* 键是 `<name> <version> (<source>)` **一整串** ⇒ 按**第一个** `" ("` 切掉源、再切名字与版本
+  （源里可以带空格：`(path+file:///C:/my project/x)`——这条有单测）。`bins` 是
+  `["cargo-audit.exe"]` ⇒ 只削一层 `.exe` 当命令名（`checked_sub(4)` 防下溢）。
+* `install_path` = `$CARGO_HOME\bin`，而它**是共用目录**（每颗 cargo 包的 exe 都躺在那儿）
+  ⇒ trait 上新增 `shared_install_dir()`（默认 false、cargo 覆写 true），消费方就是桌面关联：
+  它**不许**把这个目录当成"这颗包自己的目录"扫——否则同目录别人的 GUI 主程序会算到
+  每一颗 cargo 包头上（那正是设计 §4 说的"误报会让用户卸错东西"）。
+* 夹具是**本机真账本**（四颗：cargo-audit 0.22.2 / cargo-llvm-cov 0.8.7 /
+  cargo-tarpaulin 0.37.0 / resvg 0.47.0，只删掉 `rustc` 那段长文本），v1 那份逐字抄。
+
+**winget（解析表格——这条偏离设计稿 §6，登记在此）**：
+* ⛔ 设计稿写的 PowerShell `Get-WinGetPackage` **走不通**：那要一个本机没装的 PSGallery
+  模块（`Microsoft.WinGet.Client`，`Get-Module -ListAvailable` 零命中）。上游也核过：
+  `ListCommand.cpp` 的 `GetArguments()` **没有** `--output`/JSON 档（Issue #3051 还开着），
+  `ReportListResult` 直接走 `OutputInstalledPackagesTable` ⇒ **只有表格这一条路**。
+* 切法：拿表头各 token 的**显示列位**当切片起点（表头按同一 `MaxLength` 补过白），
+  **不按"两个以上空格"切**——空单元格会补出 `MaxLength + 1` 个空格，与列分隔分不开。
+  zh-CN / en-US 两套表头都认（文案从上游 `winget.resw` 核过：名称 / ID / 版本 / 可用 / 源）。
+* ⚠️ **沙箱里 winget 起不来**：`winget --version` 零输出、退出码 `-1978335231`
+  （`0x8A150001`，包内真身 exe 也一样）；**完全权限下跑得起来**（v1.29.380）
+  ⇒ 真 `winget list`（241 行 / 46 KB）拿回来当判据。三条只有真输出才看得出来的：
+  1. 238 行数据里**只有 103 行带「源」**，另外 135 行的 Id 长成 `ARP\Machine\X64\{GUID}`
+     ——那是卸载注册表里的记录，winget 说不出它属于哪个源 ⇒ **只收带源的那 103 行**。
+     代价是**少报**（MSI 装的 Node.js 正是 ARP 行）。**要不要放开由他拍。**
+  2. **同一个 Id 会出现两行**：本机微信 `XPFCKBRNFZQ62G` 的 4.1.15.13 与 3.9.12.55
+     两个 msstore 版本并存 ⇒ **去重留先打的那条**（`CliPackage::id` 是界面选中、图标缓存、
+     落库三处的键，重复会让后一行悄悄盖掉前一行）。103 行去重后 = **83 条**。
+  3. 顺带验了两个"应该没有"：整份输出 **0 个 VT 序列**、**0 个省略号**（重定向之后
+     winget 不画进度线；没有控制台 ⇒ 上游 `GetConsoleWidth()` 拿不到宽度 ⇒ 不截断）。
+     `strip_ansi` 与"不截断"这两条留着当兜底，本机数据里一次都没被用到。
+* ⚠️ **宽度表差一格：这是已知上界，不是容差**。winget 用 ICU 的 east-asian-width 排表，
+  Rust 侧 `unicode-width` 对少数表情符号形态的字符算 2 列、ICU 算 1 列 ⇒ 那种行整体错一位。
+  本机 238 行里这样的是 **2 行**，都是 winget 自己输出时就已经损坏的行（名字里带
+  替换字符那几个怪字），而且**恰好都是 ARP 行**、被上面第 1 条丢掉了 ⇒ 落到界面的 83 条是准的。
+  旁证是一条**独立**判据：按"行尾是不是 winget/msstore"数出的有源行 = 103，与按切片读
+  源格数出的 103 **逐行一致（不一致 0 行）**。真出现"带源的行被切歪"，判据会把它当认不出的
+  行**整趟报错**：宁可不出数，不给错数。
+* 这张表**没有命令列** ⇒ winget 那 83 条的 `executables` / `install_path` 都留空、
+  桌面关联恒 `Unknown`——不按包名猜（阶段三那两条要命令名/安装目录的路也自然没有证据）。
+
+**桌面关联（两个高置信信号里只落了 PE 子系统那一个）—— 2026-10-13（阶段二第三件之二）**
+
+**结论**：新增 `cli::desktop`（纯函数 `classify` + 读盘 `detect`），结果落 `CliPackage::kind`
+（`cli_packages.kind` 那一列早就在 ⇒ 零迁移），右栏详情卡多一行「桌面关联」。
+* **PE 判据**：`MZ` → `e_lfanew`（偏移 0x3C）→ `PE\0\0` → COFF 20 字节 → 可选头偏移 **68**
+  的那个 WORD，**2 = GUI / 3 = 控制台**。解析是纯函数（单测喂手写的头，不去盘上找夹具）；
+  不是 PE / 读不出来就是 `None`（`.cmd` 垫片走这一档）。
+* **两档怎么分**（分界是"那颗 GUI 程序是不是这条命令本身"）：与命令同名 ⇒
+  `DesktopWithCli`（`code.exe` 就是那条命令，它本质是桌面程序附带一个命令）；
+  另有别人 ⇒ `CliWithDesktop`（设计稿举的那对：Docker Desktop 与 docker CLI 同目录）。
+  **没目录也没命令** ⇒ `Unknown`（没证据不下结论）；看过目录且没有 GUI ⇒ `CliOnly`。
+* **共用目录只按命令名取自己那颗**（`join("<命令>.exe")`）、**不扫目录**——见上一条
+  `shared_install_dir()`。私有目录走**图标那一套走盘器**（深度 2、跳
+  `.git` / `node_modules` / `target`、4000 项上限）：同一个"这颗包的 exe 在哪"只有一个出处。
+* ⛔ **`.lnk` 那一路本轮缓做的理由（不是漏）**：`windows-sys 0.61.2` 的 `Win32_UI_Shell`
+  **只导出 `ShellLink` / `ShellLinkObject` 两个 CLSID 常量**，没有 `IShellLinkW` /
+  `IPersistFile` 的接口与 vtable（全仓 `IShellLink` / `CoCreateInstance` 零命中）。要补上
+  得在两条里选：① 引 `windows` crate（带接口定义，但是一整棵新编译树）；② 按 IDL 逐槽手搓
+  vtable（槽位错一格是**静静拿到别的函数的返回值**，错得看不出来）。**两条都不是顺手，
+  留给下一轮由他拍**——本轮不写靠猜的代码。少报的只是「命令行 + 桌面程序」那一句结论
+  （`CliOnly` 与 `Unknown` 两种落法都不骗人）。
+
+**判据（三件一起）**：core **302 条**全绿（cargo 6 组 + winget 6 条 + 桌面关联 6 条，
+夹具分别是本机真账本 / 真 `winget list` 里的行 / 手写的 PE 头与假世界——**没有一条把前提
+外包给环境**）；gui **148 条**全绿；`cargo check --workspace` 与
+`cargo test --workspace --no-run` 零警；`python scripts/check_design_tokens.py` 干净。
+**五条变异各自精确红、还原 sha 逐字节相同**（M1 桌面两档互换 / M2 PE 偏移 68→70 /
+M3 winget 不丢 ARP 行 / M4 winget 不去重 / M5 `icon::matches_command` 恒假）。
+⚠️ **M2 第一版没红，而它抓出的正是"一条测不出东西的测试"**：夹具 `fake_pe` 当时引用的是
+被验的那个常量 `SUBSYSTEM_AT`，改常量两侧一起挪 ⇒ 那一档五个用例全绿、看着还挺庄严。
+落法不是换个变异，是**把期望值挪出真源**：夹具改成手抄规范的 `4 + 20 + 68`，另加一条
+`the_subsystem_offset_comes_from_the_spec` 把 68 钉死；改完 M2 精确红在 5 个用例上。
+**界面帧（2026-10-13 抓的四张，在 `target/qb_cli_desktop_evidence/`）**：左栏三组同屏
+（`winget · 83` / `npm · 9` / `cargo · 4`，底栏 **96 个 CLI 工具** = 83+9+4，
+其中 winget 那 83 与真 `winget list` 解析出来的条数**逐数对得上**）；详情卡那一行实测三态——
+winget 那颗是「未确定」（这张表既没有命令列也没有安装目录 ⇒ **没有证据**，不是"判不出"），
+npm `@larksuite/cli` 与 cargo `cargo-llvm-cov` 都是「纯命令行」（后者走的是
+**共用目录只按 `<命令>.exe` 取自己那颗**那条分支）。全程 stderr 空（debug 构建的 panic
+落在那里），`AutomationElement` 把 a11y 树激活过也没撞同帧重复 id。
+**未验**：scoop / pipx 本机缺席（老账，没变）；**「含桌面程序」那两档没有真数据**——
+本机 83 + 9 + 4 颗全是控制台程序或没证据，那两档只有单测真值表与手写假世界覆盖；
+`.lnk` 信号没做。
+⚠️ **抓 CLI 屏的脚本要先删沙箱目录**（本轮白跑两次换来的）：CLI 列表的**滚动位置与
+选中项会跟着沙箱 `config.json` 留下**，第二次跑时"组头在 y=75"就不成立了，盲点坐标
+点到的是 winget 的别的行（v3 帧上选中的是 `OpenCode` / `usbipd-win`）。⇒ 每点一下
+抓一帧，坐标只按**本帧**量，别按上一次跑的量。
+
+**右栏两处版式缺陷（用户指着帧问出来的）—— 2026-10-14**
+
+**结论**：① 右栏「共享缓存」那一块从**灰盒 + 手写标题**改成**一张卡**
+（`widgets::card(t)` + `widgets::CardHeader`），内边距因此天然是**卡内边距**那一档、
+与上面那张白卡同源；② 详情卡与它之间原来垫着一颗 `div().flex_1()`（本意"把汇总条压到
+这一列底部"），**那块空白不是给阶段三预留的，是垫子撑出来的洞**，垫子已删；③ 这一列的
+块间距按 `docs/UI-DESIGN-v4.md` §3.2 的**卡间**那一档写（父容器 `.gap(px(GAP_TIGHT))`
+**一次**），不再用"两个不同东西"那一档。
+
+**为什么**：用户 2026-10-13 指着帧问「右边卡片中间缺的那块 是留给更新卸载之类的吗」+
+「共享缓存卡片 明显样式不对。文字排版太靠边 没有让出边留白」。量出来的根因不是观感：
+白卡内容左缘 x=**314**、那块灰盒左缘 x=**306**——差的 8px 正是"卡内边距"与
+"卡内盒那一档"两个档位的差（灰盒是**同级孩子**却用了卡内盒的档）。
+⇒ 判据收成一条：**同一列里的同级块要么都是卡、要么都是盒；是卡就走 `widgets::card`，
+不许手搓 `bg + rounded + p`**（`docs/UI-DESIGN-v4.md` §6 登记表第一行）。
+
+**连带**：阶段三的「升级 / 卸载…」两颗键按设计稿 §10.1 的线框图挂在**详情卡卡底**
+（数据目录盒之后），**不占那截空档**——"中间那块是不是预留"这个问题的答案是**不是**。
+
+**未做（用户 2026-10-14 叫停）**：CLI 屏**在 `docs/UI-DESIGN.md` 里没有版式的家**——
+那本的第 1–3 章只有仓库三页，CLI 屏从阶段一起就是照设计稿 §10.1 那张线框图直接落的码。
+用户要求"先把完整版面原型设计出来再动"⇒ 原型**没交付**（他随后让"把目前的工作提交、收尾"）。
+⇒ 下一轮若要接着做：先补 `docs/UI-DESIGN.md` 的 CLI 屏那一节（版面结构归那本），
+再照它改实现；本轮改完的版式**没有抓帧复验**（复抓那次扫描还没跑完，帧上是空态）。
