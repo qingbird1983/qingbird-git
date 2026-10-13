@@ -48,7 +48,7 @@ IMAGING = {"tray.rs", "build.rs"}
 
 # 轮询节奏不是"时长档"（ops.rs 每 120ms 读一次日志缓冲、tray.rs 扫托盘），
 # 把它们塞进 motion_tokens 才是错。⇒ 这两处放行，但**要写明理由**。
-POLL_OK = {"ops.rs", "tray.rs"}
+POLL_OK = {"ops.rs", "tray.rs", "self_update.rs"}
 
 # R5：拿文字冒充图标。历史上翻过车的字符都在这里。
 # R5：拿文字冒充图标。历史上翻过车的字符都在这里。

@@ -42,6 +42,7 @@ mod readme_tab;
 mod repo_head;
 mod scan_cache;
 mod scheduler;
+mod self_update;
 mod shell;
 mod sidebar;
 mod space_tab;

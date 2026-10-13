@@ -523,6 +523,9 @@ pub(crate) struct SettingsState {
     /// 本次打开期间"这把键被抢走了"的记录
     pub(crate) key_yielded: Vec<(String, String)>,
     pub(crate) error: Option<String>,
+    /// 自更新这条链的当前状态（Q44）。挂在 Shell 上、快照进这里——
+    /// 下载是几十秒的长活，状态跟着 Shell 不跟着弹窗，关掉重开进度还在
+    pub(crate) upd: crate::self_update::UpdFlow,
 }
 
 impl Shell {
@@ -551,6 +554,7 @@ impl Shell {
             key_focus: d.key_focus.clone(),
             key_yielded: d.key_yielded.clone(),
             error: d.error.clone(),
+            upd: self.upd.clone(),
         })
     }
 }
@@ -569,7 +573,10 @@ impl Shell {
 /// 说明才收（"留空即自动探测"这类）。**会改变行为的信息不收**——
 /// "这条即时生效、不用点保存"留在卡头当一枚**可见**的胶囊，正是这个道理。
 /// 判据：**这句话不看会不会导致用户做出他不想做的事**，会就不许进气泡
-struct SetCard {
+/// ⚠️ `pub(crate)`（2026-10-13 起）：自更新卡（`crate::self_update`）与
+/// 各页同住一个文件才是例外——它挂在「网络与通知」页里，用同一副卡壳。
+/// 字段保持私有：改卡的内容只能走 `new/note/live/info/build` 这五个口
+pub(crate) struct SetCard {
     title: String,
     /// 标题右边的一句附注（不是下面的说明段）——「显示哪些模块」那句
     /// "两类仓库各存一份"是这一档
@@ -579,7 +586,7 @@ struct SetCard {
 }
 
 impl SetCard {
-    fn new(title: &str) -> Self {
+    pub(crate) fn new(title: &str) -> Self {
         Self {
             title: title.to_string(),
             note: None,
@@ -591,14 +598,14 @@ impl SetCard {
     /// 标题右边的一句附注。收 `impl Into<String>` 而不是 `&str`：
     /// 「代理」那一段挂的是**探测结果**（一个 `String`），为它再开一个
     /// `note_string()` 就是同一件事两个入口
-    fn note(mut self, text: impl Into<String>) -> Self {
+    pub(crate) fn note(mut self, text: impl Into<String>) -> Self {
         self.note = Some(text.into());
         self
     }
 
     /// 卡头右上那枚「即时生效」。**只有真即时生效的段才许挂**——
     /// 挂错段等于骗用户"不用点保存"，而那一格的值不点保存就真的丢
-    fn live(mut self) -> Self {
+    pub(crate) fn live(mut self) -> Self {
         self.live = true;
         self
     }
@@ -606,7 +613,7 @@ impl SetCard {
     /// 卡头右上的 ⓘ 气泡。`id` 单独给是因为它是 `ElementId`：
     /// **一帧里两颗同 id 的按钮在 debug 下直接 panic**（D61），
     /// 所以 id 必须逐段不同，不能图省事都写 `"set-info"`
-    fn info(mut self, id: &'static str, text: &str) -> Self {
+    pub(crate) fn info(mut self, id: &'static str, text: &str) -> Self {
         self.info = Some((id, text.to_string()));
         self
     }
@@ -616,7 +623,7 @@ impl SetCard {
     /// 它不是 `FormRows` 那种"左标签 + 右控件"的结构，为它另开一个
     /// `build_body()` 就是同一件事两个入口（D89 那一族）。
     /// 传 `FormRows::new().row(..).build(t)` 与传一个 `h_flex` 走同一条路
-    fn build(self, t: &Theme, gv: ButtonCustomVariant, content: impl IntoElement) -> Div {
+    pub(crate) fn build(self, t: &Theme, gv: ButtonCustomVariant, content: impl IntoElement) -> Div {
         let mut hdr = CardHeader::new(self.title);
         if let Some(n) = self.note {
             hdr = hdr.note(n, false);
@@ -796,9 +803,10 @@ fn set_nav(t: &Theme, st: &SettingsState, this: &Entity<Shell>) -> impl IntoElem
 ///    两句语义无关的话并排会互相稀释；
 /// ③ 检视抽屉右列是「AI 助理面板 · 开发中」，**硬约束不许塞东西**（路线表 Q 段那条）。
 ///
-/// ⚠️ **`env!("CARGO_PKG_VERSION")` 全仓库只许出现在这一颗函数里**。
+/// ⚠️ **`env!("CARGO_PKG_VERSION")` 全仓库只许出现在一处**（32-13）。
 /// 32-13 之前版本号手写三处、"只改一两处不会有任何报错"；收成单源之后，
-/// 这里是显示侧。第二次出现就是第二个会漂的出处。
+/// 这里是显示侧。2026-10-13 起那一处移进 `crate::self_update::current_version()`——
+/// 自更新要比对版本，不能显示用一个数、比对用另一个数。
 /// 单测 `the_version_on_screen_is_the_one_in_the_workspace_toml` 把它钉成运行期断言
 fn app_version_line(t: &Theme) -> Div {
     v_flex()
@@ -818,9 +826,11 @@ fn app_version_line(t: &Theme) -> Div {
         )
 }
 
-/// 「版本 0.1.0」那一句。**纯函数**，不碰主题也不碰 `Shell`
+/// 「版本 0.1.0」那一句。**纯函数**，不碰主题也不碰 `Shell`。
+/// 版本号本体在 `crate::self_update::current_version()`（32-13 的单源，
+/// 自更新要拿它比对版本，收成纯函数让显示与比对同吃一个数）
 pub(crate) fn version_text() -> String {
-    format!("版本 {}", env!("CARGO_PKG_VERSION"))
+    format!("版本 {}", crate::self_update::current_version())
 }
 
 /// 右侧内容。**只有当前那一页**
@@ -1025,6 +1035,9 @@ fn network_page(
                     .build(t),
                 ),
         )
+        // 软件更新（Q44）：检查 → 应用内下载 → 拉起安装器。渲染与动作在
+        // `crate::self_update`，这里只负责把它摆进「网络与通知」页
+        .child(crate::self_update::update_card(t, st, this, gv))
 }
 
 fn display_page(t: &Theme, st: &SettingsState, this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {

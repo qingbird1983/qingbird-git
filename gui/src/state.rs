@@ -1009,6 +1009,9 @@ pub(crate) struct Shell {
     pub(crate) cmd_dlg: Option<CmdDialog>,
     /// 设置对话框；None = 未打开。导航轨那颗齿轮与 ⌘K「设置」共用这一个入口
     pub(crate) settings_dlg: Option<SettingsDialog>,
+    /// 软件自更新这条链的状态（Q44）。**挂在 Shell 上不挂在设置弹窗上**：
+    /// 下载是几十秒的长活，弹窗关了下载照走、重开进度还在
+    pub(crate) upd: crate::self_update::UpdFlow,
     /// 「同步设置」页签正在编辑的档位与开关。**存草稿而不是直接改配置**：
     /// 这一页有三项，挨个点一下存一次会让"取消"变成假的——用户撤销不了
     pub(crate) sync_cfg: SyncCfg,

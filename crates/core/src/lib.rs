@@ -23,3 +23,4 @@ pub mod stash;
 pub mod store;
 pub mod sync;
 pub mod types;
+pub mod update;

@@ -1430,6 +1430,7 @@ impl Shell {
             clone_dlg: None,
             cmd_dlg: None,
             settings_dlg: None,
+            upd: Default::default(),
             sync_cfg,
             palette,
             palette_actions: Vec::new(),
