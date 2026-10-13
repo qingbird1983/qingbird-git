@@ -7,7 +7,7 @@
 - **真闸** —— 判据不过就非零；括号里点名的就是它 `sys.exit` / `raise SystemExit` 之前打印的那一句。
 - **只报告，不拦任何东西** —— 判据本身不接退出码；凡非零出口**只覆盖"跑不起来 / 用法错"**（找不到窗口、参数不足、assert 前提）的，一律归到这里，并在括号里点明那个非零出口。
 
-命令行一律在仓库根执行。共 35 个文件 = 34 个 `.py` + 1 个 `.ps1`。
+命令行一律在仓库根执行。共 37 个文件 = 36 个 `.py` + 1 个 `.ps1`。
 
 ---
 
@@ -53,6 +53,8 @@
 | `close_probe.py` | 阶段 22 专用探针：`PostMessageW` 发 WM_CLOSE，看关窗三档真怎么走 | 先 `$env:QB_APPDATA="$env:TEMP\qb_close"`（不设就打印「`!! 没设 QB_APPDATA —— 会碰到真实配置，先停下`」`return 2`），再 `python scripts/close_probe.py <ask\|remember-tray\|remember-exit\|plain-tray\|cancel\|tray\|exit>` | **只报告，不拦任何东西（非零只在没设沙箱 / 没找到窗口）**：结论（窗口在 / 进程在 / `config.close_action` / 该不该弹面板）只打印「[1]…[4]」 |
 | `tray_icon_query.py` | 用 `Shell_NotifyIconGetRect` 问系统托盘图标在不在、在哪（老式 hWnd + uID 身份，uID 是进程内自增，扫 0..7） | 先设 `QB_APPDATA`，`python scripts/tray_icon_query.py <exe> <out.png> [uID...]` | **只报告，不拦任何东西（唯一非零出口是缺参数）**：没有 `tray_icon_app` 窗口时打印「→ 托盘 crate 连隐藏窗口都没建起来，图标必然不在托盘里」后 `return` |
 | `tray_icon_check.py` | 折叠面板开 / 关各拍一张求差，找出「有应用才多出来的那一格」 | 先设 `QB_APPDATA`，`python scripts/tray_icon_check.py <exe> <out.png> <before.png> <after.png>` | **只报告，不拦任何东西（非零只在跑不起来）**：「找不到 `TrayNotifyWnd`」/ 缺参数 / 两次点不开折叠面板各 `raise SystemExit`；两张一样时只打印「→ 完全一样：托盘里没多出任何图标」后 `return` |
+| `p2_dlg_shots.py` | 把 10 个开得起来的对话框逐个走进去（a11y 名字定位）各抓一帧，两套逐帧 diff——合并「实机看得见的地方」（底栏 / 开壳 / 按钮链）前后的像素复验；抓不到的两个（⌘K 入口、要打字的向导）在 docstring 里如实登记并改走代码级论证；**docstring 里有判读口径**：列弹簧 1px 相位漂移会产生 43k/82k/127k 三档假差异，先量分割线 x 同相位再 diff | `python scripts/p2_dlg_shots.py <tag>`（抓一套到 `target/p2_frames_<tag>/`；另有 `diff` 子命令比 before/after；沙箱 `QB_APPDATA` + qbguard 收尾指纹） | **真闸**：任一走查步骤断言失败（入口键不在树里 / 主键没出现 / 关闭后主键还在 / 指纹变了）即抛异常非零；像素 diff 本身只打印，归因靠 docstring 的判读口径 |
+| `probe_window_geometry.py` | 连续启动两次记录窗口矩形 / 客户区 / DPI / 监视器，证明帧差异**不在几何层**（2026-10-13 实测：(752,202) 1919×820 逐运行恒定，1px 漂移在 app 内部分数布局的弹簧相位里） | `python scripts/probe_window_geometry.py <tag1> [tag2...]`（每 tag 启动一轮；沙箱同 qbguard） | **只报告，不拦任何东西（唯一非零出口是跑不起来）**：每轮打几何快照，结论只打印 |
 
 ## 5. 启动冒烟与偶发红
 

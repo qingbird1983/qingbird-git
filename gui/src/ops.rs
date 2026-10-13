@@ -7,7 +7,7 @@
 // 混在同一屏里一眼就能看出不一致。
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::WindowExt;
-use gpui_kit::{AppContext, Context, SharedString, Window};
+use gpui_kit::{AppContext, Context, SharedString, Task, Window};
 use qingbird_core::fork;
 use qingbird_core::git;
 use qingbird_core::purge;
@@ -18,7 +18,7 @@ use qingbird_core::space;
 use qingbird_core::stash;
 use qingbird_core::store;
 use qingbird_core::sync;
-use qingbird_core::types::ProgressEvent;
+use qingbird_core::types::{OpResult, ProgressEvent};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,6 +58,102 @@ enum LogEvent {
         detail: String,
         percent: Option<f32>,
     },
+}
+
+/// UI 线程那条轮询：每 `PROGRESS_POLL` 把共享缓冲里的新行搬进日志状态，
+/// 后台置 `done` 之后搬完最后一批就退。
+///
+/// **它是"什么时候能看到进度"的唯一出路**：轮询这一轮与收尾那一次都走这一颗
+/// ——2026-10-10 那条缺陷（进度条滑、文字停在「准备中…」、百分比与网速一个都
+/// 上不了屏）就是只有第二条路径。`run_slot` 与 `run_sync` 两条链共用它：
+/// 那两段原来是**逐字相同的两份**（审查台账 §1 第三条，pwsh 逐行 `-ceq`
+/// 实测 identical=True），判据（空 stage 不清、空 detail 不清）因此也只有这一份
+fn drain_log_until_done(
+    cx: &mut Context<Shell>,
+    buf: &Arc<Mutex<Vec<LogEvent>>>,
+    done: &Arc<AtomicBool>,
+    path: &str,
+) {
+    let ui_buf = Arc::clone(buf);
+    let ui_done = Arc::clone(done);
+    let ui_path = path.to_string();
+    cx.spawn(async move |this, cx| loop {
+        cx.background_executor().timer(PROGRESS_POLL).await;
+        let batch = {
+            let mut g = ui_buf.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *g)
+        };
+        let finished = ui_done.load(Ordering::SeqCst);
+        this.update(cx, |this, cx| {
+            let lg = this.log_of(&ui_path);
+            for ev in batch {
+                match ev {
+                    LogEvent::Line(l) => lg.lines.push(l),
+                    LogEvent::Stage {
+                        stage,
+                        detail,
+                        percent,
+                    } => {
+                        // 空 stage = core 没认出这一行（只有 git 原文），
+                        // 不该把上一次认出来的阶段冲掉。`clone.rs` 的
+                        // `drain_into` 早就是这么判的（那里有注释），
+                        // 同一条链上两处判据得一样
+                        if !stage.is_empty() {
+                            lg.stage = Some(stage);
+                        }
+                        // 网速同理：`done.` / 纯计数行没有速度信息，
+                        // 让它们把上一条的网速清掉 ⇒ 数字在闪
+                        if !detail.is_empty() {
+                            lg.detail = detail;
+                        }
+                        lg.percent = percent;
+                    }
+                }
+            }
+            if finished {
+                lg.running = false;
+            }
+            cx.notify();
+        })
+        .ok();
+        if finished {
+            break;
+        }
+    })
+    .detach();
+}
+
+/// 后台任务收尾的那一程：等 `runner` 的结果，在 UI 线程上**先写结论**
+/// （`verdict` 由调用方给），再走每条链都一样的收尾。
+///
+/// 两种操作的结论长相不同（`run_slot` 只有成败一句；`run_sync` 还有 ✓/✗ 行、
+/// `used_proxy`、拉回了什么、`op_history` 与分叉态），但**结论之后要做的事**
+/// 一模一样：停 `running`、清 `percent` 与 `detail`、重扫仓库、刷新状态。
+/// 那一截以前在两处各抄一遍（台账 §1 第三条），而它是"收尾"的唯一住处——
+/// 以后结束时要多做什么，改这里一处就够
+fn settle_after<R: 'static>(
+    cx: &mut Context<Shell>,
+    runner: Task<R>,
+    path: String,
+    verdict: impl FnOnce(&mut Shell, &mut Context<Shell>, R) + 'static,
+) {
+    cx.spawn(async move |this, cx| {
+        let result = runner.await;
+        this.update(cx, |this, cx| {
+            verdict(this, cx, result);
+            let lg = this.log_of(&path);
+            lg.running = false;
+            lg.percent = None;
+            // 网速跟着 percent 一起收：留着就是一句已经过时的谎话
+            lg.detail.clear();
+            // 跑完仓库状态可能变了（拉取/推送/变基改 ahead/behind、命令生成
+            // 构建产物或改文件），重扫一遍刷新侧栏与徽章
+            this.repos = repos::list_repos();
+            this.refresh_status(cx);
+        })
+        .ok();
+    })
+    .detach();
 }
 
 impl Shell {
@@ -117,76 +213,18 @@ impl Shell {
             r
         });
 
-        let ui_buf = Arc::clone(&buf);
-        let ui_done = Arc::clone(&done);
-        let ui_path = path.clone();
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(PROGRESS_POLL).await;
-            let batch = {
-                let mut g = ui_buf.lock().unwrap_or_else(|e| e.into_inner());
-                std::mem::take(&mut *g)
-            };
-            let finished = ui_done.load(Ordering::SeqCst);
-            this.update(cx, |this, cx| {
-                let lg = this.log_of(&ui_path);
-                for ev in batch {
-                    match ev {
-                        LogEvent::Line(l) => lg.lines.push(l),
-                        LogEvent::Stage {
-                            stage,
-                            detail,
-                            percent,
-                        } => {
-                            // 空 stage = core 没认出这一行（只有 git 原文），
-                            // 不该把上一次认出来的阶段冲掉。`clone.rs` 的
-                            // `drain_into` 早就是这么判的（那里有注释），
-                            // 同一条链上两处判据得一样
-                            if !stage.is_empty() {
-                                lg.stage = Some(stage);
-                            }
-                            // 网速同理：`done.` / 纯计数行没有速度信息，
-                            // 让它们把上一条的网速清掉 ⇒ 数字在闪
-                            if !detail.is_empty() {
-                                lg.detail = detail;
-                            }
-                            lg.percent = percent;
-                        }
-                    }
+        drain_log_until_done(cx, &buf, &done, &path);
+        let fin_path = path.clone();
+        settle_after(cx, runner, fin_path.clone(), move |this, _cx, result| {
+            let lg = this.log_of(&fin_path);
+            match result {
+                Ok(_) => {
+                    lg.error = None;
+                    lg.verdict = Some((true, format!("{} 已完成", slot.default_label())));
                 }
-                if finished {
-                    lg.running = false;
-                }
-                cx.notify();
-            })
-            .ok();
-            if finished {
-                break;
+                Err(e) => lg.error = Some(e),
             }
-        })
-        .detach();
-
-        cx.spawn(async move |this, cx| {
-            let result = runner.await;
-            let fin_path = path.clone();
-            this.update(cx, |this, cx| {
-                let lg = this.log_of(&fin_path);
-                match result {
-                    Ok(_) => {
-                        lg.error = None;
-                        lg.verdict = Some((true, format!("{} 已完成", slot.default_label())));
-                    }
-                    Err(e) => lg.error = Some(e),
-                }
-                lg.running = false;
-                lg.percent = None;
-                lg.detail.clear();
-                // 命令跑完仓库状态可能变了（生成了构建产物、改了文件），顺手重扫
-                this.repos = repos::list_repos();
-                this.refresh_status(cx);
-            })
-            .ok();
-        })
-        .detach();
+        });
     }
 }
 
@@ -258,108 +296,49 @@ impl Shell {
             r
         });
 
-        let ui_buf = Arc::clone(&buf);
-        let ui_done = Arc::clone(&done);
-        let ui_path = path.clone();
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(PROGRESS_POLL).await;
-            let batch = {
-                let mut g = ui_buf.lock().unwrap_or_else(|e| e.into_inner());
-                std::mem::take(&mut *g)
-            };
-            let finished = ui_done.load(Ordering::SeqCst);
-            this.update(cx, |this, cx| {
-                let lg = this.log_of(&ui_path);
-                for ev in batch {
-                    match ev {
-                        LogEvent::Line(l) => lg.lines.push(l),
-                        LogEvent::Stage {
-                            stage,
-                            detail,
-                            percent,
-                        } => {
-                            // 空 stage = core 没认出这一行（只有 git 原文），
-                            // 不该把上一次认出来的阶段冲掉。`clone.rs` 的
-                            // `drain_into` 早就是这么判的（那里有注释），
-                            // 同一条链上两处判据得一样
-                            if !stage.is_empty() {
-                                lg.stage = Some(stage);
-                            }
-                            // 网速同理：`done.` / 纯计数行没有速度信息，
-                            // 让它们把上一条的网速清掉 ⇒ 数字在闪
-                            if !detail.is_empty() {
-                                lg.detail = detail;
-                            }
-                            lg.percent = percent;
-                        }
-                    }
-                }
-                if finished {
-                    lg.running = false;
-                }
-                cx.notify();
-            })
-            .ok();
-            if finished {
-                break;
+        drain_log_until_done(cx, &buf, &done, &path);
+        let fin_path = path.clone();
+        settle_after(cx, runner, fin_path.clone(), move |this, _cx, result: OpResult| {
+            {
+                let lg = this.log_of(&fin_path);
+                lg.lines.push(if result.ok {
+                    format!("✓ {}", result.message)
+                } else {
+                    format!("✗ {}", result.message)
+                });
+                lg.verdict = Some((result.ok, result.message.clone()));
+                lg.used_proxy = result.used_proxy.clone();
+                // **这次拉回来什么**（提交数 / 增删行 / 文件数）。
+                // core 在 `sync::pull_changes` 里算好、填进 `OpResult.changes`，
+                // 而这一层以前**从来没读过那个字段**（D73 那一族：断点在字段声明
+                // 与收尾这几行里，不在逻辑里——`cargo check` 零错、core 单测全绿、
+                // 界面只是答不出"改了啥"）。
+                // 只在成功时留：失败那几条路径上 core 填的就是 `None`，
+                // 这里再判一次是防以后有人给失败分支补上 changes
+                lg.pulled = if result.ok { result.changes.clone() } else { None };
+                lg.pull_open = false;
             }
-        })
-        .detach();
-
-        cx.spawn(async move |this, cx| {
-            let result = runner.await;
-            let fin_path = path.clone();
-            this.update(cx, |this, cx| {
-                {
-                    let lg = this.log_of(&fin_path);
-                    lg.lines.push(if result.ok {
-                        format!("✓ {}", result.message)
-                    } else {
-                        format!("✗ {}", result.message)
-                    });
-                    lg.verdict = Some((result.ok, result.message.clone()));
-                    lg.used_proxy = result.used_proxy.clone();
-                    lg.running = false;
-                    lg.percent = None;
-                    // 网速跟着 percent 一起收：留着就是一句已经过时的谎话
-                    lg.detail.clear();
-                    // **这次拉回来什么**（提交数 / 增删行 / 文件数）。
-                    // core 在 `sync::pull_changes` 里算好、填进 `OpResult.changes`，
-                    // 而这一层以前**从来没读过那个字段**（D73 那一族：断点在字段声明
-                    // 与收尾这几行里，不在逻辑里——`cargo check` 零错、core 单测全绿、
-                    // 界面只是答不出"改了啥"）。
-                    // 只在成功时留：失败那几条路径上 core 填的就是 `None`，
-                    // 这里再判一次是防以后有人给失败分支补上 changes
-                    lg.pulled = if result.ok { result.changes.clone() } else { None };
-                    lg.pull_open = false;
+            // **落进 `op_history`（阶段 16）**：这一句是**跨会话**的。
+            // 没有它的话重启一次，日志卡就写「还没有操作记录」——
+            // 而昨天明明拉取过。用户问「这仓库上次更新了什么」，
+            // 答得出来的地方只有这里
+            this.record_op(&fin_path, op, result.ok, &result.message);
+            // 变基改写了历史：接住后端算好的分叉信息与备份分支。
+            // 备份分支只在变基成功那一刻提供"撤销"；撤销完成后不再提供
+            match op {
+                Op::Rebase(_) => {
+                    this.fork = result.fork;
+                    this.fork_backup = result.backup_branch.filter(|_| result.ok);
+                    this.fork_confirm = false;
                 }
-                // **落进 `op_history`（阶段 16）**：这一句是**跨会话**的。
-                // 没有它的话重启一次，日志卡就写「还没有操作记录」——
-                // 而昨天明明拉取过。用户问「这仓库上次更新了什么」，
-                // 答得出来的地方只有这里
-                this.record_op(&fin_path, op, result.ok, &result.message);
-                // 变基改写了历史：接住后端算好的分叉信息与备份分支。
-                // 备份分支只在变基成功那一刻提供"撤销"；撤销完成后不再提供
-                match op {
-                    Op::Rebase(_) => {
-                        this.fork = result.fork;
-                        this.fork_backup = result.backup_branch.filter(|_| result.ok);
-                        this.fork_confirm = false;
-                    }
-                    Op::UndoRebase => {
-                        this.fork = result.fork;
-                        this.fork_backup = None;
-                        this.fork_confirm = false;
-                    }
-                    _ => {}
+                Op::UndoRebase => {
+                    this.fork = result.fork;
+                    this.fork_backup = None;
+                    this.fork_confirm = false;
                 }
-                // 拉取/推送/变基都会改 ahead/behind，重扫一遍刷新侧栏与徽章
-                this.repos = repos::list_repos();
-                this.refresh_status(cx);
-            })
-            .ok();
-        })
-        .detach();
+                _ => {}
+            }
+        });
     }
 }
 

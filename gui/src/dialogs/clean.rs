@@ -24,6 +24,7 @@ use gpui_kit::{
 };
 use qingbird_core::space;
 
+use super::{dlg_cancel, footer, shell};
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::{ghost_variant, meta_text};
@@ -66,21 +67,21 @@ impl Shell {
         let total: u64 = items.iter().map(|(_, b)| *b).sum();
         let count = items.len();
 
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let t = cx.theme().clone();
-            dialog
-                .title("清理构建缓存")
-                .content({
-                    let t = t.clone();
-                    // `content` 闭包是 `Fn` 不是 `FnOnce`，每帧重画一次——
-                    // 所以 `items` 只能**借**，不能 move 出去
-                    let items = items.clone();
-                    move |c: DialogContent, _w, _cx: &mut App| {
-                        c.child(clean_body(&t, &items, total))
-                    }
-                })
-                .footer(clean_footer(&this, &path, count, ghost_variant(cx)))
-        });
+        shell(
+            window,
+            cx,
+            |_| "清理构建缓存".into(),
+            None,
+            {
+                // content 闭包是 `Fn` 不是 `FnOnce`，每帧重画一次——
+                // 所以 `items` 只能**借**，不能 move 出去
+                let items = items.clone();
+                move |c: DialogContent, _w, cx: &mut App| {
+                    c.child(clean_body(&cx.theme().clone(), &items, total))
+                }
+            },
+            move |cx| clean_footer(&this, &path, count, ghost_variant(cx)),
+        );
     }
 }
 
@@ -172,23 +173,18 @@ fn clean_body(t: &Theme, items: &[(String, u64)], total: u64) -> Div {
 /// **确认键用 danger 而不是 primary**：这是一个不可逆、代价高的动作，
 /// 放在主色按钮上等于在鼓励用户点它
 fn clean_footer(this: &Entity<Shell>, path: &str, count: usize, gv: ButtonCustomVariant) -> Div {
-    let cancel = this.clone();
     let go = this.clone();
     let p = path.to_string();
-    h_flex()
-        .w_full()
-        .justify_end()
-        .gap(px(GAP))
-        .child(
-            Button::new("clean-cancel")
-                .label("取消")
-                .custom(gv)
-                .on_click(move |_, window, cx| {
-                    cancel.update(cx, |shell, _| shell.clean_dlg = None);
-                    window.close_dialog(cx);
-                }),
-        )
-        .child(
+    footer(
+        None,
+        [
+            dlg_cancel(
+                "clean-cancel",
+                "取消",
+                this,
+                |shell, _| shell.clean_dlg = None,
+                gv,
+            ),
             Button::new("clean-go")
                 .label(format!("删除这 {count} 个目录"))
                 .danger()
@@ -199,5 +195,6 @@ fn clean_footer(this: &Entity<Shell>, path: &str, count: usize, gv: ButtonCustom
                     // 进度与结论都在日志区和状态条上
                     window.close_dialog(cx);
                 }),
-        )
+        ],
+    )
 }

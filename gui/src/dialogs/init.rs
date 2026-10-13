@@ -17,6 +17,7 @@ use gpui_kit::{
 use qingbird_core::repos::{self};
 use qingbird_core::run_cmd::{self};
 
+use super::{dlg_cancel, footer};
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::list_box;
@@ -137,28 +138,20 @@ pub(crate) fn init_body(
 
 /// 初始化向导底栏：取消 / 初始化（跑起来时按钮转圈）
 pub(crate) fn init_footer(init: &InitState, this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
-    h_flex()
-        .w_full()
-        .justify_end()
-        .items_center()
-        .gap(px(GAP))
-        .child(
-            Button::new("init-cancel")
-                .label("取消")
-                .custom(gv)
-                .disabled(init.working)
-                .on_click({
-                    let this = this.clone();
-                    move |_, window, cx| {
-                        this.update(cx, |this, cx| {
-                            this.dlg = None;
-                            cx.notify();
-                        });
-                        window.close_dialog(cx);
-                    }
-                }),
-        )
-        .child(
+    footer(
+        None,
+        [
+            dlg_cancel(
+                "init-cancel",
+                "取消",
+                this,
+                |shell, cx| {
+                    shell.dlg = None;
+                    cx.notify();
+                },
+                gv,
+            )
+            .disabled(init.working),
             Button::new("init-go")
                 .label("初始化")
                 .primary()
@@ -169,7 +162,8 @@ pub(crate) fn init_footer(init: &InitState, this: &Entity<Shell>, gv: ButtonCust
                         this.update(cx, |this, cx| this.run_init(cx));
                     }
                 }),
-        )
+        ],
+    )
 }
 
 impl Shell {

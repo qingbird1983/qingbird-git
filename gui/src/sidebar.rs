@@ -8,7 +8,7 @@
 // 混在同一屏里一眼就能看出不一致。
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::component::separator::Separator;
@@ -307,21 +307,16 @@ impl Shell {
                         .gap(px(GAP_TIGHT))
                         .items_center()
                         .child(
-                            Button::new("side-filter-toggle")
-                                .icon(icon_sm(AssetIcon::ListFilter).text_color(tier4(&t)))
-                                .custom(ghost_variant(cx))
-                                .selected(filter_open)
-                                // 与导航轨三颗切屏键**同一个**选中面（D60）：同类
-                                // —— 都是 ghost 图标按钮的选中态。官方 ghost 选中的底
-                                // 走 `button.active.background`，theme.json 没配、落基座
-                                // 兜底的深灰。理由见 tokens.rs。
-                                .when(filter_open, |b| b.bg(wash(&t)))
-                                .with_size(Size::Small)
-                                .tooltip("筛选仓库")
-                                .accessibility_label("筛选仓库")
+                            ghost_btn(
+                                "side-filter-toggle",
+                                AssetIcon::ListFilter,
+                                tier4(&t),
+                                Size::Small,
+                                "筛选仓库",
+                                cx,
                                 // 点击走 `update`：那时**不在渲染期**，
                                 // 拿得到锁（`on_click` 是独立的事件回调）
-                                .on_click({
+                                {
                                     let ent = ent.clone();
                                     move |_, _, cx| {
                                         ent.update(cx, |this, cx| {
@@ -329,7 +324,14 @@ impl Shell {
                                             cx.notify();
                                         });
                                     }
-                                }),
+                                },
+                            )
+                            .selected(filter_open)
+                            // 与导航轨三颗切屏键**同一个**选中面（D60）：同类
+                            // —— 都是 ghost 图标按钮的选中态。官方 ghost 选中的底
+                            // 走 `button.active.background`，theme.json 没配、落基座
+                            // 兜底的深灰。理由见 tokens.rs。
+                            .when(filter_open, |b| b.bg(wash(&t))),
                         )
                         .child(
                             icon_sm(AssetIcon::ChevronRight)

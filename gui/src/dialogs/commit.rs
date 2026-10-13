@@ -8,7 +8,7 @@
 //! 链路，代理回退与凭证注入都在里面，界面不自己拼 git 子进程。
 
 use gpui_kit::component::button::ButtonCustomVariant;
-use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::base::v_flex;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::DialogContent;
@@ -21,6 +21,7 @@ use gpui_kit::{
 };
 use qingbird_core::repos::ChangeEntry;
 
+use super::{dlg_cancel, footer, shell};
 use crate::changes::changes_list;
 use crate::state::*;
 use crate::widgets::{ghost_variant, sunken_box};
@@ -92,32 +93,30 @@ impl Shell {
 impl Shell {
     /// 对话框本体（官方 Dialog）。Shell 只提供状态。
     ///
-    /// `content` 的闭包每帧重画，所以状态每帧从 `Entity<Shell>` 读；
-    /// `footer` 是**一次性元素**（官方签名就是 `impl IntoElement`），
-    /// 里面的按钮靠 `Entity` 回写，禁用态不随重画变——对话框提交期间
-    /// 不关（失败要留在原地看输出），转圈由日志区与结论行承担
+    /// ⚠️ **整个 builder 每帧重跑**（`dialogs::shell` 的头注释有出处）：
+    /// content 与 footer 都是每帧新的，状态每帧从 `Entity<Shell>` 读。
+    /// 提交期间对话框不关（失败要留在原地看输出），转圈由日志区与结论行承担
     fn build_commit_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
         let (path, message) = match self.commit_dlg.as_ref() {
             Some(d) => (d.path.clone(), d.message.clone()),
             None => return,
         };
-
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let t = cx.theme().clone();
-            dialog
-                .title("提交并推送")
-                .content({
-                    let t = t.clone();
-                    let this = this.clone();
-                    let message = message.clone();
-                    move |c: DialogContent, _w, cx: &mut App| {
-                        let st = this.read(cx).commit_state();
-                        c.child(commit_body(&t, &st, &message, &this))
-                    }
-                })
-                .footer(commit_footer(&this, &path, &message, ghost_variant(cx)))
-        });
+        shell(
+            window,
+            cx,
+            |_| "提交并推送".into(),
+            None,
+            {
+                let this = this.clone();
+                let message = message.clone();
+                move |c: DialogContent, _w, cx: &mut App| {
+                    let st = this.read(cx).commit_state();
+                    c.child(commit_body(&cx.theme().clone(), &st, &message, &this))
+                }
+            },
+            move |cx| commit_footer(&this, &path, &message, ghost_variant(cx)),
+        );
     }
 }
 
@@ -230,24 +229,19 @@ fn commit_body(
 }
 
 fn commit_footer(this: &Entity<Shell>, path: &str, message: &Entity<InputState>, gv: ButtonCustomVariant) -> Div {
-    let cancel = this.clone();
     let go = this.clone();
     let p = path.to_string();
     let msg = message.clone();
-    h_flex()
-        .w_full()
-        .justify_end()
-        .gap(px(GAP))
-        .child(
-            Button::new("commit-cancel")
-                .label("取消")
-                .custom(gv)
-                .on_click(move |_, window, cx| {
-                    cancel.update(cx, |shell, _| shell.commit_dlg = None);
-                    window.close_dialog(cx);
-                }),
-        )
-        .child(
+    footer(
+        None,
+        [
+            dlg_cancel(
+                "commit-cancel",
+                "取消",
+                this,
+                |shell, _| shell.commit_dlg = None,
+                gv,
+            ),
             Button::new("commit-go")
                 .label("提交并推送")
                 .primary()
@@ -260,5 +254,6 @@ fn commit_footer(this: &Entity<Shell>, path: &str, message: &Entity<InputState>,
                         window.close_dialog(cx);
                     }
                 }),
-        )
+        ],
+    )
 }

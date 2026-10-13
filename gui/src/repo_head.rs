@@ -43,7 +43,7 @@ use crate::panels::sync_alert;
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::ghost_variant;
-use crate::widgets::{pill, warn_dot, DotClick};
+use crate::widgets::{ghost_btn, pill, warn_dot, DotClick};
 
 /// 复制成功后那颗对号停留多久（秒）。
 ///
@@ -297,20 +297,25 @@ impl Shell {
             // **它就是 ⌘K 里那两条入口的可见版**（`RunSlot` / `EditCmds`），
             // 走的是同两个动作，不另写一套逻辑
             .child(
-                Button::new("head-cmds-more")
-                    .icon(icon_sm(AssetIcon::SlidersHorizontal).text_color(tier3(t)))
-                    .custom(ghost_variant(cx))
-                    .with_size(Size::XSmall)
-                    .tooltip("常用命令…（跑钉住的命令 / 编辑四个槽位的命令）")
-                    .accessibility_label("常用命令")
+                ghost_btn(
+                    "head-cmds-more",
+                    AssetIcon::SlidersHorizontal,
+                    tier3(t),
+                    Size::XSmall,
+                    "常用命令…（跑钉住的命令 / 编辑四个槽位的命令）",
+                    cx,
                     // 闭包要 `'static`，所以先把路径 clone 一份再捕获——
                     // 直接捕获 `path` 会借用本函数的局部变量（E0373）
-                    .on_click({
+                    {
                         let p = path.clone();
                         cx.listener(move |this, _, window, cx| {
                             this.open_cmds_dlg(p.clone(), window, cx, None);
                         })
-                    }),
+                    },
+                )
+                // 读屏标签比气泡短：气泡说清"这颗能干什么"，标签只报名字
+                .accessibility_label("常用命令")
+                .into_any_element(),
             )
             .into_any_element()
     }
@@ -639,32 +644,33 @@ impl Shell {
         // 所以与 `jump_target` 共用同一份判据，没有远端时那颗键就是禁用的
         let payload = kind.jump_target().map(|(p, _)| p);
         let enabled = payload.is_some();
-        Button::new(id)
-            .icon(
-                icon_sm(if just_copied {
-                    AssetIcon::Check
-                } else {
-                    AssetIcon::Copy
-                })
-                .text_color(if just_copied {
-                    t.colors.success
-                } else {
-                    tier3(t)
-                }),
-            )
-            .custom(ghost_variant(cx))
-            .with_size(Size::XSmall)
-            .tooltip(label)
-            .accessibility_label(label)
-            .disabled(!enabled)
-            .on_click(cx.listener(move |this, _, _, cx| {
+        // 图标色随"刚才复制过"翻：对号用 success，平时三级灰
+        let ink = if just_copied {
+            t.colors.success
+        } else {
+            tier3(t)
+        };
+        ghost_btn(
+            id,
+            if just_copied {
+                AssetIcon::Check
+            } else {
+                AssetIcon::Copy
+            },
+            ink,
+            Size::XSmall,
+            label,
+            cx,
+            cx.listener(move |this, _, _, cx| {
                 let Some(text) = payload.clone() else {
                     return;
                 };
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 this.mark_copied(kind.key(), cx);
-            }))
-            .into_any_element()
+            }),
+        )
+        .disabled(!enabled)
+        .into_any_element()
     }
 
     /// 记下"刚复制过哪一条"，并在两秒后翻回去

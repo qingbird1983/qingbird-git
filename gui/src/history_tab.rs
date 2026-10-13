@@ -22,11 +22,10 @@
 
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyHeader, EmptyTitle};
 use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_kit::component::skeleton::Skeleton;
-use gpui_kit::component::{ActiveTheme, IndexPath, Sizable, Size, Theme, WindowExt};
+use gpui_kit::component::{ActiveTheme, IndexPath, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, AnyElement, App, AppContext, Context, Entity, FontWeight, Hsla, InteractiveElement,
@@ -37,7 +36,7 @@ use qingbird_core::store;
 
 use crate::state::*;
 use crate::tokens::*;
-use crate::widgets::{ghost_variant, meta_text, sunken_box, skeleton_bar, CardHeader};
+use crate::widgets::{ghost_btn, meta_text, sunken_box, skeleton_bar, CardHeader};
 
 /// 一次列多少条。`history::commit_log` 自己还会夹到它自己的上限
 const LOG_LIMIT: usize = 200;
@@ -91,15 +90,17 @@ impl Shell {
                         crate::widgets::tab_head(
                             CardHeader::new(format!("最近 {} 次提交", h.commits.len()))
                                 .right(
-                                    Button::new("history-rescan")
-                                        .icon(icon_sm(AssetIcon::RefreshCw).text_color(tier4(t)))
-                                        .custom(ghost_variant(cx))
-                                        .with_size(Size::XSmall)
-                                        .loading(h.scanning)
-                                        .tooltip("重新读取提交历史")
-                                        .accessibility_label("重新读取提交历史")
-                                        .on_click(cx.listener(|this, _, _, cx| this.rescan_history(cx)))
-                                        .into_any_element(),
+                                    ghost_btn(
+                                        "history-rescan",
+                                        AssetIcon::RefreshCw,
+                                        tier4(t),
+                                        Size::XSmall,
+                                        "重新读取提交历史",
+                                        cx,
+                                        cx.listener(|this, _, _, cx| this.rescan_history(cx)),
+                                    )
+                                    .loading(h.scanning)
+                                    .into_any_element(),
                                 ),
                             t,
                         ),

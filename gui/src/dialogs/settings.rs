@@ -56,6 +56,8 @@ use crate::widgets::{
 };
 use gpui_kit::FocusHandle;
 
+use super::{dlg_cancel, footer, shell};
+
 /// 代理探测一次最多试几个候选。挨个试完 7897/7890/10808 加系统代理
 /// 要好几十秒，而用户点「检测」只想知道"现在有没有代理可用"
 const PROBE_MAX: usize = 4;
@@ -251,42 +253,49 @@ impl Shell {
 
     fn build_settings_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let t = cx.theme().clone();
-            dialog
-                .title("设置")
-                // ⚠️ **448 → 720**（阶段 20）。官方默认 448px（`dialog.rs:219`），
-                // 那是给"确认一下"的弹窗的宽度。左导航 + 右内容这套版面
-                // 挤在 448 里的话，右边能放的字不到 30 个一行，
-                // 输入框与勾选框全得折行。**上限是视口减去两侧留白**，
-                // 官方自己会夹（`dialog.rs:580`）
-                // ⚠️ **720 → 880**（2026-10-08 用户："左边太大了，右边卡片太小了"）。
-                // 病根不是左栏宽，是**总宽只够左栏把右栏挤到 ≈480**——
-                // 而 480 正是官方 `setting::Settings` 转竖排的那条线
-                // （`settings.rs:425`），右栏一直贴着下限过活。
-                // 现在 880 − 左栏 150 − 缝 12 − 内边距 ≈ **700**，
-                // 「显示哪些模块」两栏一行一项才铺得开
-                .w(px(880.0))
-                .content({
-                    let t = t.clone();
-                    let this = this.clone();
-                    move |c: DialogContent, w: &mut Window, cx: &mut App| {
-                        // 对话框被 Esc 关掉时 `settings_dlg` 已经清空，
-                        // 这一帧就什么都不画——不能拿一份编出来的空快照顶上，
-                        // 那会让输入框在一帧之内全部消失
-                        match this.read(cx).settings_state() {
-                            Some(st) => {
-                                // 正文高度**这一帧**才算：它跟着窗口大小走，
-                                // 写死一个数就会在小窗口上又回到裁切
-                                let h = pane_height(w);
-                                c.child(settings_body(&t, &st, &this, ghost_variant(cx), h))
-                            }
-                            None => c,
+        shell(
+            window,
+            cx,
+            |_| "设置".into(),
+            // ⚠️ **448 → 720**（阶段 20）。官方默认 448px（`dialog.rs:219`），
+            // 那是给"确认一下"的弹窗的宽度。左导航 + 右内容这套版面
+            // 挤在 448 里的话，右边能放的字不到 30 个一行，
+            // 输入框与勾选框全得折行。**上限是视口减去两侧留白**，
+            // 官方自己会夹（`dialog.rs:580`）
+            // ⚠️ **720 → 880**（2026-10-08 用户："左边太大了，右边卡片太小了"）。
+            // 病根不是左栏宽，是**总宽只够左栏把右栏挤到 ≈480**——
+            // 而 480 正是官方 `setting::Settings` 转竖排的那条线
+            // （`settings.rs:425`），右栏一直贴着下限过活。
+            // 现在 880 − 左栏 150 − 缝 12 − 内边距 ≈ **700**，
+            // 「显示哪些模块」两栏一行一项才铺得开
+            Some(880.0),
+            {
+                let this = this.clone();
+                move |c: DialogContent, w: &mut Window, cx: &mut App| {
+                    // 对话框被 Esc 关掉时 `settings_dlg` 已经清空，
+                    // 这一帧就什么都不画——不能拿一份编出来的空快照顶上，
+                    // 那会让输入框在一帧之内全部消失
+                    match this.read(cx).settings_state() {
+                        Some(st) => {
+                            // 正文高度**这一帧**才算：它跟着窗口大小走，
+                            // 写死一个数就会在小窗口上又回到裁切
+                            let h = pane_height(w);
+                            c.child(settings_body(
+                                &cx.theme().clone(),
+                                &st,
+                                &this,
+                                ghost_variant(cx),
+                                h,
+                            ))
                         }
+                        None => c,
                     }
-                })
-                .footer(settings_footer(&t, &this, ghost_variant(cx)))
-        });
+                }
+            },
+            move |cx| {
+                settings_footer(&cx.theme().clone(), &this, ghost_variant(cx))
+            },
+        );
     }
 
     /// 保存六格。**重新 load 配置**再改这六个字段——见模块头的第 3 条
@@ -1324,67 +1333,56 @@ fn id_for(key: &str, third: bool) -> String {
 }
 
 fn settings_footer(t: &Theme, this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
-    let cancel = this.clone();
     let save = this.clone();
-    h_flex()
-        .w_full()
+    // 左下角那一句是**这一页最重要的一条规则**：哪几格即时生效、哪几格要点保存。
+    // 它原来不在——于是用户拨了主题开关又点「取消」，就会怀疑那次拨动没算数。
+    // ⚠️ 这句必须**跟着实际的即时项改**：将来若把某项挂回「保存」，
+    // 这句就成了当面的假话（与 D78 那条"通知里那句恒为真"同族）
+    let left = h_flex()
         .items_center()
-        .justify_between()
-        .gap(px(GAP))
-        // 左下角那一句是**这一页最重要的一条规则**：哪几格即时生效、哪几格要点保存。
-        // 它原来不在——于是用户拨了主题开关又点「取消」，就会怀疑那次拨动没算数。
-        // ⚠️ 这句必须**跟着实际的即时项改**：将来若把某项挂回「保存」，
-        // 这句就成了当面的假话（与 D78 那条"通知里那句恒为真"同族）
-        .child(
-            h_flex()
-                .items_center()
-                .gap(px(GAP_TIGHT))
-                .min_w_0()
-                .child(icon_sm(gpui_kit::assets::IconName::Info).text_color(tier4(t)))
-                .child(meta_text(
-                    "外观、通知与模块勾选是即时的，「保存」只管上面那几格文字",
-                    t,
-                )),
-        )
-        .child(
-            h_flex()
-                .items_center()
-                .gap(px(GAP))
-                .child(
-                    Button::new("set-cancel")
-                        .label("取消")
-                        .custom(gv)
-                        .on_click(move |_, window, cx| {
-                            cancel.update(cx, |shell, _| shell.settings_dlg = None);
-                            window.close_dialog(cx);
-                        }),
-                )
-                .child(
-                    Button::new("set-save")
-                        .label("保存")
-                        .primary()
-                        .on_click(move |_, window, cx| {
-                            let vals: [String; 6] = save
-                                .read(cx)
-                                .settings_dlg
-                                .as_ref()
-                                .map(|d| {
-                                    [
-                                        d.git_name.read(cx).value().to_string(),
-                                        d.git_email.read(cx).value().to_string(),
-                                        d.github_token.read(cx).value().to_string(),
-                                        d.gitee_token.read(cx).value().to_string(),
-                                        d.ssh_key.read(cx).value().to_string(),
-                                        d.proxy.read(cx).value().to_string(),
-                                    ]
-                                })
-                                .unwrap_or_default();
-                            if save.update(cx, |shell, cx| shell.save_settings(vals, window, cx)) {
-                                window.close_dialog(cx);
-                            }
-                        }),
-                ),
-        )
+        .gap(px(GAP_TIGHT))
+        .min_w_0()
+        .child(icon_sm(gpui_kit::assets::IconName::Info).text_color(tier4(t)))
+        .child(meta_text(
+            "外观、通知与模块勾选是即时的，「保存」只管上面那几格文字",
+            t,
+        ))
+        .into_any_element();
+    footer(
+        Some(left),
+        [
+            dlg_cancel(
+                "set-cancel",
+                "取消",
+                this,
+                |shell, _| shell.settings_dlg = None,
+                gv,
+            ),
+            Button::new("set-save")
+                .label("保存")
+                .primary()
+                .on_click(move |_, window, cx| {
+                    let vals: [String; 6] = save
+                        .read(cx)
+                        .settings_dlg
+                        .as_ref()
+                        .map(|d| {
+                            [
+                                d.git_name.read(cx).value().to_string(),
+                                d.git_email.read(cx).value().to_string(),
+                                d.github_token.read(cx).value().to_string(),
+                                d.gitee_token.read(cx).value().to_string(),
+                                d.ssh_key.read(cx).value().to_string(),
+                                d.proxy.read(cx).value().to_string(),
+                            ]
+                        })
+                        .unwrap_or_default();
+                    if save.update(cx, |shell, cx| shell.save_settings(vals, window, cx)) {
+                        window.close_dialog(cx);
+                    }
+                }),
+        ],
+    )
 }
 
 #[cfg(test)]

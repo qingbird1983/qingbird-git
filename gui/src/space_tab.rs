@@ -26,7 +26,7 @@ use qingbird_core::space;
 
 use crate::state::*;
 use crate::tokens::*;
-use crate::widgets::{ghost_variant, meta_text, skeleton_bar, CardHeader};
+use crate::widgets::{ghost_btn, ghost_variant, meta_text, skeleton_bar, CardHeader};
 
 /// 构成条里最多单列几段，其余并成「其他」
 const SEG_KEEP: usize = 4;
@@ -653,14 +653,16 @@ fn error_line(text: &str, t: &Theme) -> AnyElement {
 }
 
 fn rescan_button(t: &Theme, cx: &mut Context<Shell>) -> AnyElement {
-    Button::new("space-tab-rescan")
-        .icon(icon_sm(AssetIcon::RefreshCw).text_color(tier4(t)))
-        .custom(ghost_variant(cx))
-        .with_size(Size::Small)
-        .tooltip("重新扫描磁盘占用")
-        .accessibility_label("重新扫描磁盘占用")
-        .on_click(cx.listener(|this, _, _, cx| this.scan_space(cx)))
-        .into_any_element()
+    ghost_btn(
+        "space-tab-rescan",
+        AssetIcon::RefreshCw,
+        tier4(t),
+        Size::Small,
+        "重新扫描磁盘占用",
+        cx,
+        cx.listener(|this, _, _, cx| this.scan_space(cx)),
+    )
+    .into_any_element()
 }
 
 /// 「磁盘占用」那张卡的表头：标题 + **多旧** + 重新扫描。

@@ -37,6 +37,7 @@ use gpui_kit::{
 };
 use qingbird_core::run_cmd::{self, Slot};
 
+use super::{dlg_cancel, footer, shell};
 use crate::state::*;
 use crate::widgets::ghost_variant;
 use crate::tokens::*;
@@ -147,24 +148,23 @@ impl Shell {
             Some(d) => d.path.clone(),
             None => return,
         };
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let t = cx.theme().clone();
-            dialog
-                .title("编辑命令")
-                .content({
-                    let t = t.clone();
-                    let this = this.clone();
-                    // 幽灵按钮的悬停底色要从活的 `App` 上取，而 content 的闭包里
-                    // 那个 `cx` 是**每一帧重新给**的 ⇒ 在这里算一次带进去
-                    // （与 `repo.rs` 的 footer 同一写法）
+        shell(
+            window,
+            cx,
+            |_| "编辑命令".into(),
+            None,
+            {
+                let this = this.clone();
+                move |c: DialogContent, _w, cx: &mut App| {
+                    // 幽灵按钮的悬停底色**每帧从活的 `App` 上取**——
+                    // builder 每帧重跑，见 `dialogs::shell` 的头注释
                     let gv = ghost_variant(cx);
-                    move |c: DialogContent, _w, cx: &mut App| {
-                        let st = this.read(cx).cmd_state();
-                        c.child(cmds_body(&t, &st, &this, gv, cx))
-                    }
-                })
-                .footer(cmds_footer(&this, &path, ghost_variant(cx)))
-        });
+                    let st = this.read(cx).cmd_state();
+                    c.child(cmds_body(&cx.theme().clone(), &st, &this, gv, cx))
+                }
+            },
+            move |cx| cmds_footer(&this, &path, ghost_variant(cx)),
+        );
     }
 }
 
@@ -462,41 +462,32 @@ impl Shell {
 
 
 fn cmds_footer(this: &Entity<Shell>, path: &str, gv: ButtonCustomVariant) -> Div {
-    let cancel = this.clone();
     let save = this.clone();
     let p = path.to_string();
-    h_flex()
-        .w_full()
-        .justify_end()
-        .gap(px(GAP))
-        .child(
-            Button::new("cmds-cancel")
-                .label("取消")
-                .custom(gv)
-                .on_click(move |_, window, cx| {
-                    cancel.update(cx, |shell, _| shell.cmd_dlg = None);
-                    window.close_dialog(cx);
-                }),
-        )
-        .child(Button::new("cmds-save").label("保存").primary().on_click({
-            let save = save.clone();
-            move |_, window, cx| {
-                let vals: Vec<String> = save
-                    .read(cx)
-                    .cmd_dlg
-                    .as_ref()
-                    .map(|d| {
-                        d.inputs
-                            .iter()
-                            .map(|e| e.read(cx).value().to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if save.update(cx, |shell, cx| shell.save_cmds(p.clone(), vals, cx)) {
-                    window.close_dialog(cx);
+    footer(
+        None,
+        [
+            dlg_cancel("cmds-cancel", "取消", this, |shell, _| shell.cmd_dlg = None, gv),
+            Button::new("cmds-save").label("保存").primary().on_click({
+                move |_, window, cx| {
+                    let vals: Vec<String> = save
+                        .read(cx)
+                        .cmd_dlg
+                        .as_ref()
+                        .map(|d| {
+                            d.inputs
+                                .iter()
+                                .map(|e| e.read(cx).value().to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if save.update(cx, |shell, cx| shell.save_cmds(p.clone(), vals, cx)) {
+                        window.close_dialog(cx);
+                    }
                 }
-            }
-        }))
+            }),
+        ],
+    )
 }
 
 #[cfg(test)]

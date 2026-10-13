@@ -66,6 +66,40 @@ pub(crate) fn ghost_variant(cx: &App) -> ButtonCustomVariant {
 
 /// 主区空态：一个仓库都没选时占住中间。
 /// 用官方 `Empty` 而不是手搓——它自带虚线框、图标位与三种文案层级
+/// 标题栏 / 卡头上那类**幽灵图标键**的完整一副（审查台账 §1 第四条：
+/// 全仓 28 处 `.custom(ghost_variant(cx))` 各跟 5-7 行同链）。
+///
+/// 收下"每一颗都一样的五样"：图标（含色）、ghost 悬停底、尺寸档、气泡与
+/// 读屏标签同一句、点击。⚠️ **读屏标签与气泡同一句是有意的**：图标键没有
+/// 文字，标签另写一句就是两处要同步的谎（`warn_dot` 为同一件事改过一次）。
+///
+/// 少数派在调用方接着加，**加东西比传八个可选参数便宜**：
+/// `.loading()` / `.disabled()` / `.selected()` + `wash` 选中面（D60 那三颗）
+/// / `tooltip_with_action`（带键位角标的那一颗，覆盖上面的 `tooltip`）。
+///
+/// ⛔ **文字键（`label` 那一种）不进这里**：它们的链短（常见就三行）而差异大
+/// ——尺寸三档、气泡可有可无、还常带 `disabled` / `loading` / 图标加文字。
+/// 强并会把八个可选参数搬进签名，比原样更难读；它们共用的事实
+/// （`.custom(ghost_variant(cx))`）已经收在 `ghost_variant` 那一颗里了
+pub(crate) fn ghost_btn(
+    id: &'static str,
+    icon: gpui_kit::assets::IconName,
+    ink: Hsla,
+    size: Size,
+    tip: impl Into<gpui_kit::SharedString>,
+    cx: &App,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static,
+) -> Button {
+    let tip = tip.into();
+    Button::new(id)
+        .icon(icon_sm(icon).text_color(ink))
+        .custom(ghost_variant(cx))
+        .with_size(size)
+        .tooltip(tip.clone())
+        .accessibility_label(tip)
+        .on_click(on_click)
+}
+
 pub(crate) fn empty_main(t: &Theme, window: &Window) -> Div {
     v_flex()
         .size_full()

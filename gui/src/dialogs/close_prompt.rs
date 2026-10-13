@@ -33,16 +33,17 @@
 //! 「每次都问」这一档是**默认**（`store::close_action_of` 的兜底方向），
 //! 理由与那条判据的注释一样：兜错到"直接执行"是不可撤销的那种错。
 
-use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::base::v_flex;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::DialogContent;
 use gpui_kit::component::{ActiveTheme as _, Sizable, Size, Theme, WindowExt as _};
 use gpui_kit::{
-    div, px, App, Context, Entity, ParentElement as _, IntoElement as _, Styled as _, Window,
+    div, px, App, Context, Div, Entity, IntoElement as _, ParentElement as _, Styled as _, Window,
 };
 use qingbird_core::store::{self, CLOSE_EXIT, CLOSE_TRAY};
 
+use super::footer;
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::ghost_variant;
@@ -128,24 +129,22 @@ impl Shell {
     fn close_prompt_footer(
         this: &Entity<Self>,
         gv: ButtonCustomVariant,
-    ) -> impl gpui_kit::IntoElement {        h_flex()
-            .w_full()
-            .items_center()
-            // 左边一颗取消，右边两颗动作键——与项目里 `dlg_footer` 同口径
-            .child(
-                Button::new("close-cancel")
-                    .label("取消")
-                    .custom(gv.clone())
-                    .with_size(Size::Medium)
-                    .on_click({
-                        let this = this.clone();
-                        move |_, window, cx| {
-                            this.update(cx, |this, cx| this.cancel_close(window, cx))
-                        }
-                    }),
-            )
-            .child(div().flex_1())
-            .child(
+    ) -> Div {
+        // 左边一颗取消，右边两颗动作键——与 `dialogs::footer` 同口径
+        let left = Button::new("close-cancel")
+            .label("取消")
+            .custom(gv.clone())
+            .with_size(Size::Medium)
+            .on_click({
+                let this = this.clone();
+                move |_, window, cx| {
+                    this.update(cx, |this, cx| this.cancel_close(window, cx))
+                }
+            })
+            .into_any_element();
+        footer(
+            Some(left),
+            [
                 Button::new("close-quit")
                     .label("完全退出")
                     .danger()
@@ -156,8 +155,6 @@ impl Shell {
                             this.update(cx, |this, cx| this.quit_app(window, cx))
                         }
                     }),
-            )
-            .child(
                 Button::new("close-tray")
                     .label("关闭到托盘")
                     .primary()
@@ -168,7 +165,8 @@ impl Shell {
                             this.update(cx, |this, cx| this.close_to_tray(window, cx))
                         }
                     }),
-            )
+            ],
+        )
     }
 
     /// 设置面板里改关窗档。**即时落盘 + 同步缓存**

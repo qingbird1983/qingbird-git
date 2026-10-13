@@ -21,11 +21,12 @@ use gpui_kit::component::dialog::DialogContent;
 use gpui_kit::component::{ActiveTheme, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, App, ClipboardItem, Context, Div, Entity, ParentElement, ScrollHandle,
-    Styled, Window,
+    div, px, App, ClipboardItem, Context, Div, Entity, IntoElement as _, ParentElement,
+    ScrollHandle, Styled, Window,
 };
 use std::rc::Rc;
 
+use super::{footer, shell};
 use crate::log::output_stream;
 use crate::state::*;
 use crate::widgets::ghost_variant;
@@ -49,24 +50,24 @@ impl Shell {
         // 用 `Rc` 包一层：`Fn` 闭包只能持有**共享**引用，而 `ScrollHandle`
         // 不是 `Copy`。`Rc` 克隆是廉价的引用计数，且里面的句柄**始终是同一份**
         let scroll = std::rc::Rc::new(this.read(cx).batch_log_scroll.clone());
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let t = cx.theme().clone();
-            dialog
-                .title("上次批量结果")
-                .content({
-                    let t = t.clone();
-                    let this = this.clone();
-                    // 与上面同一个道理：`this` 要 clone 之后才能被 `Fn` 闭包持有
-                    let scroll = scroll.clone();
-                    move |c: DialogContent, _w, cx: &mut App| {
-                        // 每帧现读：这个对话框开着的时候批次可能还在跑，
-                        // 快照会在开着的这几秒里一直是旧的
-                        let lg = this.read(cx).app_log.clone();
-                        c.child(batch_log_body(&scroll, &t, &lg))
-                    }
-                })
-                .footer(batch_log_footer(&this, ghost_variant(cx)))
-        });
+        shell(
+            window,
+            cx,
+            |_| "上次批量结果".into(),
+            None,
+            {
+                let this = this.clone();
+                // 与上面同一个道理：`this` 要 clone 之后才能被 `Fn` 闭包持有
+                let scroll = scroll.clone();
+                move |c: DialogContent, _w, cx: &mut App| {
+                    // 每帧现读：这个对话框开着的时候批次可能还在跑，
+                    // 快照会在开着的这几秒里一直是旧的
+                    let lg = this.read(cx).app_log.clone();
+                    c.child(batch_log_body(&scroll, &cx.theme().clone(), &lg))
+                }
+            },
+            move |cx| batch_log_footer(&this, ghost_variant(cx)),
+        );
     }
 }
 
@@ -133,28 +134,24 @@ fn batch_log_body(scroll: &Rc<ScrollHandle>, t: &Theme, lg: &LogState) -> Div {
 
 fn batch_log_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
     let copy = this.clone();
-    h_flex()
-        .w_full()
-        .justify_between()
-        .gap(px(GAP))
-        .child(
-            Button::new("batch-log-copy")
-                .label("复制")
-                .custom(gv)
-                .with_size(Size::Small)
-                .tooltip("复制这份汇总")
-                .on_click(move |_, window, cx| {
-                    let text = copy.read(cx).app_log.lines.join("\n");
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    window.push_notification("已复制批量结果", cx);
-                }),
-        )
-        .child(
-            Button::new("batch-log-close")
-                .label("关闭")
-                .primary()
-                .on_click(|_, window, cx| {
-                    window.close_dialog(cx);
-                }),
-        )
+    let left = Button::new("batch-log-copy")
+        .label("复制")
+        .custom(gv)
+        .with_size(Size::Small)
+        .tooltip("复制这份汇总")
+        .on_click(move |_, window, cx| {
+            let text = copy.read(cx).app_log.lines.join("\n");
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            window.push_notification("已复制批量结果", cx);
+        })
+        .into_any_element();
+    footer(
+        Some(left),
+        [Button::new("batch-log-close")
+            .label("关闭")
+            .primary()
+            .on_click(|_, window, cx| {
+                window.close_dialog(cx);
+            })],
+    )
 }

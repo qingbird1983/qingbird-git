@@ -42,6 +42,8 @@ use crate::state::*;
 use crate::widgets::{ghost_variant, progress_readout, progress_text, sunken_box};
 use crate::tokens::*;
 
+use super::{footer, shell};
+
 /// 实时输出最多留多少行。git 的进度行按 \r 反复刷新同一句，
 /// 一次大克隆能刷出上千行，全留着对话框会被撑爆；只留尾巴——
 /// 用户要看的"刚才发生了什么"就在那儿
@@ -123,26 +125,27 @@ impl Shell {
 }
 
 impl Shell {
-    /// 对话框本体（官方 Dialog）。`content` 的闭包每帧重画，所以进度与
-    /// 输出每帧从 `Entity<Shell>` 读；`footer` 是**一次性元素**
-    /// （官方签名就是 `impl IntoElement`），所以那里的按钮只能回写 Entity，
-    /// 跑起来时的状态由 content 里的进度区承担
+    /// 对话框本体（官方 Dialog）。
+    ///
+    /// ⚠️ **整个 builder 每帧重跑**（`dialogs::shell` 的头注释有出处）：
+    /// 进度与输出每帧从 `Entity<Shell>` 读，footer 的按钮每帧重建、
+    /// 靠 `Entity` 回写。跑起来时的状态由 content 里的进度区承担
     fn build_clone_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let t = cx.theme().clone();
-            dialog
-                .title("克隆仓库")
-                .content({
-                    let t = t.clone();
-                    let this = this.clone();
-                    move |c: DialogContent, _w, cx: &mut App| {
-                        let st = this.read(cx).clone_state();
-                        c.child(clone_body(&this, ghost_variant(cx), &t, &st))
-                    }
-                })
-                .footer(clone_footer(&this, ghost_variant(cx)))
-        });
+        shell(
+            window,
+            cx,
+            |_| "克隆仓库".into(),
+            None,
+            {
+                let this = this.clone();
+                move |c: DialogContent, _w, cx: &mut App| {
+                    let st = this.read(cx).clone_state();
+                    c.child(clone_body(&this, ghost_variant(cx), &cx.theme().clone(), &st))
+                }
+            },
+            move |cx| clone_footer(&this, ghost_variant(cx)),
+        );
     }
 }
 
@@ -601,12 +604,9 @@ fn progress_block(t: &Theme, st: &CloneView) -> Div {
 }
 
 fn clone_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
-    h_flex()
-        .w_full()
-        .justify_end()
-        .items_center()
-        .gap(px(GAP))
-        .child(
+    footer(
+        None,
+        [
             Button::new("clone-cancel")
                 .label("取消")
                 .custom(gv)
@@ -628,8 +628,6 @@ fn clone_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
                         }
                     }
                 }),
-        )
-        .child(
             Button::new("clone-go")
                 .label("开始克隆")
                 .primary()
@@ -640,7 +638,8 @@ fn clone_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
                         this.update(cx, |this, cx| this.run_clone(cx));
                     }
                 }),
-        )
+        ],
+    )
 }
 
 // ================= 后台进度汇聚 =================

@@ -36,6 +36,7 @@ use gpui_kit::{
 };
 use qingbird_core::purge;
 
+use super::{dlg_cancel, footer, shell};
 use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::{ghost_variant, list_box, meta_text};
@@ -77,26 +78,23 @@ impl Shell {
 
     fn build_purge_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
-        let t = cx.theme().clone();
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            dialog
-                .title("清掉多出来的文件")
-                .content({
-                    let t = t.clone();
-                    let this = this.clone();
-                    move |c: DialogContent, _w, cx: &mut App| {
-                        // 每帧现读，见文件头
-                        let Some(d) = this.read(cx).purge_dlg.clone() else {
-                            return c;
-                        };
-                        c.child(purge_body(&t, &d, &this))
-                    }
-                })
-                .footer({
-                    let gv = ghost_variant(cx);
-                    purge_footer(&this, gv)
-                })
-        });
+        shell(
+            window,
+            cx,
+            |_| "清掉多出来的文件".into(),
+            None,
+            {
+                let this = this.clone();
+                move |c: DialogContent, _w, cx: &mut App| {
+                    // 每帧现读，见文件头
+                    let Some(d) = this.read(cx).purge_dlg.clone() else {
+                        return c;
+                    };
+                    c.child(purge_body(&cx.theme().clone(), &d, &this))
+                }
+            },
+            move |cx| purge_footer(&this, ghost_variant(cx)),
+        );
     }
 }
 
@@ -291,22 +289,17 @@ fn purge_body(t: &Theme, d: &PurgeDialog, this: &Entity<Shell>) -> Div {
 /// 所以：确认键一直可点，空清单点下去由 `run_purge` 记一句
 /// 「没有需要清理的内容」；勾了几个则由 `content` 里那行实时计数告诉用户。
 fn purge_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
-    let cancel = this.clone();
     let go = this.clone();
-    h_flex()
-        .w_full()
-        .justify_end()
-        .gap(px(GAP))
-        .child(
-            Button::new("purge-cancel")
-                .label("取消")
-                .custom(gv)
-                .on_click(move |_, window, cx| {
-                    cancel.update(cx, |shell, _| shell.purge_dlg = None);
-                    window.close_dialog(cx);
-                }),
-        )
-        .child(
+    footer(
+        None,
+        [
+            dlg_cancel(
+                "purge-cancel",
+                "取消",
+                this,
+                |shell, _| shell.purge_dlg = None,
+                gv,
+            ),
             Button::new("purge-go")
                 .label("按勾选清理")
                 .danger()
@@ -317,5 +310,6 @@ fn purge_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
                     // 进度与结论都在日志区
                     window.close_dialog(cx);
                 }),
-        )
+        ],
+    )
 }

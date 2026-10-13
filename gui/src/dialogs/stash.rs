@@ -30,7 +30,8 @@ use gpui_kit::component::dialog::DialogContent;
 use gpui_kit::component::{ActiveTheme, Disableable as _, Sizable, Size, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, App, Context, Div, Entity, FontWeight, ParentElement, SharedString, Styled, Window,
+    div, px, App, Context, Div, Entity, FontWeight, ParentElement,
+    SharedString, Styled, Window,
 };
 use qingbird_core::stash::{self, StashEntry, StashFile, StashFileKind};
 
@@ -221,8 +222,9 @@ impl Shell {
         cx.notify();
     }
 
-    fn build_stash_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn build_stash_dlg(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
         let this = cx.entity();
+        // 【实验】临时还原成合并前的原 builder，定位 1px 差异源
         let t = cx.theme().clone();
         window.open_dialog(cx, move |dialog, _window, cx| {
             dialog
@@ -453,8 +455,7 @@ fn stash_row(
 /// 各自改过），而冲突之后 stash 还留着、工作区却半新半旧——**那正是这一屏要消灭的
 /// 状态**。要取几条就点几次，每次都能看见结果
 fn stash_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
-    // `on_click` 要 `'static`，所以这里必须 clone 一份 owned 的句柄
-    // （purge / cmds 那两处同一写法）
+    // 【实验】临时还原成合并前的原结构，定位 1px 差异源
     let this = this.clone();
     h_flex()
         .w_full()

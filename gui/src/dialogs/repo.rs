@@ -6,16 +6,19 @@
 use gpui_kit::component::button::ButtonCustomVariant;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogContent;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme, Theme, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 // `Focusable` 只用来调 `focus_handle`，方法本身用不上，所以按 `as _` 引
 use gpui_kit::{
-    div, px, AppContext, Context, Div, Entity, Focusable as _, ParentElement, Styled, Window,
+    div, px, App, AppContext, Context, Div, Entity, Focusable as _, IntoElement as _,
+    ParentElement, Styled, Window,
 };
 use qingbird_core::repos::{self};
 use qingbird_core::run_cmd::{self};
 
+use super::{dlg_cancel, footer, shell};
 use super::init::{init_body, init_footer};
 use crate::state::*;
 use crate::widgets::ghost_variant;
@@ -158,8 +161,6 @@ pub(crate) fn dlg_body(
         })
 }
 
-/// 初始化向导正文：说明 + 路径 + 排除项勾选列表。
-
 /// 弹窗底栏：编辑模式左侧「移除仓库」，右侧取消 / 保存。
 pub(crate) fn dlg_footer(
     this: &Entity<Shell>,
@@ -168,64 +169,56 @@ pub(crate) fn dlg_footer(
     name_input: &Entity<InputState>,
     gv: ButtonCustomVariant,
 ) -> Div {
-    let mut footer = h_flex().w_full().justify_between().items_center();
-    match editing {
-        Some(p) => {
-            footer = footer.child(
-                Button::new("dlg-remove")
-                    .label("移除仓库")
-                    .outline()
-                    .on_click({
-                        let this = this.clone();
-                        let p = p.clone();
-                        move |_, window, cx| {
-                            this.update(cx, |this, cx| this.remove_repo_at(p.clone(), window, cx));
-                            window.close_dialog(cx);
-                        }
-                    }),
-            );
-        }
-        None => footer = footer.child(div()),
-    }
-    footer.child(
-        h_flex()
-            .gap(px(GAP))
-            .child(Button::new("dlg-cancel").label("取消").custom(gv).on_click({
+    // 左槽：只有编辑模式有「移除仓库」。新增时给 None——那一格空着，
+    // 底栏整排右对齐（`footer` 的约定）
+    let left = editing.as_ref().map(|p| {
+        Button::new("dlg-remove")
+            .label("移除仓库")
+            .outline()
+            .on_click({
                 let this = this.clone();
+                let p = p.clone();
                 move |_, window, cx| {
-                    this.update(cx, |this, cx| {
-                        this.dlg = None;
-                        cx.notify();
-                    });
+                    this.update(cx, |this, cx| this.remove_repo_at(p.clone(), window, cx));
                     window.close_dialog(cx);
                 }
-            }))
-            .child(
-                Button::new("dlg-save")
-                    .label(if editing.is_some() {
-                        "保存"
-                    } else {
-                        "添加"
-                    })
-                    .primary()
-                    .on_click({
-                        let this = this.clone();
-                        let editing = editing.clone();
-                        let path_input = path_input.clone();
-                        let name_input = name_input.clone();
-                        move |_, window, cx| {
-                            // 值要在 App 上读成 String 再交给 Shell 落盘
-                            let raw_path = path_input.read(cx).value().to_string();
-                            let raw_name = name_input.read(cx).value().to_string();
-                            let ok = this.update(cx, |this, cx| {
-                                this.commit_dlg(editing.clone(), raw_path, raw_name, cx)
-                            });
-                            if ok {
-                                window.close_dialog(cx);
-                            }
-                        }
-                    }),
+            })
+            .into_any_element()
+    });
+    footer(
+        left,
+        [
+            dlg_cancel(
+                "dlg-cancel",
+                "取消",
+                this,
+                |shell, cx| {
+                    shell.dlg = None;
+                    cx.notify();
+                },
+                gv,
             ),
+            Button::new("dlg-save")
+                .label(if editing.is_some() { "保存" } else { "添加" })
+                .primary()
+                .on_click({
+                    let this = this.clone();
+                    let editing = editing.clone();
+                    let path_input = path_input.clone();
+                    let name_input = name_input.clone();
+                    move |_, window, cx| {
+                        // 值要在 App 上读成 String 再交给 Shell 落盘
+                        let raw_path = path_input.read(cx).value().to_string();
+                        let raw_name = name_input.read(cx).value().to_string();
+                        let ok = this.update(cx, |this, cx| {
+                            this.commit_dlg(editing.clone(), raw_path, raw_name, cx)
+                        });
+                        if ok {
+                            window.close_dialog(cx);
+                        }
+                    }
+                }),
+        ],
     )
 }
 
@@ -330,35 +323,42 @@ impl Shell {
         let path_input = dlg.path_input.clone();
         let name_input = dlg.name_input.clone();
 
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let t = cx.theme().clone();
-            let state = this.read(cx).dlg.as_ref();
-            let third = state.map(|d| d.third).unwrap_or(false);
-            let error: Option<String> = state.and_then(|d| d.error.clone());
-            let init: Option<InitState> = state.and_then(|d| d.init.clone());
-
-            dialog
-                .title(if init.is_some() {
-                    "初始化为 Git 仓库"
-                } else if editing.is_some() {
-                    "仓库设置"
-                } else {
-                    "添加仓库"
-                })
-                // content / footer 的 builder 会被反复调用，每次重画一份
-                .content({
-                    let t = t.clone();
-                    let editing = editing.clone();
-                    let path_input = path_input.clone();
-                    let name_input = name_input.clone();
-                    let error = error.clone();
-                    let init = init.clone();
-                    let this = this.clone();
-                    // 幽灵按钮的悬停底色要从活的 `App` 上取，而 content 的 builder
-                    // 是**没有 `cx` 的自由闭包** ⇒ 在这里算好按值带进去
-                    // （`ButtonCustomVariant` 是 `Copy`）。与下面 `.footer(..)` 同一做法
+        shell(
+            window,
+            cx,
+            {
+                // 标题跟着**这一帧**的状态走：点「添加」而路径不是 git 仓库时
+                // 会转初始化向导（`commit_dlg` 里那一转），标题要当场换掉
+                let this = this.clone();
+                let editing = editing.clone();
+                move |cx: &mut App| {
+                    let init = this.read(cx).dlg.as_ref().and_then(|d| d.init.clone());
+                    if init.is_some() {
+                        "初始化为 Git 仓库".into()
+                    } else if editing.is_some() {
+                        "仓库设置".into()
+                    } else {
+                        "添加仓库".into()
+                    }
+                }
+            },
+            None,
+            {
+                let editing = editing.clone();
+                let path_input = path_input.clone();
+                let name_input = name_input.clone();
+                let this = this.clone();
+                move |c: DialogContent, _, cx: &mut App| {
+                    let state = this.read(cx).dlg.as_ref();
+                    let third = state.map(|d| d.third).unwrap_or(false);
+                    let error: Option<String> = state.and_then(|d| d.error.clone());
+                    let init: Option<InitState> = state.and_then(|d| d.init.clone());
+                    let t = cx.theme().clone();
+                    // 幽灵按钮的悬停底色每帧从活的 `App` 上取（builder 每帧
+                    // 重跑，见 `dialogs::shell` 头注释）；`ButtonCustomVariant`
+                    // 是 `Copy`，按值带进下面的 match
                     let gv = ghost_variant(cx);
-                    move |c, _, _| match &init {
+                    match &init {
                         Some(i) => c.child(init_body(&t, i, &error, &this)),
                         None => c.child(dlg_body(
                             &t,
@@ -371,19 +371,23 @@ impl Shell {
                             gv,
                         )),
                     }
-                })
-                .footer({
-                    // `gv` 在这里算一次传下去：footer 的 builder 是**没有 `cx`
-                    // 的自由函数**（只收 `&Entity` + 数据），而幽灵按钮的悬停
-                    // 底色必须从活的 `App` 上取（`ghost_variant`）。
-                    // `ButtonCustomVariant` 是 `Copy`，按值传最省事。
+                }
+            },
+            {
+                let editing = editing.clone();
+                let path_input = path_input.clone();
+                let name_input = name_input.clone();
+                let this = this.clone();
+                move |cx: &mut App| {
+                    let init = this.read(cx).dlg.as_ref().and_then(|d| d.init.clone());
                     let gv = ghost_variant(cx);
                     match &init {
                         Some(i) => init_footer(i, &this, gv),
                         None => dlg_footer(&this, &editing, &path_input, &name_input, gv),
                     }
-                })
-        });
+                }
+            },
+        );
     }
 }
 

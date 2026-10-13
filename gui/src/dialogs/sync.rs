@@ -43,6 +43,8 @@ use crate::state::*;
 use crate::tokens::*;
 use crate::widgets::{ghost_variant, meta_text};
 
+use super::{dlg_cancel, footer, shell};
+
 /// 档位总数：不定时 + 5 个间隔 + 每天定时
 const PRESET_COUNT: usize = SYNC_MINS_PRESETS.len() + 2;
 
@@ -58,24 +60,19 @@ impl Shell {
     pub(crate) fn open_sync_dlg(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.load_sync_cfg(window, cx);
         let this = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let t = cx.theme().clone();
-            dialog
-                .title("定时同步")
-                .content({
-                    // 克隆在 `.content({})` 这一层里做，外层那个 `this`
-                    // 还要给 `.footer(..)` 用——直接 move 进 content 闭包
-                    // 的话 footer 那一行就编译不过（Entity 不 Copy）
-                    let t = t.clone();
-                    let this = this.clone();
-                    move |c: DialogContent, _w, cx: &mut App| {
-                        let t = t.clone();
-                        let this = this.clone();
-                        c.child(sync_body(&t, &this, cx))
-                    }
-                })
-                .footer(sync_footer(&this, ghost_variant(cx)))
-        });
+        shell(
+            window,
+            cx,
+            |_| "定时同步".into(),
+            None,
+            {
+                let this = this.clone();
+                move |c: DialogContent, _w, cx: &mut App| {
+                    c.child(sync_body(&cx.theme().clone(), &this, cx))
+                }
+            },
+            move |cx| sync_footer(&this, ghost_variant(cx)),
+        );
     }
 }
 
@@ -158,29 +155,27 @@ fn sync_body(t: &Theme, this: &Entity<Shell>, cx: &mut App) -> Div {
 
 fn sync_footer(this: &Entity<Shell>, gv: ButtonCustomVariant) -> Div {
     let save = this.clone();
-    h_flex()
-        .w_full()
-        .justify_end()
-        .gap(px(GAP))
-        .child(
-            Button::new("sync-cancel")
-                .label("取消")
-                .custom(gv)
-                .on_click(move |_, window, cx| window.close_dialog(cx)),
-        )
-        .child(Button::new("sync-save").label("保存").primary().on_click({
-            let save = save.clone();
-            move |_, window, cx| {
-                // 存成了才关窗。存不成时错误留在窗里，用户要看得见
-                // 「时间格式不对」这句话——关掉窗他就只剩一个"没反应"的窗
-                let ok = save.update(cx, |shell, cx| {
-                    shell.save_sync_settings(&mut *window, cx)
-                });
-                if ok {
-                    window.close_dialog(cx);
+    footer(
+        None,
+        [
+            // 取消**不清草稿**：`sync_cfg` 那份草稿在开窗时无条件重建
+            // （见 `open_sync_dlg` 的头注释），关掉再开就是原样，
+            // 清一遍反而多一个要维护的动作
+            dlg_cancel("sync-cancel", "取消", this, |_, _| {}, gv),
+            Button::new("sync-save").label("保存").primary().on_click({
+                move |_, window, cx| {
+                    // 存成了才关窗。存不成时错误留在窗里，用户要看得见
+                    // 「时间格式不对」这句话——关掉窗他就只剩一个"没反应"的窗
+                    let ok = save.update(cx, |shell, cx| {
+                        shell.save_sync_settings(&mut *window, cx)
+                    });
+                    if ok {
+                        window.close_dialog(cx);
+                    }
                 }
-            }
-        }))
+            }),
+        ],
+    )
 }
 
 // ================= 档位 =================

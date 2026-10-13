@@ -726,17 +726,19 @@ impl Shell {
         } else {
             "切到深色主题"
         };
-        Button::new("titlebar-theme-toggle")
-            .icon(icon_sm(icon).text_color(tier3(t)))
-            .custom(ghost_variant(cx))
-            .with_size(Size::Small)
-            .tooltip(label)
-            .accessibility_label(label)
-            .on_click(cx.listener(|_, _, window, cx| {
+        ghost_btn(
+            "titlebar-theme-toggle",
+            icon,
+            tier3(t),
+            Size::Small,
+            label,
+            cx,
+            cx.listener(|_, _, window, cx| {
                 let dark = !cx.theme().is_dark();
                 Shell::toggle_theme_static(dark, window, cx);
-            }))
-            .into_any_element()
+            }),
+        )
+        .into_any_element()
     }
     /// 侧栏展开 / 收起开关。
     ///
@@ -764,14 +766,16 @@ impl Shell {
         } else {
             "收起仓库侧栏"
         };
-        Button::new("titlebar-sidebar-toggle")
-            .icon(icon_sm(icon).text_color(tier3(t)))
-            .custom(ghost_variant(cx))
-            .with_size(Size::Small)
-            .tooltip(label)
-            .accessibility_label(label)
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
-            .into_any_element()
+        ghost_btn(
+            "titlebar-sidebar-toggle",
+            icon,
+            tier3(t),
+            Size::Small,
+            label,
+            cx,
+            cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)),
+        )
+        .into_any_element()
     }
 
     /// 右栏（检视列）展开 / 收起开关。**从抽屉自己的标题行搬上来**
@@ -796,14 +800,20 @@ impl Shell {
         } else {
             "展开右栏"
         };
-        Button::new("titlebar-inspector-toggle")
-            .icon(icon_sm(icon).text_color(tier3(t)))
-            .custom(ghost_variant(cx))
-            .with_size(Size::Small)
-            .tooltip_with_action(label, &ToggleInspector, None)
-            .accessibility_label(label)
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
-            .into_any_element()
+        ghost_btn(
+            "titlebar-inspector-toggle",
+            icon,
+            tier3(t),
+            Size::Small,
+            label,
+            cx,
+            cx.listener(|this, _, _, cx| this.toggle_inspector(cx)),
+        )
+        // 键位角标：官方会自己去 keymap 里查 `ToggleInspector` 画成 `Kbd`，
+        // 覆盖上面那颗不带角标的气泡（手写「（Ctrl …）」进文案的话，
+        // 键位一改那句话就成了假提示）
+        .tooltip_with_action(label, &ToggleInspector, None)
+        .into_any_element()
     }
 
     /// 窗口控件：最小化 / 最大化（还原）/ 关闭。
@@ -1155,15 +1165,16 @@ impl Shell {
             // ⚠️ `flex_1` 这颗垫圈必须在设置键**前面**，整组才顶对齐、设置键才真沉底
             .child(div().flex_1())
             .child(
-                Button::new("nav-settings")
-                    .icon(nav_icon(AssetIcon::Settings).text_color(tier3(t)))
-                    .custom(ghost_variant(cx))
-                    .with_size(Size::Large)
-                    .tooltip("设置")
-                    .accessibility_label("设置")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.open_settings_dlg(window, cx)),
-                    ),
+                ghost_btn(
+                    "nav-settings",
+                    AssetIcon::Settings,
+                    tier3(t),
+                    Size::Large,
+                    "设置",
+                    cx,
+                    cx.listener(|this, _, window, cx| this.open_settings_dlg(window, cx)),
+                )
+                .into_any_element(),
             )
     }
 
