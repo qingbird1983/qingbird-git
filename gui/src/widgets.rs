@@ -422,6 +422,33 @@ pub(crate) type DotClick = std::rc::Rc<dyn Fn(&gpui_kit::ClickEvent, &mut Window
 /// （`tooltip.rs:114`），而 `theme.json` 把 `popover.background` 归并到了**卡面白**
 /// ⇒ 它是白底深字，**不是 v4 §7 契约写的墨底**。这一处偏离 v4 已经很久了，
 /// 本轮不动它（要动就得连 `info_dot` 那几颗一起对），登记在路线表
+/// 空态——全站唯一出处（v4 §6 登记表，2026-10-13 收敛落地）。
+/// 包装官方 `Empty`，钉住总览页已验收的那副样子：去虚线外框（`border_0`）、
+/// 主句进官方 `EmptyTitle`（`text_sm` + 中等字重）、副句 `fs_meta` + `tier4`
+/// 居中。`note` 传空串就没有副句那一格。
+/// 返回 `Empty` 本体而不是 `AnyElement`：少数派在调用方接着加——
+/// 还要多一行提示 `.child(..)`、在弹层里不想撑满 `.flex_0()`，
+/// 加东西比传一堆可选参数便宜（与 `ghost_btn` 同一条约定）。
+pub(crate) fn empty_state(
+    title: impl IntoElement,
+    note: impl Into<gpui_kit::SharedString>,
+    t: &Theme,
+) -> Empty {
+    let note = note.into();
+    let mut e = Empty::new()
+        .border_0()
+        .header(EmptyHeader::new().title(EmptyTitle::new().child(title)));
+    if !note.is_empty() {
+        e = e.content(EmptyContent::new().child(
+            div()
+                .text_size(px(fs_meta()))
+                .text_color(tier4(t))
+                .child(note),
+        ));
+    }
+    e
+}
+
 pub(crate) fn warn_dot(
     id: &'static str,
     text: impl Into<gpui_kit::SharedString>,

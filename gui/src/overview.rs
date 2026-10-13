@@ -19,7 +19,6 @@ use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::chart::AreaChart;
-use gpui_kit::component::empty::{Empty, EmptyContent, EmptyHeader, EmptyTitle};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
 // `.when(..)` 来自 gpui 的 `FluentBuilder`（`util.rs:21`），不在 Button 的任何一个
 // trait 上——少了这一行的报错是"no method named when"，看着像官方没有这个能力
@@ -598,17 +597,12 @@ impl Shell {
                     // 在两条主题里都等于卡面白 ⇒ 那个 `.bg()` 是个空操作，
                     // 却让人以为"空态盒比表格深一档"）
                     .child(
-                        Empty::new()
-                            .border_0()
-                            .header(EmptyHeader::new().title(EmptyTitle::new().child("还没有仓库")))
-                            .content(
-                                EmptyContent::new().child(
-                                    div()
-                                        .text_size(px(fs_meta()))
-                                        .text_color(tier4(t))
-                                        .child("回到「我的仓库」加一个，总览才有东西可看"),
-                                ),
-                            ),
+                        crate::widgets::empty_state(
+                            "还没有仓库",
+                            "回到「我的仓库」加一个，总览才有东西可看",
+                            t,
+                        )
+                        .into_any_element(),
                     )
                     .into_any_element(),
                 head,
@@ -673,18 +667,12 @@ impl Shell {
                 if self.ov_rows.is_empty() {
                     list_box(v_flex().w_full().flex_1().min_h_0(), t)
                         .child(
-                            Empty::new()
-                                .border_0()
-                                .header(
-                                    EmptyHeader::new()
-                                        .title(EmptyTitle::new().child("没有久未同步的仓库")),
-                                )
-                                .content(EmptyContent::new().child(
-                                    div()
-                                        .text_size(px(fs_meta()))
-                                        .text_color(tier4(t))
-                                        .child("再点一次上面那颗「久未同步」，回到全部仓库"),
-                                )),
+                            crate::widgets::empty_state(
+                                "没有久未同步的仓库",
+                                "再点一次上面那颗「久未同步」，回到全部仓库",
+                                t,
+                            )
+                            .into_any_element(),
                         )
                         .into_any_element()
                 } else {

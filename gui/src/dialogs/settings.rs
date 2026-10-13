@@ -726,7 +726,7 @@ fn set_nav(t: &Theme, st: &SettingsState, this: &Entity<Shell>) -> impl IntoElem
                 // 选中面优先：官方那颗的悬停是实心 accent 蓝，比选中面重得多，
                 // 两层叠在一起会看成"这块被按住了"
                 .when(active, |d| d.bg(wash(t)))
-                .when(!active && hovered, |d| d.bg(t.secondary_hover))
+                .when(!active && hovered, |d| d.bg(hover_face(t)))
                 // ⚠️ **左缘那条竖条常挂，只换颜色**（非选中给 `transparent_black`）。
                 // 写成 `.when(active, |d| d.border_l_2())` 的话，选中态一出现
                 // 整列文字就往右挪 2px——切一次分类全列跳一下。

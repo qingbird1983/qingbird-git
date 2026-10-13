@@ -52,6 +52,15 @@ pub(crate) fn tier4(t: &Theme) -> Hsla {
 pub(crate) fn track(t: &Theme) -> Hsla {
     t.colors.table_row_border
 }
+/// `hover_face`：**悬停面**——全站唯一出处（v4 §6 登记表，2026-10-13 收敛落地）。
+/// 就是官方 `secondary.hover.background`（v4 色板的 `wash-soft` 那一档）：
+/// 主题自己已经把它定为悬停色，这里给它一个名字，让"我指到哪"只有一个出处。
+/// 与 `wash`（选中面，"我在哪"）的分工不许互换——这个分工写在 `wash` 的注释里。
+/// （收敛前是 4 个出处 3 个档：`secondary_hover` / `colors.list_hover` /
+/// 调用方传参 / 侧栏 `track`，全部归到这一颗。）
+pub(crate) fn hover_face(t: &Theme) -> Hsla {
+    t.secondary_hover
+}
 /// 卡与弹层的底 = v4 的 `card`
 pub(crate) fn card_face(t: &Theme) -> Hsla {
     t.colors.secondary
@@ -60,8 +69,7 @@ pub(crate) fn card_face(t: &Theme) -> Hsla {
 /// `wash`：**选中面、图标底块、信息徽章底**——v4 第 5.3 节那个
 /// "靠底块面积撑重量"的手法，也是 D60 那条"全站同类高亮只认一个出处"的落点。
 /// 与**悬停面**的分工是"我在哪"与"我指到哪"，不许互换
-/// （悬停面那一档随阶段 31.3 的 `hover_face` 一起落地——现在它还是散的，
-/// 一半用官方 `secondary_hover`、一半自己挑灰，v4 §6 登记表第 5 行记着这条待收）。
+/// （悬停面那一档收在 `hover_face`，全站唯一出处）。
 ///
 /// ⚠️ **用法是 `.when(active, |d| d.bg(wash(t)))`，不能无条件 `.bg()`**：
 /// 官方 `Button` 会在每个状态层里**最后重放调用方的样式**

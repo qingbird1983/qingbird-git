@@ -834,7 +834,7 @@ impl Shell {
                 row.child(window_control_button(
                     "min",
                     Some(AssetIcon::WindowMinimize),
-                    th.secondary_hover,
+                    hover_face(&th),
                     gpui_kit::WindowControlArea::Min,
                 ))
             })
@@ -846,7 +846,7 @@ impl Shell {
                     } else {
                         AssetIcon::WindowMaximize
                     }),
-                    th.secondary_hover,
+                    hover_face(&th),
                     gpui_kit::WindowControlArea::Max,
                 ))
             })
@@ -2038,7 +2038,7 @@ impl Shell {
             }))
             .child(meta_text(text, t))
             .when(!self.scanning, |it| {
-                it.hover(move |style| style.bg(t.colors.list_hover))
+                it.hover(move |style| style.bg(hover_face(t)))
             })
             .on_click(cx.listener(|this, _, _, cx| {
                 if !this.scanning {

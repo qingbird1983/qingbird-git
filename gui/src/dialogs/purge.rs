@@ -274,7 +274,7 @@ fn purge_body(t: &Theme, d: &PurgeDialog, this: &Entity<Shell>) -> Div {
         );
     } else {
         // 一个都不勾时也要说清"那就把勾选框勾上"——否则用户会以为这框坏了
-        col = col.child(meta_text("还没有勾选任何一项", t));
+        col = col.child(crate::widgets::empty_state("还没有勾选任何一项", "", t).flex_grow(0.));
     }
     col
 }

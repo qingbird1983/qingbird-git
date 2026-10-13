@@ -465,7 +465,7 @@ impl Shell {
                     .rounded(px(r_lg(t)))
                     .text_color(tier3(t))
                     .when(selected, |s| s.bg(wash(t)))
-                    .hover(|s| s.bg(if selected { wash(t) } else { track(t) }))
+                    .hover(|s| s.bg(if selected { wash(t) } else { hover_face(t) }))
                     .child(icon_sm(bucket_icon(b)).text_color(dot_color(b, t)))
                     .child(
                         div()
@@ -813,35 +813,19 @@ pub(crate) enum BadgeKind {
 /// 否则停在「第三方仓库」而它恰好是空的时，一句"还没有仓库"会让人以为自己
 /// 刚加的仓库不见了。`other_has_repos` 决定要不要给"换一组看看"那句——
 /// 两边都空时说这句是空话，指点一个空地方不如不说
-fn no_repos(group: Group, other_has_repos: bool, t: &Theme) -> Div {
+fn no_repos(group: Group, other_has_repos: bool, t: &Theme) -> AnyElement {
     let (label, _) = group.label_and_icon();
-    v_flex()
-        .flex_1()
-        .min_h_0()
-        .items_center()
-        .justify_center()
-        .px(px(GAP_LG))
-        .gap(px(GAP_TIGHT))
-        .child(
-            div()
-                .text_size(px(fs_sec()))
-                .text_color(tier3(t))
-                .child(format!("{label}里还没有仓库")),
-        )
-        .child(
-            div()
-                .text_size(px(fs_meta()))
-                .text_color(tier4(t))
-                .child("用下面的「添加仓库」加一个"),
-        )
-        .when(other_has_repos, |col| {
-            col.child(
+    crate::widgets::empty_state(format!("{label}里还没有仓库"), "用下面的「添加仓库」加一个", t)
+        // 两边都空时说"换一组看看"是空话，指点一个空地方不如不说
+        .when(other_has_repos, |e| {
+            e.child(
                 div()
                     .text_size(px(fs_meta()))
                     .text_color(tier4(t))
                     .child("也可以从左边导航轨切到另一组"),
             )
         })
+        .into_any_element()
 }
 
 /// 失败提示统一走通知，不弹模态
