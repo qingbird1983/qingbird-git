@@ -297,9 +297,17 @@ pub fn git_supports_ahead_behind() -> bool {
     *GIT_AB_OK.get_or_init(|| {
         let text = GIT_VERSION_TEXT
             .get_or_init(|| {
-                std::process::Command::new("git")
-                    .arg("--version")
-                    .output()
+                // ⚠️ 必须带 CREATE_NO_WINDOW（32-15）：这是 GUI 启动路径上第一颗
+                // 控制台子进程（首次渲染仓库状态时触发），漏了就是用户报的
+                // 「双击图标启动软件时黑色终端窗口闪一下」
+                let mut cmd = std::process::Command::new("git");
+                cmd.arg("--version");
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt as _;
+                    cmd.creation_flags(crate::git::CREATE_NO_WINDOW);
+                }
+                cmd.output()
                     .ok()
                     .and_then(|o| String::from_utf8(o.stdout).ok())
             })

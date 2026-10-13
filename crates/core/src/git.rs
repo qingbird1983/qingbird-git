@@ -4,10 +4,13 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-// GUI 程序派生控制台子进程（git）时 Windows 会弹出一个立即消失的终端窗口，
+// GUI 程序派生控制台子进程（git / curl）时 Windows 会弹出一个立即消失的终端窗口，
 // 必须加 CREATE_NO_WINDOW 抑制；仅对后台子进程，open_in_terminal 的可见窗口不受影响
+// ⚠️ **本 crate 的统一出处**（32-15）：repos.rs 的 `git --version`、update.rs 的
+// `curl.exe` 都从这里引——之前那两处各漏了一颗 flag，就是「双击启动闪终端 /
+// 检查更新闪终端」两个用户报障的根因。gui 侧 os.rs 在另一个 crate 里，另有一份
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 

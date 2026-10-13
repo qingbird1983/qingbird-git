@@ -154,6 +154,13 @@ fn curl_run(url: &str, proxy: Option<&str>, timeout: u64, out: &Path) -> Result<
         cmd.arg("-x").arg(p);
     }
     cmd.arg(url);
+    // ⚠️ 必须带 CREATE_NO_WINDOW（32-15）：本应用是 GUI 程序，curl.exe 是控制台
+    // 子进程，漏了这颗 flag 就是用户报的「点检查更新时黑色终端窗口闪一下」
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.creation_flags(crate::git::CREATE_NO_WINDOW);
+    }
     match cmd.output() {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => {
