@@ -53,7 +53,10 @@ const G_LOW: usize = 0;
 const G_CUR: usize = 1;
 const G_BATCH: usize = 2;
 const G_VIEW: usize = 3;
-const G_REPO: usize = 4;
+/// CLI 工具那一组（阶段一：只有一个「重新扫描」）。
+/// **排在「切到仓库」之前**——它也是固定长度的一组
+const G_CLI: usize = 4;
+const G_REPO: usize = 5;
 
 /// 面板里一条命令对应什么动作
 #[derive(Clone)]
@@ -91,6 +94,8 @@ pub(crate) enum PaletteAction {
     BatchLog,
     ToggleSidebar,
     ToggleInspector,
+    /// 重扫 CLI 工具（阶段一；CLI 屏左栏底部那颗键的键盘路径）
+    ScanCli,
 }
 
 impl Shell {
@@ -265,6 +270,8 @@ impl Shell {
             PaletteAction::BatchLog => self.open_batch_log_dlg(window, cx),
             PaletteAction::ToggleSidebar => self.toggle_sidebar(window, cx),
             PaletteAction::ToggleInspector => self.toggle_inspector(cx),
+            // 与 CLI 屏左栏底部那颗「重新扫描」走同一个入口
+            PaletteAction::ScanCli => self.scan_cli(cx),
         }
     }
 
@@ -518,17 +525,30 @@ impl Shell {
         acts.push(a_batch);
         debug_assert_eq!(groups.len(), G_VIEW);
 
-        // ---- 切换视图（导航轨三个按钮的键盘路径） ----
+        // ---- 切换视图（导航轨四个按钮的键盘路径） ----
         groups.push(CommandGroup::new().label("切换视图").items([
             nav_item("总览", AssetIcon::LayoutDashboard),
             nav_item("我的仓库", AssetIcon::GitBranch),
             nav_item("第三方仓库", AssetIcon::Users),
+            nav_item("CLI 工具", AssetIcon::Terminal),
         ]));
         acts.push(vec![
             PaletteAction::Nav(Nav::Overview),
             PaletteAction::Nav(Nav::Group(Group::Mine)),
             PaletteAction::Nav(Nav::Group(Group::Third)),
+            PaletteAction::Nav(Nav::CliTools),
         ]);
+        debug_assert_eq!(groups.len(), G_CLI);
+
+        // ---- CLI 工具（阶段一：只读展示，故只有「重新扫描」这一条动作） ----
+        // 「升级全部 / 清理共享缓存」属阶段三，**不在这里摆灰条目**——
+        // 一条点了没反应的命令比没有更糟（v4 铁律：不演拿不到的效果）
+        groups.push(CommandGroup::new().label("CLI 工具").items([plain(
+            "重新扫描 CLI 工具",
+            AssetIcon::Terminal,
+            &["cli", "工具", "扫描", "刷新"],
+        )]));
+        acts.push(vec![PaletteAction::ScanCli]);
         debug_assert_eq!(groups.len(), G_REPO);
 
         // ---- 切到仓库（**排最后**，理由见 `G_REPO` 的注释）----

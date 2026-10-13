@@ -128,6 +128,8 @@ impl Render for Shell {
                 Some(path) => self.detail_page(&path, &t, cx).into_any_element(),
                 None => empty_main(&t, window).into_any_element(),
             },
+            // CLI 工具屏：左栏工具列表 + 右栏详情，仿仓库屏骨架（阶段一为新屏）
+            Page::CliTools => self.cli_page(&t, cx).into_any_element(),
         };
 
         // 侧栏宽度只有一个真源：`ResizableState` 里第 0 号面板的宽度。
@@ -149,7 +151,10 @@ impl Render for Shell {
         // 官方那条 ζ=0.85 ⇒ 过冲 0.63% ⇒ 侧栏 220px 行程上只有 **1.4px**，
         // 弹簧确实在跑、用户确实看不到回弹（2026-10-05 实机反馈）。
         // 数字与推导见 `tokens.rs` 动效段，那儿有单测钉住"过冲必须看得见"。
-        let target_w: Pixels = if self.sidebar_collapsed || self.page == Page::Overview {
+        // ⚠️ **只有仓库页挂侧栏**：总览页与 CLI 屏都没有它。
+        // 判据写成 `!= Page::Repos` 而不是枚举出那两屏——加第三屏时
+        // 这里天然跟上（原写法只列了 Overview，CLI 屏一进来侧栏就弹了出来）
+        let target_w: Pixels = if self.sidebar_collapsed || self.page != Page::Repos {
             px(0.0)
         } else {
             px(self.sidebar_w)
@@ -1140,6 +1145,9 @@ impl Shell {
                 t,
                 cx,
             ))
+            // 第 4 个入口：CLI 工具屏（阶段一新增）。与前两颗不同——
+            // 它真的切屏，不是"驱动侧栏"那一路
+            .child(self.nav_item(AssetIcon::Terminal, Nav::CliTools, "CLI 工具", t, cx))
             // 设置键**沉在轨底**（2026-10-08 用户令：「左导航条 设置 按钮恢复到左下角」）。
             // 阶段 31.4 一度把它提到图标组下面 + 补一条发丝线分组，那条改动当轮就作废了：
             // 分组线用的是 `track`，与画布只差 1/255 **根本看不见**，等于把设置键白挪了一格。
@@ -1192,6 +1200,7 @@ impl Shell {
         let active = match nav {
             Nav::Overview => self.page == Page::Overview,
             Nav::Group(g) => self.page == Page::Repos && self.side_focus == g,
+            Nav::CliTools => self.page == Page::CliTools,
         };
         let ink = if active {
             t.colors.foreground
@@ -1202,6 +1211,7 @@ impl Shell {
             Nav::Overview => "nav-overview",
             Nav::Group(Group::Mine) => "nav-mine",
             Nav::Group(Group::Third) => "nav-third",
+            Nav::CliTools => "nav-cli",
         };
         Button::new(id)
             .icon(nav_icon(icon).text_color(ink))
@@ -1264,6 +1274,14 @@ impl Shell {
                     // 否则展开完视线还停在组标题上，不知道自己落到了哪儿
                     self.reveal = self.selected.clone();
                 }
+            }
+            Nav::CliTools => {
+                // 真·切屏。CLI 屏既没有仓库侧栏、也没有"我的/第三方"焦点，
+                // 所以不动 `side_focus`、不展开任何组
+                self.page = Page::CliTools;
+                // 进这一屏就扫一遍（与"进总览扫活跃度"同一套路数）。
+                // 扫描要跑几条外部命令，走后台；界面先拿缓存画
+                self.scan_cli(cx);
             }
         }
         cx.notify();
@@ -1401,6 +1419,9 @@ impl Shell {
             profile: ProfileState::default(),
             profile_seq: 0,
             profile_task: None,
+            cli: CliState::default(),
+            cli_seq: 0,
+            cli_task: None,
             history: HistoryState::default(),
             history_table,
             ov_table,
@@ -1618,6 +1639,12 @@ impl Shell {
     /// 两边最后都走 `reveal_repo`——切页、展开侧栏、展开那组、滚到那一行，
     /// 与点侧栏行、点总览行、⌘K 切仓库是同一个入口
     fn move_repo(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
+        // CLI 屏不是仓库列表，↑↓ 在这里没有对象可移（阶段一不做屏内选择键）。
+        // 不拦的话 `else` 那支会拿仓库列表去切选中，人眼在 CLI 屏上"点了没反应"
+        // 而侧栏里的选中偷偷换了
+        if self.page == Page::CliTools {
+            return;
+        }
         let list: Vec<String> = if self.page == Page::Overview {
             self.ov_rows.iter().map(|r| r.path.clone()).collect()
         } else {
@@ -1975,6 +2002,7 @@ impl Shell {
             (Page::Repos, Some(path)) => meta_text(path, t),
             (Page::Repos, None) => meta_text("未选中仓库", t),
             (Page::Overview, _) => meta_text("总览", t),
+            (Page::CliTools, _) => meta_text("CLI 工具", t),
         };
 
         let right = h_flex()

@@ -25,6 +25,7 @@
 mod actions;
 mod app_assets;
 mod changes;
+mod cli_tab;
 mod detail;
 mod diag;
 mod dialogs;

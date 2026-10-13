@@ -1571,12 +1571,14 @@ core（纯业务，不认识 gpui，单测 221 个都在这）：
 | `crates/core/src/history.rs` | 提交列表 / 详情 / patch + 三个纯解析函数 |
 | `crates/core/src/scan_cache.rs` | **阶段 16 的缓存层**：`scan_cache`（覆盖写）+ `op_history`（追加）两张表。⚠️ **别叫它 `history.rs`**——那个名字已被上一行的提交历史占了，`write` 工具当时明写了 `overwrote existing file` 是我漏看。**它是加速器不是依赖**：库打不开/表损坏/磁盘满一律降级（读返 `None`、写返 `false`），一次都不 panic |
 | `crates/core/src/space.rs` `run_cmd.rs` `fork.rs` `proxy.rs` `scheduler.rs` `store.rs` `types.rs` | 磁盘 / 一键命令 / 变基 / 代理探测 / **后台自动同步的到期判定与执行** / 配置持久化 / 共享类型 |
+| `crates/core/src/cli/` | **CLI 工具扫描（阶段一：只读）**：provider 抽象（`scoop` / `npm` / `pipx`，输出全是 JSON）+ SQLite 缓存（**与仓库缓存同一份库、同一条打开路径**）。子进程一律 `git::CREATE_NO_WINDOW`。⚠️ 与界面侧 `cli_tab.rs` 是一对；升级 / 卸载 / 数据目录 / 图标提取归后续阶段 |
 
 GUI（`gui/src`）：
 
 | 文件 | 职责 |
 |---|---|
 | `shell.rs` | 窗口壳、导航轨、状态条、**全部快捷键 Action 与绑定** |
+| `cli_tab.rs` | **CLI 工具屏（阶段一：只读扫描展示）**：左栏工具列表（按 provider 分组、可折叠）+ 右栏只读详情，仿仓库屏骨架。⚠️ 左栏是**屏内自己的列表列**，不复用也不驱动仓库侧栏；业务逻辑在 core 的 `cli/` |
 | `state.rs` | `Shell` 状态 + 纯逻辑（`bucket_of` / `dot_color` / `BatchKind` / `log_of`） |
 | `tokens.rs` | **视觉档位唯一真源**（字号/圆角/间距/图标/壳层宽度/选中面遮罩）；带 2 个 `#[cfg(test)]`：遮罩落在规范板 8/255 内、三处轨内边距不许并成一个数 |
 | `palette.rs` | ⌘K 命令面板（`palette_model` 同时产出条目与 `palette_actions` 下标表） |

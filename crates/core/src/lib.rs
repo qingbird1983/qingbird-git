@@ -7,6 +7,7 @@
 //! 流式输出这类要回调界面的地方一律用闭包（`run_cmd::run_repo_cmd`），
 //! 由 gui 侧自己接回 UI 线程——业务层不该知道 gpui 的存在。
 
+pub mod cli;
 pub mod clone;
 pub mod fork;
 pub mod git;

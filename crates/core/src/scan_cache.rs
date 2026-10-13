@@ -132,6 +132,21 @@ CREATE TABLE IF NOT EXISTS op_history (
     detail  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_op_history_path ON op_history(path, id DESC);
+-- CLI 工具扫描结果（阶段一）。与仓库缓存**同一份库文件**：建表 / 打开 /
+-- busy_timeout 全走这一条路径，`cli::cache` 只管增删查（别另起一个 open）。
+-- 一次扫描是一份快照 ⇒ 写入是「整表替换」（先 DELETE 再 INSERT）。
+-- `executables` 存 JSON 数组文本（命令名列表，值就几个短串）。
+CREATE TABLE IF NOT EXISTS cli_packages (
+    id           TEXT PRIMARY KEY,
+    provider     TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    version      TEXT,
+    latest       TEXT,
+    install_path TEXT,
+    kind         TEXT NOT NULL DEFAULT '',
+    executables  TEXT NOT NULL DEFAULT '[]',
+    scanned_at   INTEGER NOT NULL DEFAULT 0
+);
 ";
 
 /// 并发写这张表时，让第二个连接**等多久**再放弃（毫秒）。

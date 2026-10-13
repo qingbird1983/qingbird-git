@@ -1421,3 +1421,66 @@ pub(crate) fn sync_cfg_from(
         error: None,
     }
 }
+
+impl Shell {
+    /// 扫一遍本机的 CLI 工具（阶段一：只读）。
+    ///
+    /// 与 `scan_space` / `scan_profile` 同一套路数：**先把库里的那一份灌上屏，
+    /// 再起后台任务扫真的**。入口有三处——导航轨进 CLI 屏（`go`）、
+    /// CLI 屏左栏底部「重新扫描」、⌘K「重新扫描 CLI 工具」，都走这一颗。
+    ///
+    /// 代数守卫（`cli_seq`）与另外几处扫描一字不差：**先自增再取号**，
+    /// 写反了守卫永远对不上，闭包静默早退、`scanning` 永远落不回去。
+    pub(crate) fn scan_cli(&mut self, cx: &mut Context<Self>) {
+        self.cli_seq += 1;
+        let seq = self.cli_seq;
+        self.cli_task = None;
+
+        // 先上屏缓存。重扫时它会被后台结果替换，但**首屏不空、也不闪**
+        if let Some((packages, scanned_at)) = qingbird_core::cli::load_cached() {
+            self.cli.packages = packages;
+            self.cli.scanned_at = scanned_at;
+        }
+        self.cli.scanning = true;
+        self.cli.errors.clear();
+        self.cli_keep_selection();
+        cx.notify();
+
+        self.cli_task = Some(cx.spawn(async move |this, cx| {
+            let report = cx
+                .background_executor()
+                .spawn(async move { qingbird_core::cli::scan() })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.cli_seq != seq {
+                    return; // 已有新一轮，这批过期
+                }
+                this.cli.scanning = false;
+                this.cli.errors = report.errors.clone();
+                this.cli.scanned_at = report.scanned_at;
+                this.cli.packages = report.packages.clone();
+                // 落库失败不报：缓存是加速器不是依赖（core 那条约定）
+                qingbird_core::cli::save_cached(&report.packages, report.scanned_at);
+                this.cli_keep_selection();
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// 清单换了之后，把选中项收到一个**还存在于清单里**的 id 上。
+    ///
+    /// 两条：选中的那个还在 ⇒ 一个字段都不动（重扫不该把用户的选择抖掉）；
+    /// 不在（或压根没选）⇒ 落到第一个。**别让右栏空着**——"扫到了却点不开"
+    /// 比"没扫到"更难懂。
+    pub(crate) fn cli_keep_selection(&mut self) {
+        let still_there = self
+            .cli
+            .selected
+            .as_deref()
+            .is_some_and(|id| self.cli.packages.iter().any(|p| p.id == id));
+        if !still_there {
+            self.cli.selected = self.cli.packages.first().map(|p| p.id.clone());
+        }
+    }
+}

@@ -450,6 +450,41 @@ pub(crate) struct HistoryState {
     pub(crate) task: Option<Task<()>>,
 }
 
+/// CLI 工具屏的状态（阶段一：只读扫描展示）。
+///
+/// **一份全局**，不按仓库——CLI 工具是整台机器上的，与"当前选中哪个仓库"无关。
+pub(crate) struct CliState {
+    /// 扫到的全部 CLI 包（已按 provider + 名字排好，排序在 core 扫描那一步做）
+    pub(crate) packages: Vec<qingbird_core::cli::CliPackage>,
+    /// 当前选中的包 id（`"npm:pnpm"`）。None = 没选。
+    /// ⚠️ **存 id 不存下标**：重扫一次清单就变，下标会错位，而 id 稳定
+    pub(crate) selected: Option<String>,
+    pub(crate) scanning: bool,
+    /// 这一份是什么时候扫的（秒级，0 = 本会话还没扫过）
+    pub(crate) scanned_at: u64,
+    /// 某台 provider 失败的一句话（扫描协调器给的）。空 = 都成功。
+    /// 它**不影响别的 provider 的结果**——一句话提示，不是"整屏没扫到"
+    pub(crate) errors: Vec<String>,
+    /// 每个 provider 分组展开没展开，下标同 `ProviderId::all()`
+    /// （`[scoop, npm, pipx]`）。默认全展开
+    pub(crate) group_open: [bool; 3],
+}
+
+impl Default for CliState {
+    fn default() -> Self {
+        Self {
+            packages: Vec::new(),
+            selected: None,
+            scanning: false,
+            scanned_at: 0,
+            errors: Vec::new(),
+            // 默认全展开：**不是** `[false; 3]`——那会让首次进屏看到一列
+            // 折叠着的组标题，以为"扫到了但里面是空的"
+            group_open: [true; 3],
+        }
+    }
+}
+
 /// 总览表格的一行。**扁平化成值类型**而不是存 `(&RepoEntry, &RepoView)`：
 /// 委托是 `'static` 的，拿不到 `Shell` 的借用，而引用会逼着整张表在
 /// 每次 render 里重新构造一遍委托
@@ -563,15 +598,23 @@ pub(crate) fn stale_counts(rows: &[OvRow]) -> (usize, usize) {
 }
 
 /// 导航轨指向的页面
-/// **只有两态**（D2）：第 2、3 个导航按钮的语义是"驱动侧栏"而不是"切到第三种页面"，
-/// 「当前看哪一组」是侧栏的焦点态 `side_focus`，不往 `Page` 上加变体。
-/// 给"第三方仓库"开第三个 `Page` 会让总览/仓库两屏的判据分裂成两套。
+///
+/// ⚠️ **仓库那一路仍然只有"仓库页"一个 `Page`**（D2）：第 2、3 个导航按钮的语义是
+/// "驱动侧栏"而不是"切到第三种页面"，「当前看哪一组」是侧栏的焦点态 `side_focus`。
+/// 给"第三方仓库"单开一个 `Page` 会让总览/仓库两屏的判据分裂成两套。
+///
+/// `CliTools` 是**另一件事**：CLI 屏没有"我的/第三方"这种分组焦点，
+/// 也没有仓库详情那套页签，它就是第三种屏。放进 `Page` 是唯一正确的落点——
+/// 塞进 `Nav` 而不进 `Page` 的话，"当前在哪一屏"就少了这一个值，
+/// 而它恰恰会被 render / 侧栏挂载 / 窗口撑宽几处判据读到。
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Page {
     /// 仓库工作区（含两类仓库，按归属裁剪内容）
     Repos,
     /// 总览：只有统计，没有"当前仓库"这个对象
     Overview,
+    /// CLI 工具屏（阶段一：只读扫描展示）
+    CliTools,
 }
 
 /// 侧栏的仓库分组。导航轨第 2、3 个按钮与侧栏两个分组标题共用这套口径。
@@ -631,16 +674,21 @@ impl Group {
 pub(crate) fn drop_target(page: Page, side_focus: Group) -> Option<Group> {
     match page {
         Page::Repos => Some(side_focus),
-        Page::Overview => None,
+        // 总览页没有侧栏，也就没有"当前这一组"可言（见函数注释）。
+        // CLI 屏同理：它压根不是仓库列表，拖一个文件夹进来没有落点
+        Page::Overview | Page::CliTools => None,
     }
 }
 
 /// 导航轨三个按钮点下去各自意味着什么。
 /// 前两个按钮的差别不是"切到哪一屏"，而是"侧栏看哪一组"（D2）。
+/// `CliTools` 是真正切屏（第三种 `Page`），与它们是两回事。
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Nav {
     Overview,
     Group(Group),
+    /// CLI 工具屏（阶段一新增）
+    CliTools,
 }
 
 pub(crate) struct Shell {
@@ -923,6 +971,12 @@ pub(crate) struct Shell {
     pub(crate) profile: ProfileState,
     pub(crate) profile_seq: u64,
     pub(crate) profile_task: Option<Task<()>>,
+    /// CLI 工具屏的数据（阶段一：只读扫描展示）。**一份全局**——
+    /// CLI 工具是整台机器的，与"当前选中哪个仓库"无关
+    pub(crate) cli: CliState,
+    /// CLI 扫描的代数：过期结果不许覆盖新结果
+    pub(crate) cli_seq: u64,
+    pub(crate) cli_task: Option<Task<()>>,
     /// 「历史」页签的数据。只存一份在这里，页签与检视抽屉都从这儿读
     pub(crate) history: HistoryState,
     /// 提交列表（官方 `List`）。委托只带一个回指 `Shell` 的 Entity，
@@ -1839,19 +1893,20 @@ mod tests {
         assert_eq!(drop_target(Page::Overview, Group::Third), None);
     }
 
-    /// 真值表**整张**钉死：2 页 × 2 组，四格全列出来。
+    /// 真值表**整张**钉死：3 页 × 2 组，六格全列出来。
     ///
-    /// 为什么不用上面两条代替：`Page` 以后加第三种页面时，这个 `match` 会编译不过
+    /// 为什么不用上面两条代替：`Page` 加第三种页面时，这个 `match` 会编译不过
     /// （没有 `_` 分支），那时**必须回来重新想一遍**这一页收不收——而不是让它
-    /// 悄悄继承某一支的默认值。两格变四格时，靠"记得改测试"是防不住的。
+    /// 悄悄继承某一支的默认值。两格变六格时，靠"记得改测试"是防不住的
+    /// （2026-10-13 加 CLI 屏这条就是靠它当场提醒的）。
     #[test]
     fn the_whole_truth_table_is_pinned() {
-        for page in [Page::Repos, Page::Overview] {
+        for page in [Page::Repos, Page::Overview, Page::CliTools] {
             for g in [Group::Mine, Group::Third] {
                 let got = drop_target(page, g);
                 let want = match page {
                     Page::Repos => Some(g),
-                    Page::Overview => None,
+                    Page::Overview | Page::CliTools => None,
                 };
                 assert_eq!(got, want, "{page:?} + {g:?}");
             }
