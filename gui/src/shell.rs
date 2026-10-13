@@ -692,6 +692,22 @@ impl Shell {
             .into_any_element()
     }
 
+    /// 三颗标题栏开关共用的那副形状（审查台账 §1 第五条：同段三份）。
+    /// 各自不同的只有三样：id、图标随状态翻、点击做什么——共用的
+    /// "ghost + Small + tier3 + 气泡与读屏标签同一句"收在这里。
+    /// 少数派在调用方接着加（检视列那颗的 `tooltip_with_action` 键位角标）。
+    fn titlebar_toggle(
+        &self,
+        id: &'static str,
+        icon: AssetIcon,
+        label: &'static str,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Shell, &gpui_kit::ClickEvent, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Button {
+        ghost_btn(id, icon, tier3(t), Size::Small, label, cx, cx.listener(on_click))
+    }
+
     /// 明暗主题切换（阶段 21-4）。**放在窗口控件之前**，也就是紧挨着最小化键。
     ///
     /// ## 为什么不是"移动"而是"新增"
@@ -716,28 +732,15 @@ impl Shell {
         // 图标随**当前主题**翻：现在亮着就摆月亮（点了变暗），
         // 现在暗着就摆太阳。这是"按下会发生什么"的说法，与侧栏开关那颗
         // "按了会收起来"同一个约定
-        let icon = if t.is_dark() {
-            AssetIcon::Sun
+        let (icon, label) = if t.is_dark() {
+            (AssetIcon::Sun, "切到浅色主题")
         } else {
-            AssetIcon::Moon
+            (AssetIcon::Moon, "切到深色主题")
         };
-        let label = if t.is_dark() {
-            "切到浅色主题"
-        } else {
-            "切到深色主题"
-        };
-        ghost_btn(
-            "titlebar-theme-toggle",
-            icon,
-            tier3(t),
-            Size::Small,
-            label,
-            cx,
-            cx.listener(|_, _, window, cx| {
-                let dark = !cx.theme().is_dark();
-                Shell::toggle_theme_static(dark, window, cx);
-            }),
-        )
+        self.titlebar_toggle("titlebar-theme-toggle", icon, label, t, cx, |_, _, window, cx| {
+            let dark = !cx.theme().is_dark();
+            Shell::toggle_theme_static(dark, window, cx);
+        })
         .into_any_element()
     }
     /// 侧栏展开 / 收起开关。
@@ -756,25 +759,14 @@ impl Shell {
     /// 组件库做不到的是**调一个图标颜色**，不是"画一颗开关按钮"。
     fn sidebar_toggle(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // 图标随折叠态翻：这颗键的图标就是"它现在会做什么"的说明
-        let icon = if self.sidebar_collapsed {
-            AssetIcon::PanelLeftOpen
+        let (icon, label) = if self.sidebar_collapsed {
+            (AssetIcon::PanelLeftOpen, "展开仓库侧栏")
         } else {
-            AssetIcon::PanelLeftClose
+            (AssetIcon::PanelLeftClose, "收起仓库侧栏")
         };
-        let label = if self.sidebar_collapsed {
-            "展开仓库侧栏"
-        } else {
-            "收起仓库侧栏"
-        };
-        ghost_btn(
-            "titlebar-sidebar-toggle",
-            icon,
-            tier3(t),
-            Size::Small,
-            label,
-            cx,
-            cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)),
-        )
+        self.titlebar_toggle("titlebar-sidebar-toggle", icon, label, t, cx, |this, _, window, cx| {
+            this.toggle_sidebar(window, cx)
+        })
         .into_any_element()
     }
 
@@ -790,25 +782,14 @@ impl Shell {
     ///    本项目为"同帧两颗同 id"付过一次 debug panic 的学费（见 AGENTS.md）。
     ///    现在常驻一颗，`repo_head.rs` 那一颗随之删掉。
     fn inspector_toggle(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let icon = if self.inspector_open {
-            AssetIcon::PanelRightClose
+        let (icon, label) = if self.inspector_open {
+            (AssetIcon::PanelRightClose, "收起右栏")
         } else {
-            AssetIcon::PanelRightOpen
+            (AssetIcon::PanelRightOpen, "展开右栏")
         };
-        let label = if self.inspector_open {
-            "收起右栏"
-        } else {
-            "展开右栏"
-        };
-        ghost_btn(
-            "titlebar-inspector-toggle",
-            icon,
-            tier3(t),
-            Size::Small,
-            label,
-            cx,
-            cx.listener(|this, _, _, cx| this.toggle_inspector(cx)),
-        )
+        self.titlebar_toggle("titlebar-inspector-toggle", icon, label, t, cx, |this, _, _, cx| {
+            this.toggle_inspector(cx)
+        })
         // 键位角标：官方会自己去 keymap 里查 `ToggleInspector` 画成 `Kbd`，
         // 覆盖上面那颗不带角标的气泡（手写「（Ctrl …）」进文案的话，
         // 键位一改那句话就成了假提示）

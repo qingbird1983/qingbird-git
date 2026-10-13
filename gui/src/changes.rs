@@ -205,7 +205,7 @@ fn change_row(c: &ChangeEntry, t: &Theme) -> Div {
         .flex_shrink_0()
         .items_center()
         .gap(px(GAP_TIGHT))
-        .child(status_mark(c, t))
+        .child(stage_mark(c, t))
         .child(
             div()
                 .flex_1()
@@ -223,7 +223,7 @@ fn change_row(c: &ChangeEntry, t: &Theme) -> Div {
 /// **不用 git 的两字母代码。** `M` / `A` / `??` 只有天天敲 git 的人认得，
 /// 而这一列要回答的是"这次提交带不带它"——那是暂存 / 未暂存 / 未跟踪三件事，
 /// 写成人话才不用去查 git 文档
-fn status_mark(c: &ChangeEntry, t: &Theme) -> Div {
+fn stage_mark(c: &ChangeEntry, t: &Theme) -> Div {
     let (icon, ink, word) = if c.untracked {
         (AssetIcon::FilePlus, tier4(t), "未跟踪")
     } else if c.staged {
