@@ -885,7 +885,7 @@ pub(crate) fn sidebar_min_w(fs_sec: f32) -> f32 {
     let btn = SIDE_FOOT_CHARS * fs_sec + ICON_SM + GAP_TIGHT + 2.0 * BTN_PAD_X_SMALL;
     2.0 * btn + GAP + 2.0 * GAP_LG + 2.0 * GAP + 2.0
 }
-/// 窗口下限宽度。1080 − 轨 41（`NAV_W` 40 + 那条 1px 分界）− 侧栏 200 = 主区 831px
+/// 窗口下限宽度。1080 − 轨 41（`NAV_W` 40 + 那条 1px 分界）− 侧栏 200 = 主区 839px
 pub(crate) const WIN_MIN_W: f32 = 1080.0;
 
 /// 中间那一列（仓库页那几张卡自己的宽）**下限**。**950 是帧上量出来的**，
