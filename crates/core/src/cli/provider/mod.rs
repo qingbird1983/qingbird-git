@@ -114,6 +114,27 @@ pub trait PackageProvider: Send + Sync {
             None => OpPlan::blocked(pkg, "这个包管理器给不出卸载命令"),
         }
     }
+
+    // ---------- 阶段四 P0：阶段化升级事件 ----------
+
+    /// 升级输出里的这一行，说明升级进到了哪个阶段（`cli::upgrade` 的五阶段
+    /// 管道靠它供血）。`None` = 这行说明不了阶段。
+    ///
+    /// **默认 `None`：认不出来就不猜。** 从没被任何一行点亮的中间段，在
+    /// 命令成功后记「未报告」——按印象猜一个阶段，屏幕上就是一个对不上
+    /// 的 ✓。这正是设计 §4 唯一不许犯的错在这一屏的形状：**同一段过程
+    /// 两个真相**（我们以为的与包管理器实际干的），界面信的那个必须是
+    /// 后者。
+    ///
+    /// 覆写它的 provider 请拿**真输出**喂单测：winget 那几条是 2026-10-15
+    /// 本机 `winget download` 抓的原文（**中文系统**——winget 的输出随
+    /// 系统语言变，只匹配英文关键词在中文机器上永远不中）；npm 那条是
+    /// 本机 `npm install --prefix <tmp>` 管道模式下的全程输出。没抓过真
+    /// 输出的（scoop / pipx）**先不写观测器**：中段记「未报告」比按
+    /// GitHub 上的印象写几个关键词诚实
+    fn phase_of_line(&self, _line: &str) -> Option<crate::cli::upgrade::UpgradePhase> {
+        None
+    }
 }
 
 /// 阶段二的五个 provider（顺序见 [`ProviderId::all`]）。

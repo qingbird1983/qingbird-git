@@ -9,6 +9,7 @@ use crate::cli::exec;
 use crate::cli::model::{CliPackage, DirKind, PackageDir, PackageKind, ProviderId};
 use crate::cli::plan::{Step, UpdateInfo};
 use crate::cli::provider::PackageProvider;
+use crate::cli::upgrade::UpgradePhase;
 
 pub struct Npm;
 
@@ -108,6 +109,24 @@ impl PackageProvider for Npm {
     /// 卸载 = `npm uninstall -g <包名>`（设计 §6）。
     fn uninstall_step(&self, pkg: &CliPackage) -> Option<Step> {
         Some(Step::uninstall("npm", &["uninstall", "-g", &pkg.name]))
+    }
+
+    /// 阶段观测（阶段四 P0）。判据是 **2026-10-15 本机管道模式下的真输出**：
+    /// `npm install --prefix <tmp>` 全程只输出 `added 2 packages in 4s` 一行
+    /// （**进度条只在 TTY 下出**——我们的子进程没有控制台，一行都等不到）。
+    /// 那一行是 reify（落盘那一步）的结论 ⇒ 替换。下载 / 校验在管道里
+    /// 不上屏 ⇒ 那两段记「未报告」——画 ✓ 是编。
+    ///
+    /// 匹配口径：**动作开头的结论行**（added / changed / removed / updated
+    /// + package）。`npm warn deprecated …` 里也有 package 字样，但它不是
+    /// 结论行——按"含 package"匹配会把警告读成安装完成
+    fn phase_of_line(&self, line: &str) -> Option<UpgradePhase> {
+        let t = line.trim_start();
+        const REIFY: &[&str] = &["added", "changed", "removed", "updated"];
+        REIFY
+            .iter()
+            .any(|kw| t.starts_with(kw) && t.contains("package"))
+            .then_some(UpgradePhase::Replace)
     }
 }
 

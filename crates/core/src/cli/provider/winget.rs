@@ -67,6 +67,7 @@ use crate::cli::exec;
 use crate::cli::model::{CliPackage, PackageKind, ProviderId};
 use crate::cli::plan::Step;
 use crate::cli::provider::winget_id_of;
+use crate::cli::upgrade::UpgradePhase;
 
 /// 五个表头，**顺序就是切片的顺序**。zh-CN 与 en-US 两套：中文机器上 winget 打的是前者，
 /// 别人机器上可能是后者；两套都不认就报错（不猜、不硬凑）。
@@ -116,6 +117,48 @@ impl PackageProvider for Winget {
     fn uninstall_step(&self, pkg: &CliPackage) -> Option<Step> {
         let id = winget_id_of(pkg)?;
         Some(Step::uninstall("winget", &["uninstall", "--id", id, "--silent"]))
+    }
+
+    /// 阶段观测（阶段四 P0）。**下载 / 校验两侧是 2026-10-15 本机
+    /// `winget download` 抓回的真输出**（中文系统，`winget --version` =
+    /// v1.29.380）：`正在下载 <url>` → 下载，`已成功验证安装程序哈希` → 校验，
+    /// `已下载安装程序: <路径>` → 下载。安装侧（`正在安装` / `Installing`）
+    /// **沙箱里抓不到**（winget upgrade 会真装东西，老账：要真机点一次），
+    /// 按官方本地化模式补的双语关键词，标注为未取证——抓到的与推断的
+    /// 在注释里分开写，别让后来人以为一起验过。
+    ///
+    /// ⚠️ **必须双语**：winget 的输出随系统语言变。只匹配英文关键词在
+    /// 中文系统上永远不中，管道会全程「未报告」——那是把"没接上"画成
+    /// "没有"。判序：**先哈希、再下载、后安装**——`已成功验证安装程序
+    /// 哈希` 里含着"安装程序"四个字，松的安装关键词会把它抢走
+    fn phase_of_line(&self, line: &str) -> Option<UpgradePhase> {
+        const VERIFY: &[&str] = &[
+            "已成功验证安装程序哈希", // 真输出（中文）
+            "Successfully verified installer hash",
+            "verified installer hash",
+        ];
+        const DOWNLOAD: &[&str] = &[
+            "正在下载",           // 真输出（中文）
+            "已下载安装程序",     // 真输出（中文）
+            "Downloading",
+            "Downloaded installer",
+        ];
+        const REPLACE: &[&str] = &[
+            "正在安装", // 推断（沙箱抓不到安装侧）
+            "Installing",
+            "已成功安装", // 推断
+            "Successfully installed",
+        ];
+        if VERIFY.iter().any(|k| line.contains(k)) {
+            return Some(UpgradePhase::Verify);
+        }
+        if DOWNLOAD.iter().any(|k| line.contains(k)) {
+            return Some(UpgradePhase::Download);
+        }
+        if REPLACE.iter().any(|k| line.contains(k)) {
+            return Some(UpgradePhase::Replace);
+        }
+        None
     }
 }
 

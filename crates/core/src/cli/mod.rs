@@ -31,6 +31,7 @@ mod exec;
 mod model;
 mod plan;
 mod provider;
+mod upgrade;
 
 /// CLI 工具图标（阶段二第一件：从 exe 提图标 + 磁盘缓存）。
 ///
@@ -57,6 +58,14 @@ pub use cache::{load_cached, save_cached};
 pub use model::{CliPackage, DirKind, PackageDir, PackageKind, ProviderId, ScanReport};
 pub use plan::{clean_plan, OpPlan, RiskLevel, Step, StepKind, UpdateInfo};
 pub use provider::{provider_of, providers, PackageProvider};
+/// 阶段四 P0 的阶段化升级事件。**摊到 `cli` 根**：界面侧（`ops.rs` /
+/// `state.rs`）每帧读的就是 `cli::UpgradeProgress` 那一格，入口
+/// `cli::upgrade::run_upgrade` 留着那段路径——"跑一次升级"摊成
+/// `cli::run_upgrade(..)` 看不出跑的是什么的升级
+pub use upgrade::{
+    run_upgrade, CancelToken, PhaseState, PhaseStatus, RollbackPoint, UpgradeOutcome,
+    UpgradePhase, UpgradeProgress,
+};
 
 use crate::store::now_secs;
 
