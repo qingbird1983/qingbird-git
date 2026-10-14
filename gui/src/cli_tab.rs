@@ -244,11 +244,9 @@ impl Shell {
                     })
                     .child(p.name.clone()),
             )
-            // 可更新时行尾一颗小圆点（`p.latest.is_some()`，设计 §10.1「可更新工具行
-            // 右侧小圆点徽章」）。**阶段三接上了**：`latest` 由 winget 的清单免费带回、
-            // npm 的 `outdated` 单独查（`ops::check_cli_updates`），其余三家查不了 ⇒
-            // 它们的 `latest` 恒 `None`，点不画——不画骗人的点
-            .when(p.latest.is_some(), |row| row.child(update_dot(t)))
+            // ⛔ 行尾小圆点已按 v8 定稿移除（2026-10-14 用户令「左栏不需要全部更新
+            // 按钮」）：可更新出口收敛为**组标题橙点**（`cli_group`，updatable 仍由
+            // `latest.is_some()` 驱动）+ 档案头「可更新 x.y.z」徽章——判据仍是一个
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.cli.selected = Some(id.clone());
                 // 刚选中的那颗，它的数据目录可能还没量过体积（惰性，设计 §4）——
@@ -285,8 +283,10 @@ impl Shell {
     /// 外形照 `detail_page`：`flex_1` + `pt(GAP)`，**底部不给外边距**
     /// （与左栏一起贴到状态条上沿，用户 2026-10-08 定）。
     ///
-    /// 块间距取 `GAP_LG`（"两个不同东西"那一档）而不是 `GAP_TIGHT`：这一列装着
-    /// 详情卡 + 共享缓存汇总 + 操作日志三块，4px 让白卡与灰盒看着像连体
+    /// 块间距取 `GAP_TIGHT`(4)：帧上卡间 6 = 4 + 双 1px 边框（v8 定稿 §3.11.2，
+    /// 2026-10-14 用户定「卡片间距标准是 6px」并实测原型 24px 超了 4 倍）。这一列
+    /// 装着详情卡 + 共享缓存汇总 + 操作日志三块，`GAP_LG`(12) 会让白卡看着像三张
+    /// 孤岛——原型六帧按 6px 全过验收后，代码对齐
     pub(crate) fn cli_detail(&self, t: &Theme, cx: &mut Context<Self>) -> Div {
         let mut col = v_flex()
             .flex_1()
@@ -294,7 +294,7 @@ impl Shell {
             .h_full()
             .min_h_0()
             .pt(px(GAP))
-            .gap(px(GAP_LG));
+            .gap(px(GAP_TIGHT));
         match self
             .cli
             .packages
