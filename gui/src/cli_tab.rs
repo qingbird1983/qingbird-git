@@ -45,12 +45,13 @@ use gpui_kit::{
     div, img, percentage, px, AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement,
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled,
 };
-use qingbird_core::cli::{CliPackage, PackageDir, ProviderId};
+use gpui_kit::component::checkbox::Checkbox;
+use qingbird_core::cli::{provider_of, CliPackage, OpPlan, PackageDir, ProviderId, RiskLevel};
 use qingbird_core::space::human_bytes;
 
 use crate::log::{log_state_line, output_stream, should_follow_bottom};
 use crate::sidebar::{side_shell, Facing};
-use crate::state::Shell;
+use crate::state::{CliUninstallAudit, Shell};
 use crate::tokens::*;
 use crate::widgets::*;
 
@@ -405,6 +406,11 @@ impl Shell {
     ///   ③ 终端日志卡
     /// - **uninstall**（审计页）：卸载审计从模态框上浮到这一态（阶段四第 5 条）
     fn update_card(&self, p: &CliPackage, t: &Theme, cx: &mut Context<Self>) -> Div {
+        // uninstall 审计态（阶段四第 5 条：确认框上浮，不再弹第二层框）——
+        // 开着的审计对准这一包时，整卡换成审计页
+        if let Some(a) = self.cli_audit.as_ref().filter(|a| a.pkg.id == p.id) {
+            return card(t).child(self.audit_body(a, t, cx));
+        }
         let version = p.version.clone().unwrap_or_else(|| NONE.into());
         let busy = self.cli_busy_any();
         let mine = self.cli.busy.contains(&p.id);
@@ -421,7 +427,7 @@ impl Shell {
             // run 态：哪句话由打开的对话框判（busy 集不记动作；
             // 卸载框开着且 running = 卸载中，否则是升级）
             let verb = if self
-                .cli_uninstall_dlg
+                .cli_audit
                 .as_ref()
                 .is_some_and(|d| d.running)
             {
@@ -532,11 +538,247 @@ impl Shell {
                         .danger()
                         .with_size(Size::Small)
                         .disabled(busy)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_cli_uninstall_dlg(&id, window, cx);
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_cli_audit(&id);
+                            cx.notify();
                         })),
                 ),
         )
+    }
+
+    /// ② 卡 uninstall 审计态（阶段四第 5 条：确认框上浮，不再弹第二层框）。
+    ///
+    /// 四段层级原样搬自 dialogs/cli.rs 的 uninstall_body（v8 定稿：审计是中栏
+    /// ② 卡的一态，不是盖在界面上的模态）——数据全部来自 core 的 [`OpPlan`]：
+    /// **界面不自己判一次风险、不自己合计一次字节**（同一属性两个出处
+    /// 是本项目最贵的错）。勾选每帧从 `cli_audit.picked` 现读。
+    fn audit_body(&self, a: &CliUninstallAudit, t: &Theme, cx: &mut Context<Self>) -> Div {
+        let plan = self.audit_plan(a);
+        // ① 同时移除清单。话全部来自 core 的 `affected_notes`——四档桌面关联
+        // 四句话，说错方向不是显示问题（`CliWithDesktop` 说成"只卸命令行"
+        // 会让用户以为不碰桌面程序）
+        let affected = v_flex()
+            .w_full()
+            .gap(px(GAP_TIGHT))
+            .children(plan.affected.iter().map(|x| {
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .gap(px(GAP_TIGHT))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .pt(px(2.0))
+                            .text_color(if plan.risk == RiskLevel::High {
+                                t.colors.danger
+                            } else {
+                                tier3(t)
+                            })
+                            .child(icon_sm(if plan.risk == RiskLevel::High {
+                                AssetIcon::TriangleAlert
+                            } else {
+                                AssetIcon::CircleAlert
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(fs_sec()))
+                            .line_height(px(18.0))
+                            .text_color(body(t))
+                            .child(x.clone()),
+                    )
+            }));
+        // ② 等宽命令预览。**不可编辑**——它是给用户看"将要发生什么"的，
+        // 不是一个可以改的输入框（改了就不等于实际执行的那条）
+        let preview = sunken_box(
+            v_flex()
+                .w_full()
+                .p(px(GAP))
+                .gap(px(GAP_DENSE))
+                .font_family(t.mono_font_family.clone())
+                .children(plan.steps.iter().map(|st| {
+                    div()
+                        .w_full()
+                        .text_size(px(fs_meta()))
+                        .text_color(body(t))
+                        .child(st.preview())
+                })),
+            t,
+        );
+        // ③ 风险徽章 + 合计可释放
+        let risk_row = h_flex()
+            .w_full()
+            .items_center()
+            .gap(px(GAP))
+            .child(audit_risk_pill(plan.risk, t))
+            .child(div().flex_1())
+            .child(meta_text(
+                match plan.reclaimable {
+                    // 合计字节：**有一项没量过就整栏是 None**（core 的口径，
+                    // 拿量过的那些加出一个数 = 把"我还不知道"说成结论）
+                    Some(b) => format!("本次可释放约 {}", human_bytes(b)),
+                    None => "本次可释放：计算中…".to_string(),
+                },
+                t,
+            ));
+        // ④ 可勾选清理清单。`Cache` 默认勾、可改；`Config` / `Data` 禁勾——
+        // **不是把勾选框画灰**（官方 `Checkbox` 没有禁用档，画一个点了没反应的
+        // 方块比不画更糟），是换一颗锁图标 + 红字原因
+        let mut dirs = v_flex().w_full().gap(px(GAP_DENSE));
+        if a.pkg.dirs.is_empty() {
+            dirs = dirs.child(meta_text("没有发现这颗工具的数据目录".to_string(), t));
+        }
+        for dir in a.pkg.dirs.iter() {
+            dirs = dirs.child(self.audit_pick_row(t, a, dir, cx));
+        }
+        // 键组：取消 + 卸载（danger）。**执行中只禁确认键**：取消随时能点——
+        // 拦着是把用户关在页里；后台任务照跑，收审计态由 render 那一帧做
+        // （`pending_cli_dlg_close` 路径，`close_dialog` 空栈上是安全的）
+        let keys = h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .justify_end()
+            .gap(px(GAP))
+            .pt(px(GAP_TIGHT))
+            .child(
+                Button::new("cli-audit-cancel")
+                    .label("取消")
+                    .with_size(Size::Small)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.cli_audit = None;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("cli-audit-go")
+                    .label(if a.running { "执行中…" } else { "卸载" })
+                    .danger()
+                    .with_size(Size::Small)
+                    .disabled(a.running)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.run_cli_uninstall(cx);
+                    })),
+            );
+        v_flex()
+            .w_full()
+            .gap(px(GAP))
+            .child(affected)
+            .child(preview)
+            .child(risk_row)
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap(px(GAP_TIGHT))
+                    .child(
+                        div()
+                            .text_size(px(fs_meta()))
+                            .text_color(tier3(t))
+                            .child("卸载时顺手清理"),
+                    )
+                    .child(dirs),
+            )
+            .child(keys)
+    }
+
+    /// 审计态此刻的计划（勾选一变合计就变，所以**每帧重算**）。
+    ///
+    /// provider 认不出时给 `OpPlan::blocked`（steps 空）——确认键据此
+    /// **不开执行**（一颗确认了却什么都没做的键比没有更糟）
+    fn audit_plan(&self, a: &CliUninstallAudit) -> OpPlan {
+        let picked: Vec<PackageDir> = a
+            .pkg
+            .dirs
+            .iter()
+            .filter(|x| a.picked.contains(&x.path))
+            .cloned()
+            .collect();
+        match provider_of(a.pkg.provider) {
+            Some(pv) => pv.plan_uninstall(&a.pkg, &picked),
+            None => OpPlan::blocked(&a.pkg, "认不出这个包是从哪个包管理器装的"),
+        }
+    }
+
+    /// 审计态勾选行：可勾（Cache）/ 禁勾（Config·Data 换锁图标 + 红字）。
+    /// 勾选每帧从 `a.picked` 现读——不现读的后果很隐蔽：勾选行为是对的、
+    /// 画面上的方块不动
+    fn audit_pick_row(
+        &self,
+        t: &Theme,
+        a: &CliUninstallAudit,
+        dir: &PackageDir,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let checked = a.picked.contains(&dir.path);
+        let warn = dir.kind.note_is_warning();
+        // 闭包是 'static 的，`dir` 引用进不去——先克隆路径
+        let cb_path = dir.path.clone();
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap(px(GAP))
+            // 左槽：勾选框或锁。**两种"不给勾"是不同的两件事**——Cache 是
+            // "可清理、默认勾上"，Config/Data 是"不许清、给理由"
+            .child(if dir.kind.auto_deletable() {
+                Checkbox::new(SharedString::from(format!("cli-dir-cb-{cb_path}")))
+                    .checked(checked)
+                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                        if let Some(d) = this.cli_audit.as_mut() {
+                            if *checked {
+                                d.picked.insert(cb_path.clone());
+                            } else {
+                                d.picked.remove(&cb_path);
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            } else {
+                div()
+                    .w(px(16.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(tier4(t))
+                    .child(icon_sm(AssetIcon::Lock))
+                    .into_any_element()
+            })
+            .child(
+                div()
+                    .w(px(FORM_LABEL_W))
+                    .flex_shrink_0()
+                    .text_size(px(fs_meta()))
+                    .text_color(tier3(t))
+                    .child(dir.kind.label()),
+            )
+            .child(
+                div()
+                    .w(px(DIR_SIZE_W))
+                    .flex_shrink_0()
+                    .text_size(px(fs_meta()))
+                    .text_color(body(t))
+                    // `None` = 还没量（`size_text` 的口径：没量过与量到 0 是两句话）
+                    .child(size_text(dir.size)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(fs_meta()))
+                    .font_family(t.mono_font_family.clone())
+                    .text_color(tier3(t))
+                    .child(dir.path.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(fs_meta()))
+                    .text_color(if warn { t.colors.danger } else { tier3(t) })
+                    .child(dir.kind.note()),
+            )
     }
 
     /// ④ 磁盘占用卡：构成条（有量的目录按占比分段）+ 逐行（类别 · 路径 ·
@@ -833,6 +1075,19 @@ fn dir_kind_color(k: qingbird_core::cli::DirKind, t: &Theme) -> Hsla {
         }
         _ => tier3(t),
     }
+}
+
+/// 审计态风险徽章：三档各一个色（低 = 成功档 / 中 = 警示档 / 高 = 危险档）。
+///
+/// 颜色走全站那三套 wash（`OK_WASH` / `WARN_WASH` / `BAD_WASH`）——
+/// 不新调一个色：「可更新」「失败」在别处也是这三档，同一语义同色
+fn audit_risk_pill(risk: RiskLevel, t: &Theme) -> Div {
+    let (fg, bg) = match risk {
+        RiskLevel::Safe => (t.colors.success, wash_bg(OK_WASH, t)),
+        RiskLevel::Moderate => (orange_text(t), wash_bg(WARN_WASH, t)),
+        RiskLevel::High => (t.colors.danger, wash_bg(BAD_WASH, t)),
+    };
+    pill(&format!("风险 {}", risk.label()), fg, bg)
 }
 
 /// 数据目录里的一行：类别 · 体积 · 路径 · 那句话。

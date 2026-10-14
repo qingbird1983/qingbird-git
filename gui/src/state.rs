@@ -524,21 +524,22 @@ impl Default for CliState {
     }
 }
 
-/// CLI 卸载确认对话框（阶段三，设计 §10.1 四段信息层级）。
+/// CLI 屏 ② 卡的**卸载审计态**（v8 定稿 2026-10-14：确认框上浮到中栏卡，
+/// 这不是一个对话框）。设计 §10.1 四段信息层级在 `cli_tab::audit_body`。
 ///
-/// `Clone` 是因为对话框的 `content` builder 每帧现读快照（`purge.rs` 同一套写法：
+/// `Clone` 是因为勾选行每帧现读快照（`purge.rs` 同一套写法：
 /// 不现读的话勾选框行为是对的、画面上的方块不动）。
 #[derive(Clone)]
-pub(crate) struct CliUninstallDialog {
-    /// 目标包的**快照**。对话框开着的时候后台可能重扫，清单会变——
+pub(crate) struct CliUninstallAudit {
+    /// 目标包的**快照**。审计态开着的时候后台可能重扫，清单会变——
     /// 执行前 core 再按 id 核一遍（见 `ops::run_cli_uninstall`）
     pub(crate) pkg: qingbird_core::cli::CliPackage,
     /// 勾选上的清理目录路径。**`Cache` 默认全勾**（设计 §8：删了不影响功能）；
     /// `Config` / `Data` 压根不进这个集合（灰显禁勾）
     pub(crate) picked: std::collections::HashSet<String>,
     /// 正在跑：确认键转「执行中…」并禁用（防连点）。**执行前的失败不往这儿写**——
-    /// 包没了 / 给不出命令那两条路是「关框 + 一句通知」，不在框里摆错误态
-    /// （一颗开着却确认不了的框，比一句通知难懂）
+    /// 包没了 / 给不出命令那两条路是「收审计态 + 一句通知」，不在页里摆错误态
+    /// （一页开着却确认不了的审计，比一句通知难懂）
     pub(crate) running: bool,
 }
 
@@ -548,7 +549,7 @@ pub(crate) struct CliUninstallDialog {
 pub(crate) struct CliCleanDialog {
     /// 要清的那些（快照：路径 + 名字 + 体积）
     pub(crate) targets: Vec<qingbird_core::cli::PackageDir>,
-    /// 同 `CliUninstallDialog::running`
+    /// 同 `CliUninstallAudit::running`
     pub(crate) running: bool,
 }
 
@@ -1154,7 +1155,7 @@ pub(crate) struct Shell {
     /// 设置对话框；None = 未打开。导航轨那颗齿轮与 ⌘K「设置」共用这一个入口
     pub(crate) settings_dlg: Option<SettingsDialog>,
     /// CLI 卸载确认对话框（阶段三）；None = 未打开
-    pub(crate) cli_uninstall_dlg: Option<CliUninstallDialog>,
+    pub(crate) cli_audit: Option<CliUninstallAudit>,
     /// CLI 共享缓存清理确认对话框（阶段三）；None = 未打开
     pub(crate) cli_clean_dlg: Option<CliCleanDialog>,
     /// CLI 屏的操作日志（阶段三）。**不按仓库**——CLI 工具是整台机器上的，

@@ -1526,7 +1526,7 @@ impl Shell {
             clone_dlg: None,
             cmd_dlg: None,
             settings_dlg: None,
-            cli_uninstall_dlg: None,
+            cli_audit: None,
             cli_clean_dlg: None,
             cli_log: LogState::default(),
             cli_log_scroll: ScrollHandle::new(),

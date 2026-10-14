@@ -1769,7 +1769,7 @@ impl Shell {
                 lg.ts = store::now_secs();
                 // 收框 + 一句结论。通知必须弹：用户可能已经切到别的屏，
                 // 而日志区在 CLI 屏里——不弹一句他就此不知道结果
-                if this.cli_uninstall_dlg.take().is_some()
+                if this.cli_audit.take().is_some()
                     || this.cli_clean_dlg.take().is_some()
                 {
                     this.pending_cli_dlg_close = true;
@@ -1791,11 +1791,11 @@ impl Shell {
 
     /// 卸载（卸载确认框那颗「卸载」）。**执行前用当下清单按 id 重建计划**：
     /// 对话框开着的时候后台可能重扫，快照里的版本 / 目录可能已经变了
-    /// （`CliUninstallDialog::pkg` 字段注释）
+    /// （`CliUninstallAudit::pkg` 字段注释）
     pub(crate) fn run_cli_uninstall(&mut self, cx: &mut Context<Self>) {
-        // 整份克隆出来再动手：下面几处要**改** `cli_uninstall_dlg`（置空 / 置
+        // 整份克隆出来再动手：下面几处要**改** `cli_audit`（置空 / 置
         // running），而 `d` 还借在它身上——克隆一份快照，借用当场结束
-        let Some(d) = self.cli_uninstall_dlg.clone() else {
+        let Some(d) = self.cli_audit.clone() else {
             return;
         };
         if d.running {
@@ -1804,7 +1804,7 @@ impl Shell {
         let id = d.pkg.id.clone();
         // 包没了（重扫之后被卸掉 / 改名）：关框说清楚，**不开空执行**
         let Some(pkg) = self.cli.packages.iter().find(|p| p.id == id).cloned() else {
-            self.cli_uninstall_dlg = None;
+            self.cli_audit = None;
             self.pending_cli_dlg_close = true;
             self.pending_cli_note = Some(format!("{} 已经不在清单里了，没有动任何东西", d.pkg.name));
             cx.notify();
@@ -1825,13 +1825,13 @@ impl Shell {
         if plan.steps.is_empty() {
             // 给不出卸载命令：**不开确认框、也不开执行**（一颗确认了却
             // 什么都没做的键比没有更糟）。关框 + 把 core 给的那句话说出来
-            self.cli_uninstall_dlg = None;
+            self.cli_audit = None;
             self.pending_cli_dlg_close = true;
             self.pending_cli_note = Some(plan.summary);
             cx.notify();
             return;
         }
-        if let Some(d) = self.cli_uninstall_dlg.as_mut() {
+        if let Some(d) = self.cli_audit.as_mut() {
             d.running = true;
         }
         self.cli.busy.insert(id);
