@@ -427,7 +427,7 @@ impl Shell {
         }
         let mut rows = v_flex().w_full().gap(px(GAP_DENSE));
         for d in self.cli.shared.iter() {
-            rows = rows.child(shared_row(d, t, cx));
+            rows = rows.child(self.shared_row(d, t, cx));
         }
         Some(sunken_box(
             v_flex()
@@ -468,6 +468,69 @@ impl Shell {
             t,
         ))
     }
+
+/// 共享缓存汇总里的一行：名字 · 路径 · 体积 · 「清理」。
+///
+/// 名字是**这一条的身份**（`npm 缓存` 与 `pnpm store` 是两样东西），
+/// 所以它排在最前面、用的是正文色；路径压到后面去。
+/// 「清理」在行尾（阶段三）：一颗一条地清，也过确认框——大删除不许一键直达
+///
+/// ⛔ **它是 `&self` 方法，render 期直读 `self`，不许 `cx.entity()` + `read(cx)`**：
+/// render 时 Shell 正被 update 借着，再 read 同一个 entity 直接 panic
+/// （"cannot read Shell while it is already being updated"，gpui entity_map.rs:156）。
+/// 2026-10-14 抓帧当场崩在这——**进 CLI 屏（共享缓存非空时）必现**，
+/// 而 cargo check / 单测一个都不报。这一版当初写成自由函数（没有 self 可读）
+/// 才绕去 read entity；改成方法就是了，`cx` 只留给那颗键的 listener 用
+fn shared_row(&self, d: &PackageDir, t: &Theme, cx: &mut Context<Shell>) -> Div {
+    let this_busy = self.cli.shared_busy.contains(&d.path);
+    let any_busy = self.cli_busy_any();
+    // 行尾那颗键要找回来得按路径对（清单会因重扫变，下标会错位）
+    let path = d.path.clone();
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap(px(GAP))
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(fs_meta()))
+                .text_color(body(t))
+                .child(d.label.clone()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(fs_meta()))
+                .text_color(tier3(t))
+                .child(d.path.clone()),
+        )
+        .child(
+            div()
+                .w(px(DIR_SIZE_W))
+                .flex_shrink_0()
+                .text_size(px(fs_meta()))
+                .text_color(body(t))
+                .child(size_text(d.size)),
+        )
+        .child(
+            Button::new(SharedString::from(format!("cli-clean-{path}")))
+                .label(if this_busy { "清理中…" } else { "清理" })
+                .with_size(Size::Small)
+                // 任何一个 CLI 操作在跑就禁（设计 §11 串行）——共享缓存清理
+                // 与卸载 / 升级共用同一把串行锁
+                .disabled(any_busy)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    // 只清这一颗：目标清单就一条。**按路径从当下清单里取**——
+                    // 不用行里那个快照（重扫之后大小可能变了，而确认框要报新数）
+                    let target = this.cli.shared.iter().find(|x| x.path == path).cloned();
+                    if let Some(one) = target {
+                        this.open_cli_clean_dlg(vec![one], window, cx);
+                    }
+                })),
+        )
+}
 
     /// 右栏底部那块「操作日志」（设计 §10.1：**收起态**，复用 `log.rs` 的输出流）。
     ///
@@ -755,63 +818,6 @@ fn dir_row(d: &PackageDir, t: &Theme) -> Div {
                     tier3(t)
                 })
                 .child(d.kind.note()),
-        )
-}
-
-/// 共享缓存汇总里的一行：名字 · 路径 · 体积 · 「清理」。
-///
-/// 名字是**这一条的身份**（`npm 缓存` 与 `pnpm store` 是两样东西），
-/// 所以它排在最前面、用的是正文色；路径压到后面去。
-/// 「清理」在行尾（阶段三）：一颗一条地清，也过确认框——大删除不许一键直达
-fn shared_row(d: &PackageDir, t: &Theme, cx: &mut Context<Shell>) -> Div {
-    let this = cx.entity();
-    let this_busy = this.read(cx).cli.shared_busy.contains(&d.path);
-    let any_busy = this.read(cx).cli_busy_any();
-    // 行尾那颗键要找回来得按路径对（清单会因重扫变，下标会错位）
-    let path = d.path.clone();
-    h_flex()
-        .w_full()
-        .items_center()
-        .gap(px(GAP))
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_size(px(fs_meta()))
-                .text_color(body(t))
-                .child(d.label.clone()),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(px(fs_meta()))
-                .text_color(tier3(t))
-                .child(d.path.clone()),
-        )
-        .child(
-            div()
-                .w(px(DIR_SIZE_W))
-                .flex_shrink_0()
-                .text_size(px(fs_meta()))
-                .text_color(body(t))
-                .child(size_text(d.size)),
-        )
-        .child(
-            Button::new(SharedString::from(format!("cli-clean-{path}")))
-                .label(if this_busy { "清理中…" } else { "清理" })
-                .with_size(Size::Small)
-                // 任何一个 CLI 操作在跑就禁（设计 §11 串行）——共享缓存清理
-                // 与卸载 / 升级共用同一把串行锁
-                .disabled(any_busy)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    // 只清这一颗：目标清单就一条。**按路径从当下清单里取**——
-                    // 不用行里那个快照（重扫之后大小可能变了，而确认框要报新数）
-                    let target = this.cli.shared.iter().find(|x| x.path == path).cloned();
-                    if let Some(one) = target {
-                        this.open_cli_clean_dlg(vec![one], window, cx);
-                    }
-                })),
         )
 }
 
