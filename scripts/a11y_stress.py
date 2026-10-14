@@ -85,7 +85,8 @@ def clean(path):
 
 PS_DUMP = r"""
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$el = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]{hwnd})
+$el = $null
+try {{ $el = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]{hwnd}) }} catch {{ $el = $null }}
 if ($null -eq $el) {{ Write-Output "NO-ELEMENT"; exit 0 }}
 $cond = [System.Windows.Automation.Condition]::TrueCondition
 try {{
@@ -112,26 +113,49 @@ class Node:
         return f"{self.kind}|{self.name}|{self.w}x{self.h}@{self.x},{self.y}"
 
 
-def dump(hwnd):
+def dump(hwnd, retries=3):
     """一次 PowerShell 拿全树。这一步同时就是**激活 a11y** 的那个动作
-    （`AutomationElement.FromHandle` + `FindAll` 会让平台回调把 `active_flag` 置上）。"""
-    p = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", PS_DUMP.format(hwnd=hwnd)],
-        capture_output=True, text=True, timeout=120,
-    )
-    out = []
-    for ln in (p.stdout or "").splitlines():
-        parts = ln.strip().split("|")
-        if len(parts) == 6:
-            try:
-                out.append(Node(parts[0], parts[1], *(int(v) for v in parts[2:])))
-            except ValueError:
-                pass
-        elif ln.startswith(("ERR=", "NO-ELEMENT")):
-            raise AssertionError(f"a11y dump 失败：{ln.strip()}")
-    if not out:
-        raise AssertionError(f"a11y dump 一个节点都没有。stderr={p.stderr.strip()[:200]}")
-    return out
+    （`AutomationElement.FromHandle` + `FindAll` 会让平台回调把 `active_flag` 置上）。
+
+    ⚠️ **拿 bytes 自己按 GBK 解，不用 `text=True`**（2026-10-14 抓 CLI 帧时踩的）：
+    Windows PowerShell 5.1 的 stdout 是 OEM 代码页（936）字节，而 agent 侧
+    managed Python 3.13 是 `utf8_mode=1` ⇒ 中文节点名（「收起右栏」这种）
+    在 readerthread 里解出 `UnicodeDecodeError`，**管道静默变空、dump 报
+    "一个节点都没有"**，而 rc=0、stderr 空——错得没有一点线索。
+    先例脚本当时能跑是因为那套解释器 `utf8_mode=0`（preferred=cp936）。
+    `errors="replace"`：坏字节宁可变成 `?` 也不要整棵树丢。
+
+    ⚠️ **NO-ELEMENT 要重试**（同一天量的）：窗口正在渲染 / 跑子进程（winget list 那种）
+    时 UIA 客户端偶发连不上——`FromHandle` 对 gpui 窗口**有时抛"无法识别的错误"、
+    有时返回 null**（两条路都踩到过）。⇒ PS_DUMP 里 FromHandle 也包了 try，
+    抛异常与返回 null 统一成 NO-ELEMENT 走重试；重试收在这里，调用方不各自包 try。"""
+    last = ""
+    for attempt in range(retries):
+        p = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", PS_DUMP.format(hwnd=hwnd)],
+            capture_output=True, timeout=120,
+        )
+        stdout = (p.stdout or b"").decode("gbk", errors="replace")
+        stderr = (p.stderr or b"").decode("gbk", errors="replace")
+        out = []
+        for ln in stdout.splitlines():
+            parts = ln.strip().split("|")
+            if len(parts) == 6:
+                try:
+                    out.append(Node(parts[0], parts[1], *(int(v) for v in parts[2:])))
+                except ValueError:
+                    pass
+            elif ln.startswith(("ERR=", "NO-ELEMENT")):
+                last = ln.strip()
+        if out:
+            return out
+        if last == "NO-ELEMENT":
+            time.sleep(1.0)  # 窗口忙，等一秒再问
+            continue
+        break
+    raise AssertionError(
+        f"a11y dump 一个节点都没有（重试 {retries} 次）。"
+        f"最后一句={last or '(空)'} stderr={stderr.strip()[:200]}")
 
 
 def one(nodes, name, kind=None):
