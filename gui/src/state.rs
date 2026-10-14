@@ -1165,9 +1165,6 @@ pub(crate) struct Shell {
     /// 按 `ElementId` 存，两个元素共用一个 id 会共用同一个滚动句柄——
     /// 在 CLI 屏滚一下，概览页的日志会跟着跳（阶段 21-1 同一条）
     pub(crate) cli_log_scroll: ScrollHandle,
-    /// CLI 日志区展开没展开（设计 §10.1：收起态）。**不落盘**：
-    /// 它是一屏的读法，不是偏好（与 `ov_sort` 同口径）
-    pub(crate) cli_log_open: bool,
     /// 软件自更新这条链的状态（Q44）。**挂在 Shell 上不挂在设置弹窗上**：
     /// 下载是几十秒的长活，弹窗关了下载照走、重开进度还在
     pub(crate) upd: crate::self_update::UpdFlow,

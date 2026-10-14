@@ -42,8 +42,8 @@ use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{Disableable as _, Sizable as _, Size, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, img, percentage, px, AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled,
+    div, img, percentage, px, AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement,
+    IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled,
 };
 use qingbird_core::cli::{CliPackage, PackageDir, ProviderId};
 use qingbird_core::space::human_bytes;
@@ -301,7 +301,15 @@ impl Shell {
             .iter()
             .find(|p| Some(p.id.as_str()) == self.cli.selected.as_deref())
         {
-            Some(p) => col = col.child(self.cli_detail_card(p, t, cx)),
+            Some(p) => {
+                // v8 四卡（§3.11.5「工具驾驶舱」）：① 它是谁 → ② 该不该动 /
+                // 正在发生什么 → ④ 它占了我多少 → ③ 刚才发生了什么（吃剩余高度）。
+                // 共享缓存不再独立成盒：它是 provider 级磁盘占用，归进 ④ 卡
+                col = col
+                    .child(self.profile_card(p, t))
+                    .child(self.update_card(p, t, cx))
+                    .child(self.disk_card(p, t, cx));
+            }
             None => {
                 col = col.child(
                     card(t).child(
@@ -311,30 +319,16 @@ impl Shell {
                 )
             }
         }
-        // 共享缓存汇总：**紧跟在详情卡下面**。没有共享缓存就整块不画。
-        //
-        // ⚠️ 原来这里在它前面垫了一个 `div().flex_1()`（"把汇总条压到这一列的底部"），
-        // 2026-10-13 用户指着帧上那块空白问"是留给更新卸载的吗"——**它不是预留，
-        // 是那个垫子撑出来的洞**。设计 §9 只说共享缓存上右栏那条汇总，
-        // 没说中间要空一大截；阶段三的升级/卸载键挂在**详情卡自己身上**
-        // （卡底），操作日志在这一列尾巴，都不占这块空。
-        if let Some(box_) = self.shared_box(t, cx) {
-            col = col.child(box_);
-        }
-        // 操作日志：这一列的尾巴。**默认收起**（设计 §10.1「收起态」）——
-        // 一屏的主角是工具与目录，日志是跑完才看的东西
-        col.child(self.cli_log_box(t, cx))
+        // ③ 终端日志卡：这一列的尾巴，`flex_1` 吃剩余高度（v8 恒卡，不再收起）
+        col.child(self.terminal_log_card(t))
     }
 
-    /// 详情卡：名称 / 版本 / 来源 / 桌面关联 / 命令 / 安装目录 / 数据目录，
-    /// **卡底两颗管理键**（升级 / 卸载…，设计 §10.1 ASCII 最后那行）。
+    /// ① 档案头卡：图标 + 大名 + 来源附注 +（可更新徽章）→ 事实两行。
     ///
-    /// 升级键**只在真有新版时画**：`latest` 为 `None` 是"已最新**或未查询**"
-    /// （模型注释），画一颗升不了的键是骗人的键（v4 铁律）。
-    /// 卸不了的那种（provider 给不出命令）由 `run_cli_uninstall` 收成一句
-    /// 通知——键照画，因为五个 provider 都有卸载命令，blocked 只可能发生在
-    /// id 认不出的坏数据上
-    fn cli_detail_card(&self, p: &CliPackage, t: &Theme, cx: &mut Context<Self>) -> Div {
+    /// v8 §3.11.5：形态呼应仓库屏的仓库头。原来六行 kv 收敛成两行事实——
+    /// 版本 / 桌面关联 / 命令一行，安装目录整行放（长路径整行不断开）。
+    /// 数据目录不在这里：④ 卡是它们的家
+    fn profile_card(&self, p: &CliPackage, t: &Theme) -> Div {
         let version = p.version.clone().unwrap_or_else(|| NONE.into());
         let commands = if p.executables.is_empty() {
             NONE.into()
@@ -342,131 +336,328 @@ impl Shell {
             p.executables.join("、")
         };
         let install = p.install_path.clone().unwrap_or_else(|| NONE.into());
-        // 有新版时头行右侧那颗「可更新 x.y.z」徽章（设计 §10.1 ASCII 第一行）。
-        // 走全站那套 warn-wash 胶囊——「可更新」在侧栏 / 总览也是这一档，
-        // 同一语义同色
-        let mut head = CardHeader::new(p.name.clone())
-            .leading(self.tool_icon(p, TOOL_ICON_DETAIL, t))
-            // 来源（哪个包管理器）作为标题右侧的附注
-            .note(p.provider.label(), false);
+        let mut head = h_flex()
+            .w_full()
+            .items_center()
+            .gap(px(GAP))
+            .child(self.tool_icon(p, TOOL_ICON_DETAIL, t))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(fs_title()))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(body(t))
+                    .child(p.name.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(fs_meta()))
+                    .text_color(tier3(t))
+                    .child(p.provider.label()),
+            )
+            .child(div().flex_1());
+        // 「可更新 x.y.z」徽章：全站 warn-wash 胶囊那一档（侧栏 / 总览同一语义同色）
         if let Some(v) = &p.latest {
-            head = head.right(
-                pill(&format!("可更新 {v}"), orange_text(t), wash_bg(WARN_WASH, t)).into_any_element(),
+            head = head.child(
+                pill(&format!("可更新 {v}"), orange_text(t), wash_bg(WARN_WASH, t))
+                    .into_any_element(),
             );
         }
+        card(t).child(
+            v_flex()
+                .w_full()
+                .gap(px(GAP_TIGHT))
+                .child(head)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .items_center()
+                        .gap(px(GAP))
+                        .child(fact("版本", &version, t))
+                        .child(fact_dot(t))
+                        .child(fact("桌面关联", p.kind.label(), t))
+                        .child(fact_dot(t))
+                        .child(fact("命令", &commands, t)),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(fs_meta()))
+                        .text_color(tier3(t))
+                        .child(format!("安装目录  {install}")),
+                ),
+        )
+    }
+
+    /// ② 更新与卸载卡（v8 三态驾驶舱，§3.11.5）：
+    ///
+    /// - **ready**（常态）：版本迁移大数字（有 `latest` 时「当前 → 可更新」，
+    ///   `num` 档大数字 + 橙色目标版本）；`latest` 为 `None` 是"已最新**或未查询**"
+    ///   （模型注释），所以只写「暂无更新信息」这一句**不确定的话**，
+    ///   不写「已是最新」那种确定的假话。卡底键组：升级（`can_upgrade`）+ 卸载…
+    /// - **run**（`busy` 含本包）：状态行「正在 升级/卸载」。⛔ **不画假进度**——
+    ///   五阶段管道（分步计时 / 可取消 / 百分比）是后端待建 P0（roadmap 阶段四
+    ///   清单 #1），事件没接上之前画进度条就是骗人；运行中的每步输出实时落进
+    ///   ③ 终端日志卡
+    /// - **uninstall**（审计页）：卸载审计从模态框上浮到这一态（阶段四第 5 条）
+    fn update_card(&self, p: &CliPackage, t: &Theme, cx: &mut Context<Self>) -> Div {
+        let version = p.version.clone().unwrap_or_else(|| NONE.into());
         let busy = self.cli_busy_any();
         let mine = self.cli.busy.contains(&p.id);
-        // 升级键还多一道判据：**provider 此刻给得出升级命令**
-        // （`upgrade_step` 是纯字符串拼接、不起进程，每帧问一次无副作用）。
-        // 不依赖"有 latest 就等于升得了"那个巧合——cargo 哪天接上 outdated
-        // 数据时，这条判据自动跟上，不用回来改这里
+        // 升级键多一道判据：**provider 此刻给得出升级命令**（`upgrade_step` 是纯
+        // 字符串拼接、不起进程，每帧问一次无副作用）。不依赖"有 latest 就等于
+        // 升得了"那个巧合——cargo 哪天接上 outdated 数据时，这条判据自动跟上
         let can_upgrade = p.latest.is_some()
             && qingbird_core::cli::provider_of(p.provider)
                 .and_then(|pr| pr.upgrade_step(p))
                 .is_some();
         let id = p.id.clone();
+        let mut body_col = v_flex().w_full().gap(px(GAP_TIGHT));
+        if mine {
+            // run 态：哪句话由打开的对话框判（busy 集不记动作；
+            // 卸载框开着且 running = 卸载中，否则是升级）
+            let verb = if self
+                .cli_uninstall_dlg
+                .as_ref()
+                .is_some_and(|d| d.running)
+            {
+                "卸载"
+            } else {
+                "升级"
+            };
+            body_col = body_col.child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap(px(GAP))
+                    .rounded(px(r_lg(t)))
+                    .bg(wash_bg(WARN_WASH, t))
+                    .px(px(GAP))
+                    .py(px(GAP_TIGHT))
+                    .child(
+                        div()
+                            .text_size(px(fs_meta()))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(orange_text(t))
+                            .child(format!("正在{verb} {p}…", p = p.name)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(fs_meta()))
+                            .text_color(orange_text(t))
+                            .child("每步输出见下方操作日志"),
+                    ),
+            );
+        } else {
+            // ready 态：版本迁移行。有 latest 才画「当前 → 可更新」的迁移，
+            // 没有一句「暂无更新信息」
+            match &p.latest {
+                Some(latest) => {
+                    body_col = body_col.child(
+                        h_flex()
+                            .w_full()
+                            .items_baseline()
+                            .gap(px(GAP))
+                            .child(
+                                div()
+                                    .text_size(px(fs_num()))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(body(t))
+                                    .child(version),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(fs_title()))
+                                    .text_color(tier4(t))
+                                    .child("→"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(fs_num()))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(orange_text(t))
+                                    .child(latest.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(fs_meta()))
+                                    .text_color(tier3(t))
+                                    .child(format!("当前 · 可更新到（{}）", p.provider.label())),
+                            ),
+                    );
+                }
+                None => {
+                    body_col = body_col.child(
+                        div()
+                            .text_size(px(fs_meta()))
+                            .text_color(tier3(t))
+                            .child("暂无更新信息"),
+                    );
+                }
+            }
+        }
+        // 卡底键组：右对齐（与仓库详情卡的操作排同向）。**uninstall 审计态
+        // 接管「卸载…」之后这里换入口**（阶段四第 5 条），当前仍走模态框
+        card(t).child(body_col).child(
+            h_flex()
+                .w_full()
+                .flex_shrink_0()
+                .justify_end()
+                .gap(px(GAP))
+                .pt(px(GAP_TIGHT))
+                .when(can_upgrade, |row| {
+                    let id = id.clone();
+                    row.child(
+                        Button::new("cli-upgrade")
+                            .label(if mine { "升级中…" } else { "升级" })
+                            .icon(icon_sm(AssetIcon::ArrowUp).text_color(tier3(t)))
+                            .with_size(Size::Small)
+                            // 忙态禁言：**任何一个** CLI 操作在跑就禁
+                            // （设计 §11 串行）——两颗一起跑会在同一个包管理器上撞车
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.upgrade_cli_pkg(&id, cx);
+                            })),
+                    )
+                })
+                .child(
+                    Button::new("cli-uninstall")
+                        .label(if mine { "卸载中…" } else { "卸载…" })
+                        .icon(icon_sm(AssetIcon::Trash).text_color(tier3(t)))
+                        // **danger**：它开的是一颗不可逆动作，用主色等于鼓励用户点
+                        .danger()
+                        .with_size(Size::Small)
+                        .disabled(busy)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_cli_uninstall_dlg(&id, window, cx);
+                        })),
+                ),
+        )
+    }
+
+    /// ④ 磁盘占用卡：构成条（有量的目录按占比分段）+ 逐行（类别 · 路径 ·
+    /// 体积 · 那句话）+ 共享缓存行（provider 级，行尾「清理」走确认框）。
+    ///
+    /// v8 §3.11.5：原来独立的 `shared_box` 并进这里——它也是"它占了我多少"
+    /// 的一块。⛔ **分项「清理」按钮只在有执行路径的行画**：包内目录的
+    /// 单独清理后端没有（`Step::cleanup` 只活在卸载计划里），不画骗人的键；
+    /// 共享缓存有（阶段三的确认框路径），画
+    fn disk_card(&self, p: &CliPackage, t: &Theme, cx: &mut Context<Self>) -> Div {
+        // 合计：只加量过的（`None` 是"还没算"，不是 0——同一属性两个出处）
+        let measured: Vec<u64> = p.dirs.iter().filter_map(|d| d.size).collect();
+        let total: u64 = measured.iter().sum();
+        let head = h_flex()
+            .w_full()
+            .items_center()
+            .gap(px(GAP))
+            .child(
+                div()
+                    .text_size(px(fs_sec()))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(body(t))
+                    .child("磁盘占用"),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(px(fs_meta()))
+                    .text_color(tier3(t))
+                    .child(if p.dirs.is_empty() {
+                        "没有发现这颗工具的独立数据目录".to_string()
+                    } else {
+                        format!("合计 {}（{} 项）", human_bytes(total), measured.len())
+                    }),
+            );
+        let mut bar = h_flex()
+            .w_full()
+            .h(px(8.0))
+            .rounded(px(R_SM))
+            .overflow_hidden()
+            .bg(track(t));
+        for d in p.dirs.iter() {
+            if let Some(sz) = d.size {
+                if total > 0 {
+                    bar = bar.child(
+                        div()
+                            .h_full()
+                            .rounded(px(R_SM))
+                            .bg(dir_kind_color(d.kind, t))
+                            .flex_grow(sz as f32),
+                    );
+                }
+            }
+        }
+        let mut rows = v_flex().w_full().gap(px(GAP_DENSE));
+        for d in p.dirs.iter() {
+            rows = rows.child(dir_row(d, t));
+        }
+        // 共享缓存行（provider 级）。没有就整段不画
+        if !self.cli.shared.is_empty() {
+            for d in self.cli.shared.iter() {
+                rows = rows.child(self.shared_row(d, t, cx));
+            }
+        }
         card(t)
-            .child(head.build(t))
-            .child(kv("版本", &version, t))
-            .child(kv("来源", p.provider.label(), t))
-            // 桌面关联（core 按 PE 子系统判的两档之一）：**它是给用户看的卸载前提**
-            // ——「命令行 + 桌面程序」这一颗不能只当命令行卸。判不出证据时是「未确定」，
-            // 那句话照写：**"没证据"本身也是一句该让用户知道的话**
-            .child(kv("桌面关联", p.kind.label(), t))
-            .child(kv("命令", &commands, t))
-            .child(kv("安装目录", &install, t))
-            .child(dirs_section(&p.dirs, t))
-            // 卡底两颗管理键。右对齐（与仓库详情卡的操作排同向）
+            .child(v_flex().w_full().gap(px(GAP_TIGHT)).child(head).child(bar))
+            .child(rows)
+    }
+
+    /// ③ 终端日志卡（v8 恒卡）：标题行 + 等宽输出流（`output_stream` 内部
+    /// 就是卡内下沉盒那一档——终端形态的底）。`flex_1 + min_h_0` 吃掉
+    /// 这一列剩下的高度。
+    ///
+    /// ⚠️ **滚动句柄必须用 `cli_log_scroll`**：gpui 的滚动状态按 `ElementId` 存，
+    /// 与仓库日志共用一个 id 会共用一个滚动句柄（在 CLI 屏滚一下，
+    /// 概览页的日志跟着跳）。**贴底跟随**与仓库日志同一判据
+    /// （`should_follow_bottom`）：用户自己滚回底部后跟随自动恢复。
+    /// v8 把收起态去了（原型六帧恒卡）；`cli_log_open` 字段随之退役
+    fn terminal_log_card(&self, t: &Theme) -> Div {
+        let lg = &self.cli_log;
+        let stick = should_follow_bottom(
+            self.cli_log_scroll.offset().y.to_f64() as f32,
+            self.cli_log_scroll.max_offset().y.to_f64() as f32,
+        );
+        let panel = card(t)
+            .flex_1()
+            .min_h_0()
             .child(
                 h_flex()
                     .w_full()
                     .flex_shrink_0()
-                    .justify_end()
+                    .items_center()
                     .gap(px(GAP))
-                    .pt(px(GAP_TIGHT))
-                    .when(can_upgrade, |row| {
-                        let id = p.id.clone();
-                        row.child(
-                            Button::new("cli-upgrade")
-                                .label(if mine { "升级中…" } else { "升级" })
-                                .icon(icon_sm(AssetIcon::ArrowUp).text_color(tier3(t)))
-                                .with_size(Size::Small)
-                                // 忙态禁言：**任何一个** CLI 操作在跑就禁
-                                // （设计 §11 串行），不只是这一颗在跑——
-                                // 两颗一起跑会在同一个包管理器上撞车
-                                .disabled(busy)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.upgrade_cli_pkg(&id, cx);
-                                })),
-                        )
-                    })
+                    .h(px(SIDE_ROW_H))
+                    .px(px(GAP_XL))
                     .child(
-                        Button::new("cli-uninstall")
-                            .label(if mine { "卸载中…" } else { "卸载…" })
-                            .icon(icon_sm(AssetIcon::Trash).text_color(tier3(t)))
-                            // **danger**：它开的是一颗不可逆动作的确认框，
-                            // 用主色等于鼓励用户点（同 `dialogs/clean.rs` 那条判据）
-                            .danger()
-                            .with_size(Size::Small)
-                            .disabled(busy)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_cli_uninstall_dlg(&id, window, cx);
-                            })),
-                    ),
+                        div()
+                            .text_size(px(fs_sec()))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(body(t))
+                            .child("操作日志"),
+                    )
+                    .child(div().flex_1())
+                    .child(meta_text(
+                        log_state_line(lg.running, None, lg.ts, ""),
+                        t,
+                    )),
             )
-    }
-
-    /// 右栏那条「共享缓存」汇总（设计 §9）——**紧跟在详情卡下面**，不压到底部。
-    ///
-    /// 每行尾巴一颗「清理」（阶段三）：一颗一条地清，也走确认框
-    /// （`open_cli_clean_dlg`）——**删 18.8 GB 不给一次「你确定」不能接受**，
-    /// 与 `dialogs/clean.rs` 同一条判据。⌘K「清理共享缓存」是整批的那条路
-    fn shared_box(&self, t: &Theme, cx: &mut Context<Self>) -> Option<Div> {
-        if self.cli.shared.is_empty() {
-            return None;
+            .child(output_stream(
+                "cli-log-stream",
+                &self.cli_log_scroll,
+                t,
+                lg,
+                Some("还没有操作记录"),
+                "升级 / 卸载 / 清理共享缓存的结果会记在这里",
+            ))
+            .child(self.log_verdict_row(t, lg));
+        if stick {
+            self.cli_log_scroll.scroll_to_bottom();
         }
-        let mut rows = v_flex().w_full().gap(px(GAP_DENSE));
-        for d in self.cli.shared.iter() {
-            rows = rows.child(self.shared_row(d, t, cx));
-        }
-        Some(sunken_box(
-            v_flex()
-                .w_full()
-                // ⚠️ 内边距取 `GAP_XL`——与上面那张白卡**同一档**。这一块是那一列的
-                // 同级孩子、不是"卡内盒"（卡内盒那一档是 `GAP`），用 `GAP` 会让它的字
-                // 比卡里的字左移 8px：用户 2026-10-13 说的"文字太靠边、没让出边留白"
-                // 就是这 8px（帧上量过：白卡内容 x=314、这一块 x=306）
-                .p(px(GAP_XL))
-                // 标题与行之间是"两个不同东西" ⇒ `GAP_LG`（卡内块间距同一档）
-                .gap(px(GAP_LG))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .gap(px(GAP))
-                        .child(
-                            div()
-                                .text_size(px(fs_meta()))
-                                .text_color(tier3(t))
-                                .child("共享缓存"),
-                        )
-                        .child(div().flex_1())
-                        // 整批清的那颗（⌘K 同一条路）。**与逐颗那颗分开**：
-                        // 一颗是"我只想清 npm 缓存"，一颗是"全清"——代价差一个量级
-                        .child(
-                            Button::new("cli-clean-shared-all")
-                                .label("全部清理…")
-                                .with_size(Size::Small)
-                                .disabled(self.cli_busy_any())
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let targets = this.cli.shared.clone();
-                                    this.open_cli_clean_dlg(targets, window, cx);
-                                })),
-                        ),
-                )
-                .child(rows),
-            t,
-        ))
+        panel
     }
 
 /// 共享缓存汇总里的一行：名字 · 路径 · 体积 · 「清理」。
@@ -532,123 +723,6 @@ fn shared_row(&self, d: &PackageDir, t: &Theme, cx: &mut Context<Shell>) -> Div 
         )
 }
 
-    /// 右栏底部那块「操作日志」（设计 §10.1：**收起态**，复用 `log.rs` 的输出流）。
-    ///
-    /// 两档：
-    /// - **收起**（默认）：一条可点的摘要——「操作日志」+ 最后一句结论
-    ///   （或「还没有操作记录」）。一屏的主角是工具与目录，日志是跑完才看的
-    /// - **展开**：`output_stream`（等宽输出流，全仓唯一那份）+ 结论行。
-    ///   `flex_1 + min_h_0` 吃掉这一列剩下的高度（同仓库详情页日志卡那套）
-    ///
-    /// ⚠️ **滚动句柄必须用 `cli_log_scroll`**：gpui 的滚动状态按 `ElementId` 存，
-    /// 与仓库日志共用一个 id 会共用一个滚动句柄——在 CLI 屏滚一下，
-    /// 概览页的日志会跟着跳（`cli_log_scroll` 字段注释同一条）
-    ///
-    /// 返回 `AnyElement`：收起态那颗条要点得动（`.id()` 之后是 `Stateful<Div>`），
-    /// 展开态是张卡——两个分支不同类型，收 `AnyElement` 由调用方 `child` 收
-    fn cli_log_box(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let lg = &self.cli_log;
-        if !self.cli_log_open {
-            // 收起态那条。**结论从 `verdict` 取**（跑完才有）——没有就说"还没有记录"，
-            // 不说"运行中"（那一句归展开态的状态行）
-            let tail = match &lg.verdict {
-                Some((_, msg)) => msg.clone(),
-                None => "还没有操作记录".to_string(),
-            };
-            return h_flex()
-                .id("cli-log-collapsed")
-                .w_full()
-                .flex_shrink_0()
-                .items_center()
-                .gap(px(GAP))
-                .h(px(SIDE_ROW_H))
-                .px(px(GAP_XL))
-                .rounded(px(r_lg(t)))
-                .text_color(tier3(t))
-                .hover(|s| s.bg(hover_face(t)))
-                .child(
-                    icon_sm(AssetIcon::ChevronRight)
-                        .text_color(tier4(t))
-                        .rotate(percentage(90.0 / 360.0)),
-                )
-                .child(
-                    div()
-                        .text_size(px(fs_meta()))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("操作日志"),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(fs_meta()))
-                        .text_color(tier4(t))
-                        .child(tail),
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.cli_log_open = true;
-                    cx.notify();
-                }))
-                .into_any_element()
-        }
-        // 展开态。**贴底跟随**与仓库日志同一判据（`should_follow_bottom`）：
-        // 用户自己滚回底部后跟随自动恢复
-        let stick = should_follow_bottom(
-            self.cli_log_scroll.offset().y.to_f64() as f32,
-            self.cli_log_scroll.max_offset().y.to_f64() as f32,
-        );
-        let panel = card(t)
-            .flex_1()
-            .min_h_0()
-            .child(
-                h_flex()
-                    .w_full()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(GAP))
-                    .h(px(SIDE_ROW_H))
-                    .px(px(GAP_XL))
-                    .child(
-                        div()
-                            .text_size(px(fs_meta()))
-                            .text_color(tier3(t))
-                            .child("操作日志"),
-                    )
-                    .child(div().flex_1())
-                    .child(meta_text(
-                        log_state_line(lg.running, None, lg.ts, ""),
-                        t,
-                    ))
-                    .child(
-                        div()
-                            .id("cli-log-collapse")
-                            .cursor_pointer()
-                            .child(
-                                icon_sm(AssetIcon::ChevronRight)
-                                    .text_color(tier4(t))
-                                    .rotate(percentage(270.0 / 360.0)),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.cli_log_open = false;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(output_stream(
-                "cli-log-stream",
-                &self.cli_log_scroll,
-                t,
-                lg,
-                Some("还没有操作记录"),
-                "升级 / 卸载 / 清理共享缓存的结果会记在这里",
-            ))
-            .child(self.log_verdict_row(t, lg));
-        if stick {
-            self.cli_log_scroll.scroll_to_bottom();
-        }
-        panel.into_any_element()
-    }
 }
 
 /// 「可更新」那颗小圆点（`latest.is_some()` 时画，工具行行尾与组标题行尾）。
@@ -663,34 +737,6 @@ fn update_dot(t: &Theme) -> Div {
         .flex_shrink_0()
         .rounded_full()
         .bg(orange(t))
-}
-
-/// 详情卡里的一行「标签 · 值」。
-///
-/// 标签列宽走 `FORM_LABEL_W` 那一个档（不在这儿再写一个数）。
-/// ⚠️ 值那一列**左对齐**（不做 `justify_end`）：它装的是路径与命令名这类要读的
-/// 长文本，推到最右反而看不出标签与值的从属关系
-fn kv(label: &str, value: &str, t: &Theme) -> Div {
-    h_flex()
-        .w_full()
-        .items_start()
-        .gap(px(GAP_LG))
-        .child(
-            div()
-                .w(px(FORM_LABEL_W))
-                .flex_shrink_0()
-                .text_size(px(fs_body()))
-                .text_color(tier3(t))
-                .child(label.to_string()),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(px(fs_body()))
-                .text_color(body(t))
-                .child(value.to_string()),
-        )
 }
 
 /// 三级降的第 ③ 级：**终字符块**（设计 §10.1）——工具名前两个字符画一块。
@@ -749,32 +795,44 @@ pub(crate) fn monogram(name: &str) -> String {
 
 /// 右栏详情里那块「数据目录」（阶段二）。**只读**：勾选与清理是阶段三的事，
 /// 这一块只把"这颗工具在盘上留了什么、多大、能不能删"说清楚。
-///
-/// 一条都没发现时也要写一句：**空着会被读成"还在算"**，而真相是"规则库里没有它"
-/// （我们宁可少报也不按名字猜，见 `crates/core/src/cli/rules.toml` 头那两个反例）
-fn dirs_section(dirs: &[PackageDir], t: &Theme) -> Div {
-    let col = v_flex().w_full().gap(px(GAP_TIGHT)).child(
-        div()
-            .text_size(px(fs_meta()))
-            .text_color(tier3(t))
-            .child("数据目录"),
-    );
-    if dirs.is_empty() {
-        return col.child(sunken_box(
-            v_flex().w_full().p(px(GAP)).child(
-                div()
-                    .text_size(px(fs_meta()))
-                    .text_color(tier3(t))
-                    .child("没有发现这颗工具的独立数据目录"),
-            ),
-            t,
-        ));
+/// ① 档案头事实行的一段「标签 值」。
+fn fact(label: &str, value: &str, t: &Theme) -> Div {
+    h_flex()
+        .flex_shrink_0()
+        .items_baseline()
+        .gap(px(GAP_TIGHT))
+        .child(
+            div()
+                .text_size(px(fs_meta()))
+                .text_color(tier4(t))
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(fs_meta()))
+                .text_color(body(t))
+                .child(value.to_string()),
+        )
+}
+
+/// ① 档案头事实行的分隔点。
+fn fact_dot(t: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .text_size(px(fs_meta()))
+        .text_color(tier4(t))
+        .child("·")
+}
+
+/// ④ 卡构成条的分段色：按目录类型——缓存橙（warn 本体）、
+/// 配置 / 数据中性灰。不引入新色：warn 走 `orange_text`，中性走 `tier3`
+fn dir_kind_color(k: qingbird_core::cli::DirKind, t: &Theme) -> Hsla {
+    match k {
+        qingbird_core::cli::DirKind::Cache | qingbird_core::cli::DirKind::SharedCache => {
+            orange_text(t)
+        }
+        _ => tier3(t),
     }
-    let mut inner = v_flex().w_full().p(px(GAP)).gap(px(GAP_DENSE));
-    for d in dirs.iter() {
-        inner = inner.child(dir_row(d, t));
-    }
-    col.child(sunken_box(inner, t))
 }
 
 /// 数据目录里的一行：类别 · 体积 · 路径 · 那句话。

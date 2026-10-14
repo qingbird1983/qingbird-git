@@ -1530,8 +1530,6 @@ impl Shell {
             cli_clean_dlg: None,
             cli_log: LogState::default(),
             cli_log_scroll: ScrollHandle::new(),
-            // 收起态（设计 §10.1 线框图那一格）：默认收起，点了才展开
-            cli_log_open: false,
             upd: Default::default(),
             sync_cfg,
             palette,
