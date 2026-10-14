@@ -553,6 +553,28 @@ pub(crate) struct CliCleanDialog {
     pub(crate) running: bool,
 }
 
+/// ② 卡 run 态：一次**阶段化升级**的现场（阶段四 P0，UI-DESIGN §3.11.5）。
+///
+/// 与 `cli.busy` 的分工：那个只说"这颗在忙"（卸载 / 升级 / 清理共用），
+/// 这个带着**五阶段管道**要的全部东西——进度快照（后台每 120ms 轮询搬
+/// 进来一份，`ops::drain_log_until_done` 的 `LogEvent::CliUpgrade`）与
+/// 取消旗号（点「取消升级」置位，core 那头杀进程树）。
+///
+/// `Clone` 同 `CliUninstallAudit`：render 期每帧现读快照渲染管道，
+/// 不现读的话行为是对的、画面不动
+#[derive(Clone)]
+pub(crate) struct CliUpgradeRun {
+    /// 在升级的那颗包 id。**按 id 对**不存引用：跑着的这会儿后台可能
+    /// 重扫，清单变了这一条照样对得上正在跑的那颗
+    pub(crate) pkg_id: String,
+    /// 最新一份进度快照。收尾那一份也在里头（最终态），随 `cli_upgrade`
+    /// 一起被清掉
+    pub(crate) progress: qingbird_core::cli::UpgradeProgress,
+    /// 取消旗号。**一人一份副本看得是同一个字节**（core 侧 `CancelToken`）：
+    /// 界面存一份按取消，后台线程拿一份每行检查
+    pub(crate) cancel: qingbird_core::cli::CancelToken,
+}
+
 /// 总览表格的一行。**扁平化成值类型**而不是存 `(&RepoEntry, &RepoView)`：
 /// 委托是 `'static` 的，拿不到 `Shell` 的借用，而引用会逼着整张表在
 /// 每次 render 里重新构造一遍委托
@@ -1166,6 +1188,11 @@ pub(crate) struct Shell {
     /// 按 `ElementId` 存，两个元素共用一个 id 会共用同一个滚动句柄——
     /// 在 CLI 屏滚一下，概览页的日志会跟着跳（阶段 21-1 同一条）
     pub(crate) cli_log_scroll: ScrollHandle,
+    /// 一次阶段化升级的现场（阶段四 P0）；None = 没有升级在跑。
+    /// **收尾即清**（与卸载审计态同一套路）：② 卡回到 ready 态，结论在
+    /// ③ 终端日志卡与那一条通知里——一屏开着却确认不了的执行态，比一句
+    /// 通知难懂（`CliUninstallAudit::running` 同一条理由）
+    pub(crate) cli_upgrade: Option<CliUpgradeRun>,
     /// 软件自更新这条链的状态（Q44）。**挂在 Shell 上不挂在设置弹窗上**：
     /// 下载是几十秒的长活，弹窗关了下载照走、重开进度还在
     pub(crate) upd: crate::self_update::UpdFlow,

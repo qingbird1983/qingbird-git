@@ -1530,6 +1530,7 @@ impl Shell {
             cli_clean_dlg: None,
             cli_log: LogState::default(),
             cli_log_scroll: ScrollHandle::new(),
+            cli_upgrade: None,
             upd: Default::default(),
             sync_cfg,
             palette,

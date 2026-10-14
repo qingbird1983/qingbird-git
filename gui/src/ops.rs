@@ -58,6 +58,19 @@ enum LogEvent {
         detail: String,
         percent: Option<f32>,
     },
+    /// 阶段化升级的进度快照（阶段四 P0）。**只有 CLI 升级那条路产它**
+    /// （`cli::upgrade::run_upgrade` 的 `on_progress`），落进
+    /// `Shell::cli_upgrade` 而不是某个 `LogState`——五阶段管道要的是
+    /// 五格状态，`LogState::stage` 那一格装不下（同一个属性两个出处
+    /// 的项目学费，这里用"放进它自己的字段"避开）。
+    ///
+    /// **带 id 是为了防迟到快照**：每趟升级有自己的缓冲与轮询，收尾清掉
+    /// `cli_upgrade` 之后用户又开了下一趟，上一趟轮询的最后一批可能才到——
+    /// 对不上 id 就丢，不然新现场的管道上会闪一秒旧结论
+    CliUpgrade {
+        id: String,
+        progress: qingbird_core::cli::UpgradeProgress,
+    },
 }
 
 /// UI 线程那条轮询：每 `PROGRESS_POLL` 把共享缓冲里的新行搬进日志状态，
@@ -87,33 +100,47 @@ fn drain_log_until_done(
         };
         let finished = ui_done.load(Ordering::SeqCst);
         this.update(cx, |this, cx| {
-            let lg = this.log_sink(&sink);
-            for ev in batch {
-                match ev {
-                    LogEvent::Line(l) => lg.lines.push(l),
-                    LogEvent::Stage {
-                        stage,
-                        detail,
-                        percent,
-                    } => {
-                        // 空 stage = core 没认出这一行（只有 git 原文），
-                        // 不该把上一次认出来的阶段冲掉。`clone.rs` 的
-                        // `drain_into` 早就是这么判的（那里有注释），
-                        // 同一条链上两处判据得一样
-                        if !stage.is_empty() {
-                            lg.stage = Some(stage);
+            // 升级快照**不进日志槽**（它进 `Shell::cli_upgrade`）——先择出来，
+            // 日志槽那一借一还在手里，两处都要写就得撞车（E0499）
+            let mut ups: Vec<(String, qingbird_core::cli::UpgradeProgress)> = Vec::new();
+            {
+                let lg = this.log_sink(&sink);
+                for ev in batch {
+                    match ev {
+                        LogEvent::Line(l) => lg.lines.push(l),
+                        LogEvent::Stage {
+                            stage,
+                            detail,
+                            percent,
+                        } => {
+                            // 空 stage = core 没认出这一行（只有 git 原文），
+                            // 不该把上一次认出来的阶段冲掉。`clone.rs` 的
+                            // `drain_into` 早就是这么判的（那里有注释），
+                            // 同一条链上两处判据得一样
+                            if !stage.is_empty() {
+                                lg.stage = Some(stage);
+                            }
+                            // 网速同理：`done.` / 纯计数行没有速度信息，
+                            // 让它们把上一条的网速清掉 ⇒ 数字在闪
+                            if !detail.is_empty() {
+                                lg.detail = detail;
+                            }
+                            lg.percent = percent;
                         }
-                        // 网速同理：`done.` / 纯计数行没有速度信息，
-                        // 让它们把上一条的网速清掉 ⇒ 数字在闪
-                        if !detail.is_empty() {
-                            lg.detail = detail;
-                        }
-                        lg.percent = percent;
+                        LogEvent::CliUpgrade { id, progress } => ups.push((id, progress)),
                     }
                 }
+                if finished {
+                    lg.running = false;
+                }
             }
-            if finished {
-                lg.running = false;
+            for (id, progress) in ups {
+                // 迟到的旧快照对不上 id 就丢（变体注释那条理由）
+                if let Some(u) = this.cli_upgrade.as_mut() {
+                    if u.pkg_id == id {
+                        u.progress = progress;
+                    }
+                }
             }
             cx.notify();
         })
@@ -1789,6 +1816,140 @@ impl Shell {
         .detach();
     }
 
+    /// 跑一次**阶段化升级**（阶段四 P0）：② 卡 run 态的五阶段管道 +
+    /// 进度带 + 「取消升级」都靠它供血。
+    ///
+    /// 与 [`spawn_cli_run`]（plain 路：卸载 / 清理 / ⌘K 批量升级还在用）
+    /// 的分工：那条每**步**回调一次（一步一结论），这条每**行**、每次
+    /// **阶段切换**都回调——升级的五阶段管道（下载 → 校验 → 替换 …）
+    /// 是阶段内的事件，plain 路那根管道看不见。
+    ///
+    /// 三步与 plain 路同构：① 预览行进日志 + 起 run 态现场（初始进度
+    /// 五格全「等待」+ 取消旗号）→ ② 后台 `cli::run_upgrade`，行进共享
+    /// 缓冲、阶段快照走 `LogEvent::CliUpgrade` → ③ 收尾：清忙、清 run
+    /// 态、写结论、一句通知、重扫（与 plain 路逐条同一套）。
+    ///
+    /// ⚠️ **批量升级（⌘K「升级全部」）不走这条**：管道是"一颗包的
+    /// 五阶段"，一批包的阶段化是另一件事（roadmap 阶段四后续项），
+    /// 在那之前批量保持 plain 路——给不出管道的那颗不画管道
+    fn spawn_cli_upgrade(
+        &mut self,
+        cx: &mut Context<Self>,
+        summary: String,
+        pkg: &qingbird_core::cli::CliPackage,
+        step: &qingbird_core::cli::Step,
+    ) {
+        let id = pkg.id.clone();
+        // ① 预览：升级命令行先进日志——执行前用户必须看得见将要发生什么
+        // （与 plain 路同一判据；对话框里看过的那份这里原样再放一遍）
+        let lg = &mut self.cli_log;
+        lg.lines.push(format!("· {summary}"));
+        lg.lines.push(format!("  {}", step.preview()));
+        lg.running = true;
+        lg.error = None;
+        lg.verdict = None;
+        lg.ts = store::now_secs();
+        cx.notify();
+
+        // ② run 态现场。取消旗号在这里建一份、后台拿一份克隆——两边看得
+        // 是同一个字节（core 侧 `CancelToken`）
+        let cancel = qingbird_core::cli::CancelToken::new();
+        self.cli_upgrade = Some(CliUpgradeRun {
+            pkg_id: id.clone(),
+            progress: qingbird_core::cli::UpgradeProgress::new(),
+            cancel: cancel.clone(),
+        });
+        self.cli.busy.insert(id.clone());
+
+        // ③ 后台跑。行与快照进同一颗缓冲（与 plain 路同一套轮询管道）
+        let buf: Arc<Mutex<Vec<LogEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let done = Arc::new(AtomicBool::new(false));
+        let sink_buf = Arc::clone(&buf);
+        let sink_done = Arc::clone(&done);
+        let run_pkg = pkg.clone();
+        let run_step = step.clone();
+        let run_id = id.clone();
+        let runner = cx.background_executor().spawn(async move {
+            let line_buf = Arc::clone(&sink_buf);
+            let prog_buf = Arc::clone(&sink_buf);
+            let out = qingbird_core::cli::run_upgrade(
+                &run_pkg,
+                &run_step,
+                &cancel,
+                move |line| {
+                    // 每行进两处：屏上看得见（`cli_log`）与 app.log
+                    // （release 无 stderr，显式捕获通道，设计 §11）
+                    crate::diag::note(line);
+                    if let Ok(mut g) = line_buf.lock() {
+                        g.push(LogEvent::Line(line.to_string()));
+                    }
+                },
+                move |p| {
+                    if let Ok(mut g) = prog_buf.lock() {
+                        g.push(LogEvent::CliUpgrade {
+                            id: run_id.clone(),
+                            progress: p.clone(),
+                        });
+                    }
+                },
+            );
+            // 置完成旗号：轮询那条循环搬完最后一批就退（plain 路同一颗）
+            sink_done.store(true, Ordering::SeqCst);
+            out
+        });
+        drain_log_until_done(cx, &buf, &done, LogSink::Cli);
+
+        // ④ 收尾。与 plain 路同一套动作，只多两件：清 run 态现场、
+        // 结论按 取消 / 完成 / 没成功 三种终局分别说
+        let name = pkg.name.clone();
+        cx.spawn(async move |this, cx| {
+            let out = runner.await;
+            this.update(cx, |this, cx| {
+                // 同一时刻只放一个 ⇒ 两个忙集一起清（不会误伤别的操作）
+                this.cli.busy.clear();
+                this.cli.shared_busy.clear();
+                // run 态现场收掉：② 卡回 ready 态。**最终那份进度不进
+                // 界面**——结论在 ③ 终端日志卡与那一条通知里（一页开着
+                // 却确认不了的执行态，比一句通知难懂）
+                this.cli_upgrade = None;
+                let verdict = if out.cancelled {
+                    format!("升级 {name}：已取消")
+                } else if out.ok {
+                    format!("升级 {name}：完成")
+                } else {
+                    match &out.error {
+                        Some(e) => format!("升级 {name}：{e}"),
+                        None => format!("升级 {name}：有步骤没成功，详见上面"),
+                    }
+                };
+                let lg = &mut this.cli_log;
+                lg.running = false;
+                lg.verdict = Some((out.ok, verdict.clone()));
+                lg.ts = store::now_secs();
+                // 通知必须弹：用户可能已经切到别的屏，而日志区在 CLI
+                // 屏里——不弹一句他就此不知道结果（plain 路同一条）
+                this.pending_cli_note = Some(verdict);
+                // 包清单变了（升了一颗）：整屏重扫（`scan_cli` 落地时
+                // 会顺手再查一遍更新）
+                this.scan_cli(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 点「取消升级」（② 卡 run 态那颗键）。**只置旗号**：杀进程、
+    /// 收尾全在 core 的 runner 与上面的收尾帧里做，这里不碰 busy 也
+    /// 不清 `cli_upgrade`——清了管道就没了，而用户要看见「已取消」
+    /// 落在哪一段上
+    pub(crate) fn cancel_cli_upgrade(&mut self, cx: &mut Context<Self>) {
+        if let Some(u) = self.cli_upgrade.as_ref() {
+            u.cancel.cancel();
+        }
+        cx.notify();
+    }
+
     /// 卸载（卸载确认框那颗「卸载」）。**执行前用当下清单按 id 重建计划**：
     /// 对话框开着的时候后台可能重扫，快照里的版本 / 目录可能已经变了
     /// （`CliUninstallAudit::pkg` 字段注释）
@@ -1840,7 +2001,10 @@ impl Shell {
     }
 
     /// 升级一颗（详情卡那颗「升级」）。**不进 OpPlan**（设计 §6）：升级就是
-    /// 一条命令，没有清理步骤可言
+    /// 一条命令，没有清理步骤可言。
+    ///
+    /// 阶段四 P0 起走 [`spawn_cli_upgrade`]（阶段化事件那条路）：② 卡
+    /// run 态的五阶段管道 / 进度带 / 取消都接在真的命令事件上
     pub(crate) fn upgrade_cli_pkg(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.cli_busy_any() {
             return;
@@ -1857,10 +2021,13 @@ impl Shell {
             cx.notify();
             return;
         };
-        self.cli.busy.insert(id.to_string());
-        let summary = format!("升级 {}（{} → {}）", pkg.name, pkg.provider.label(),
-            pkg.latest.clone().unwrap_or_else(|| "最新".into()));
-        self.spawn_cli_run(cx, summary, vec![step], true, CliAfter::Rescan);
+        let summary = format!(
+            "升级 {}（{} → {}）",
+            pkg.name,
+            pkg.provider.label(),
+            pkg.latest.clone().unwrap_or_else(|| "最新".into())
+        );
+        self.spawn_cli_upgrade(cx, summary, &pkg, &step);
     }
 
     /// 升级全部可更新的（⌘K 那条）。

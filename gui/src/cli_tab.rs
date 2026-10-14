@@ -38,6 +38,7 @@
 use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::progress::Progress;
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{Disableable as _, Sizable as _, Size, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -46,18 +47,26 @@ use gpui_kit::{
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled,
 };
 use gpui_kit::component::checkbox::Checkbox;
-use qingbird_core::cli::{provider_of, CliPackage, OpPlan, PackageDir, ProviderId, RiskLevel};
+use qingbird_core::cli::{
+    provider_of, CliPackage, OpPlan, PackageDir, PhaseStatus, PhaseState, ProviderId, RiskLevel,
+    UpgradeProgress,
+};
 use qingbird_core::space::human_bytes;
 
 use crate::log::{log_state_line, output_stream, should_follow_bottom};
 use crate::sidebar::{side_shell, Facing};
-use crate::state::{CliUninstallAudit, Shell};
+use crate::state::{CliUninstallAudit, CliUpgradeRun, Shell};
 use crate::tokens::*;
 use crate::widgets::*;
 
 /// 「没有这个值」的记号。与总览表格里"没有这个数"那几列**同一个记号**
 /// （同一含义两个记号，又是一处会漂的东西）
 const NONE: &str = "–";
+
+/// 五阶段管道里态点的直径（px）。原型 `.pst .dot` = 18px
+const PIPE_DOT: f32 = 18.0;
+/// 管道格与格之间连接线的长度（px）。原型 `.pcn` = 22px
+const PIPE_LINK_W: f32 = 22.0;
 
 impl Shell {
     /// 左栏**内容**：工具列表（按 provider 分组，可折叠）+ 底部「重新扫描」。
@@ -400,16 +409,21 @@ impl Shell {
     ///   `num` 档大数字 + 橙色目标版本）；`latest` 为 `None` 是"已最新**或未查询**"
     ///   （模型注释），所以只写「暂无更新信息」这一句**不确定的话**，
     ///   不写「已是最新」那种确定的假话。卡底键组：升级（`can_upgrade`）+ 卸载…
-    /// - **run**（`busy` 含本包）：状态行「正在 升级/卸载」。⛔ **不画假进度**——
-    ///   五阶段管道（分步计时 / 可取消 / 百分比）是后端待建 P0（roadmap 阶段四
-    ///   清单 #1），事件没接上之前画进度条就是骗人；运行中的每步输出实时落进
-    ///   ③ 终端日志卡
+    /// - **run**（`busy` 含本包）：升级走**五阶段管道 + 进度带 + 取消**
+    ///   （阶段四 P0，`cli_upgrade` 带上 core 的阶段快照才画）；卸载 / 清理的
+    ///   忙态没有阶段事件（阶段化是后续项），继续画状态行——**给不出事件的
+    ///   动作不画管道**。运行中的每步输出实时落进 ③ 终端日志卡
     /// - **uninstall**（审计页）：卸载审计从模态框上浮到这一态（阶段四第 5 条）
     fn update_card(&self, p: &CliPackage, t: &Theme, cx: &mut Context<Self>) -> Div {
         // uninstall 审计态（阶段四第 5 条：确认框上浮，不再弹第二层框）——
         // 开着的审计对准这一包时，整卡换成审计页
         if let Some(a) = self.cli_audit.as_ref().filter(|a| a.pkg.id == p.id) {
             return card(t).child(self.audit_body(a, t, cx));
+        }
+        // run 态（阶段四 P0）：这一颗正在**阶段化升级**。整卡换成管道 +
+        // 进度带 + 取消升级，卡底键组不画（那两颗此刻全是禁言态）
+        if let Some(u) = self.cli_upgrade.as_ref().filter(|u| u.pkg_id == p.id) {
+            return card(t).child(self.upgrade_run_body(u, t, cx));
         }
         let version = p.version.clone().unwrap_or_else(|| NONE.into());
         let busy = self.cli_busy_any();
@@ -424,8 +438,11 @@ impl Shell {
         let id = p.id.clone();
         let mut body_col = v_flex().w_full().gap(px(GAP_TIGHT));
         if mine {
-            // run 态：哪句话由打开的对话框判（busy 集不记动作；
-            // 卸载框开着且 running = 卸载中，否则是升级）
+            // 卸载 / **批量**升级的忙态（单颗阶段化升级在上面就返回了，
+            // 到不了这儿）。哪句话由打开的审计判：审计开着且 running =
+            // 卸载中；否则是 ⌘K「升级全部」——那颗走 plain 路（一批包的
+            // 阶段化是后续项），**没有阶段事件的动作只画状态行**，
+            // 画管道就是编
             let verb = if self
                 .cli_audit
                 .as_ref()
@@ -541,6 +558,44 @@ impl Shell {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.open_cli_audit(&id);
                             cx.notify();
+                        })),
+                ),
+        )
+    }
+
+    /// ② 卡 **run 态**（阶段四 P0，§3.11.5）：五阶段管道 + 进度带 +
+    /// 「取消升级」。
+    ///
+    /// 数据全部来自 `u.progress`——core 的阶段快照（`cli::upgrade` 每行 /
+    /// 每次阶段切换产一份，经 120ms 轮询搬进来）。**界面不自己判阶段、
+    /// 不自己拼计时、不自己造百分比**：三件都是"同一过程两个真相"的形状，
+    /// 而这一屏刚刚花了一整个 P0 把事件接上，没理由在这儿断掉。
+    ///
+    /// ⛔ 没有画的那件：原型上「升级前已自动备份到 F:\Backups\…，失败或
+    /// 不满可一键回滚」那条承诺——文件备份是待建 #6（P2），P0 的备份段
+    /// 只记回滚点（版本 + 位置 + 命令入口）。承诺条等 #6 落地再画
+    fn upgrade_run_body(&self, u: &CliUpgradeRun, t: &Theme, cx: &mut Context<Self>) -> Div {
+        let body = v_flex()
+            .w_full()
+            .gap(px(GAP_TIGHT))
+            .child(upgrade_pipeline(t, &u.progress))
+            .child(upgrade_band(t, &u.progress));
+        card(t).child(body).child(
+            h_flex()
+                .w_full()
+                .flex_shrink_0()
+                .justify_end()
+                .gap(px(GAP))
+                .pt(px(GAP_TIGHT))
+                .child(
+                    Button::new("cli-upgrade-cancel")
+                        .label("取消升级")
+                        .with_size(Size::Small)
+                        // **执行中也可点**：取消不是禁言项——拦着是把用户
+                        // 关在页里（审计态那颗取消同理）。点了只置旗号，
+                        // 杀进程与收尾全在 core 与收尾帧里
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cancel_cli_upgrade(cx);
                         })),
                 ),
         )
@@ -1146,10 +1201,214 @@ pub(crate) fn size_text(size: Option<u64>) -> String {
     }
 }
 
+/// 五阶段管道（§3.11.5 run 态）：每格 = 态点 + 阶段名 + 计时/状态，
+/// 格与格之间一根 22px 连接线。**六态各有各的画法**，没有"默认 ✓"：
+///
+/// | 态 | 点 | 计时格 |
+/// |---|---|---|
+/// | Done | ✓ 成功色 / ok-wash 底 | `00:02`（这一段的用时） |
+/// | Running | ● 品牌色 / wash 底 | `进行中…` |
+/// | Pending | ○ 空心 / wash 底 | `等待` |
+/// | Failed | ✗ 危险色 / bad-wash 底 | `失败` |
+/// | Cancelled | ⊘ 中性 | `已取消` |
+/// | Unreported | − 中性淡 | `未报告` |
+///
+/// 后两态是 P0 的诚实档：**未报告** = 命令成功了但包管理器全程没报这
+/// 一段（画 ✓ 是编）；**已取消** = 用户按停时正卡在这儿（或一段都没
+/// 点亮时记在第一段，见 core 收尾定界）
+fn upgrade_pipeline(t: &Theme, pr: &UpgradeProgress) -> Div {
+    let mut row = h_flex().w_full().items_center();
+    for (ix, st) in pr.phases.iter().enumerate() {
+        if ix > 0 {
+            row = row.child(
+                div()
+                    .w(px(PIPE_LINK_W))
+                    .h(px(1.0))
+                    .flex_shrink_0()
+                    .bg(edge(t)),
+            );
+        }
+        row = row.child(upgrade_stage(t, st));
+    }
+    row
+}
+
+/// 管道里的一格。**每帧从快照现读**（`u.progress` 每 120ms 换一份），
+/// 不缓存——缓存的话行为是对的、画面不动（与审计态勾选同一课）
+fn upgrade_stage(t: &Theme, st: &PhaseStatus) -> Div {
+    let (bg, fg, icon, tm, tm_color, lb_color) = match st.state {
+        PhaseState::Done(d) => (
+            wash_bg(OK_WASH, t),
+            t.colors.success,
+            AssetIcon::Check,
+            fmt_elapsed(d),
+            tier3(t),
+            body(t),
+        ),
+        PhaseState::Running => (
+            wash_bg(INFO_WASH, t),
+            t.colors.accent,
+            AssetIcon::CircleDot,
+            "进行中…".to_string(),
+            t.colors.accent,
+            body(t),
+        ),
+        PhaseState::Pending => (
+            wash(t),
+            tier4(t),
+            AssetIcon::Circle,
+            "等待".to_string(),
+            tier4(t),
+            tier4(t),
+        ),
+        PhaseState::Failed(_) => (
+            wash_bg(BAD_WASH, t),
+            t.colors.danger,
+            AssetIcon::X,
+            "失败".to_string(),
+            t.colors.danger,
+            body(t),
+        ),
+        PhaseState::Cancelled => (
+            wash(t),
+            tier3(t),
+            AssetIcon::CircleSlash,
+            "已取消".to_string(),
+            tier3(t),
+            tier3(t),
+        ),
+        PhaseState::Unreported => (
+            wash(t),
+            tier4(t),
+            AssetIcon::Minus,
+            "未报告".to_string(),
+            tier4(t),
+            tier4(t),
+        ),
+    };
+    h_flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(GAP_TIGHT))
+        .child(
+            div()
+                .w(px(PIPE_DOT))
+                .h(px(PIPE_DOT))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(bg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon_sm(icon).text_color(fg)),
+        )
+        .child(
+            div()
+                .text_size(px(fs_meta()))
+                .text_color(lb_color)
+                .child(st.phase.label()),
+        )
+        .child(
+            div()
+                .font_family(t.mono_font_family.clone())
+                .text_size(px(fs_meta()))
+                .text_color(tm_color)
+                .child(tm),
+        )
+}
+
+/// 进度带（§3.11.5）：不定态扫光 / 确定态填充 + 一行读数
+/// （百分比 · 阶段话 · 第 k/n 步）。
+///
+/// ⚠️ **百分比 `None` 走官方不定态扫光**——包管理器的进度条只在 TTY 下
+/// 输出（winget / npm 本机实测），GUI 管道模式下拿不到是常态；造一个
+/// 假百分比只会让人以为快好了，然后越等越焦（`widgets::progress_readout`
+/// 同一条判据）。阶段话与第几步来自 core 快照，界面不自己拼
+fn upgrade_band(t: &Theme, pr: &UpgradeProgress) -> Div {
+    let bar = Progress::new("cli-upgrade-band")
+        .w_full()
+        .with_size(Size::XSmall)
+        .color(t.colors.accent)
+        .loading(pr.percent.is_none())
+        .accessibility_label(if pr.detail.is_empty() {
+            "升级进行中".to_string()
+        } else {
+            pr.detail.clone()
+        });
+    let bar = match pr.percent {
+        Some(p) => bar.value(p),
+        None => bar,
+    };
+    let mut readout = h_flex()
+        .w_full()
+        .items_center()
+        .gap(px(GAP))
+        // 百分比：有才画，mono + 品牌色。**没有就不画那一格**——
+        // 空着的百分比位比没有更让人以为卡在 0%
+        .when_some(pr.percent, |row, p| {
+            row.child(
+                div()
+                    .flex_shrink_0()
+                    .font_family(t.mono_font_family.clone())
+                    .text_size(px(fs_meta()))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(t.colors.accent)
+                    .child(format!("{p:.0}%")),
+            )
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(fs_meta()))
+                .text_color(tier3(t))
+                .child(pr.detail.clone()),
+        );
+    // 第 k/n 步：k = 第一格未完成的位置。**没有正在进行的段时也挂**——
+    // 备份 ✓ 之后就是"在第 2 步"，那句话说得出就说得着
+    if let Some((k, n)) = pr.step_no() {
+        readout = readout.child(
+            div()
+                .flex_shrink_0()
+                .font_family(t.mono_font_family.clone())
+                .text_size(px(fs_meta()))
+                .text_color(tier3(t))
+                .child(format!("第 {k}/{n} 步")),
+        );
+    }
+    sunken_box(
+        v_flex().w_full().p(px(GAP)).gap(px(GAP_TIGHT)).child(bar).child(readout),
+        t,
+    )
+}
+
+/// 管道格里的计时：`00:02`（分:秒，各两位）。升级的一段路分钟级就到头，
+/// 小时档是给自己找不自在——真跑了一小时以上，`99:59` 之后自然进位
+fn fmt_elapsed(d: std::time::Duration) -> String {
+    format!("{:02}:{:02}", d.as_secs() / 60, d.as_secs() % 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::monogram;
     use super::size_text;
+    use super::fmt_elapsed;
+    use std::time::Duration;
+
+    /// 管道计时：`分:秒` 各两位。**判据是"零也两位"**——`0:2` 与 `00:02`
+    /// 在等宽格里宽度不同，五格并列会参差不齐。
+    /// 亚秒用例用 `from_secs_f64` 写（`from_millis(1900)` 那种裸时长被
+    /// 令牌闸 R3 拦着——那条是给轮询节奏留的白名单，测试输入不沾）
+    #[test]
+    fn elapsed_is_zero_padded_mmss() {
+        assert_eq!(fmt_elapsed(Duration::from_secs(0)), "00:00");
+        assert_eq!(fmt_elapsed(Duration::from_secs_f64(1.9)), "00:01");
+        assert_eq!(fmt_elapsed(Duration::from_secs(62)), "01:02");
+        assert_eq!(fmt_elapsed(Duration::from_secs(599)), "09:59");
+        // 亚秒不进位（0.9s 是 00:00，不是 00:01）——计时说的是走完的整秒
+        assert_eq!(fmt_elapsed(Duration::from_secs_f64(0.9)), "00:00");
+    }
 
     /// 体积那一格：**没量过**与**量到 0** 必须是两句话
     #[test]
