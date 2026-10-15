@@ -2153,10 +2153,21 @@ impl Shell {
         drain_log_until_done(cx, &buf, &done, LogSink::Cli);
 
         // ④ 收尾。与 plain 路同一套动作，只多两件：清执行态现场、
-        // 结论按三种终局分别说
+        // 结论按三种终局分别说；**卸成了**再补一路残留审计（取消 / 失败
+        // 的残留是"没卸成"的证据，不是"卸完剩的"——residue 模块头）
         let summary = plan.summary.clone();
+        let snapshot = pkg.clone();
         cx.spawn(async move |this, cx| {
             let out = runner.await;
+            // 残留审计走盘 + 起子进程（reg query 全树搜），**绝不能在
+            // update 闭包里同步跑**（阻塞 UI 线程）——后台跑完再进收尾帧
+            let residue = if out.ok {
+                cx.background_executor()
+                    .spawn(async move { qingbird_core::cli::audit_pkg(&snapshot) })
+                    .await
+            } else {
+                Vec::new()
+            };
             this.update(cx, |this, cx| {
                 // 同一时刻只放一个 ⇒ 两个忙集一起清（不会误伤别的操作）
                 this.cli.busy.clear();
@@ -2179,6 +2190,25 @@ impl Shell {
                 }
                 let lg = &mut this.cli_log;
                 lg.running = false;
+                // 残留逐条进日志（③ 卡是操作记录的归处，跟每步输出同一格）：
+                // 出处 · 路径 · 大小/DisplayName。只提示不删——删不删是
+                // 用户的下一个决定
+                for it in &residue {
+                    let size = it
+                        .size
+                        .map(|s| format!(" · {}", qingbird_core::space::human_bytes(s)))
+                        .unwrap_or_default();
+                    lg.lines.push(format!(
+                        "  残留[{}] {}{size} — {}",
+                        it.kind.label(),
+                        it.path,
+                        it.detail,
+                    ));
+                }
+                if out.ok {
+                    lg.lines
+                        .push(format!("· 残留审计：{}", qingbird_core::cli::residue_verdict(&residue)));
+                }
                 lg.verdict = Some((out.ok, verdict.clone()));
                 lg.ts = store::now_secs();
                 // 通知必须弹：用户可能已经切到别的屏，而日志区在 CLI
