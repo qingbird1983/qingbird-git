@@ -71,6 +71,13 @@ enum LogEvent {
         id: String,
         progress: qingbird_core::cli::UpgradeProgress,
     },
+    /// 卸载执行的步骤快照（设计 §3.11.6，阶段四）。与 [`LogEvent::CliUpgrade`]
+    /// 同一条理由进 `Shell::cli_uninstall`（步骤管道要的是 N 行状态，
+    /// `LogState::stage` 那一格装不下），也同样**带 id 防迟到快照**
+    CliUninstall {
+        id: String,
+        progress: qingbird_core::cli::execute::PlanProgress,
+    },
 }
 
 /// UI 线程那条轮询：每 `PROGRESS_POLL` 把共享缓冲里的新行搬进日志状态，
@@ -100,9 +107,11 @@ fn drain_log_until_done(
         };
         let finished = ui_done.load(Ordering::SeqCst);
         this.update(cx, |this, cx| {
-            // 升级快照**不进日志槽**（它进 `Shell::cli_upgrade`）——先择出来，
-            // 日志槽那一借一还在手里，两处都要写就得撞车（E0499）
+            // 进度快照**不进日志槽**（它们进 `Shell::cli_upgrade` /
+            // `cli_uninstall`）——先择出来，日志槽那一借一还在手里，
+            // 两处都要写就得撞车（E0499）
             let mut ups: Vec<(String, qingbird_core::cli::UpgradeProgress)> = Vec::new();
+            let mut unins: Vec<(String, qingbird_core::cli::execute::PlanProgress)> = Vec::new();
             {
                 let lg = this.log_sink(&sink);
                 for ev in batch {
@@ -128,6 +137,7 @@ fn drain_log_until_done(
                             lg.percent = percent;
                         }
                         LogEvent::CliUpgrade { id, progress } => ups.push((id, progress)),
+                        LogEvent::CliUninstall { id, progress } => unins.push((id, progress)),
                     }
                 }
                 if finished {
@@ -137,6 +147,13 @@ fn drain_log_until_done(
             for (id, progress) in ups {
                 // 迟到的旧快照对不上 id 就丢（变体注释那条理由）
                 if let Some(u) = this.cli_upgrade.as_mut() {
+                    if u.pkg_id == id {
+                        u.progress = progress;
+                    }
+                }
+            }
+            for (id, progress) in unins {
+                if let Some(u) = this.cli_uninstall.as_mut() {
                     if u.pkg_id == id {
                         u.progress = progress;
                     }
@@ -1720,14 +1737,15 @@ impl Shell {
         .detach();
     }
 
-    /// 跑一颗卸载 / 清理计划（确认框那颗「卸载 / 清理」调它）。
+    /// 跑一串步骤（**plain 路**：⌘K 批量升级 / 共享缓存清理确认框调它）。
     ///
     /// 三步：① 计划预览**先写进 `cli_log`**（执行前用户必须看得见将要发生什么）
-    /// ② 后台 `run_plan`，每步一行经共享缓冲搬进日志（与 `run_slot` 同一套管道）
+    /// ② 后台 `run_steps`，每步一行经共享缓冲搬进日志（与 `run_slot` 同一套管道）
     /// ③ 收尾：清忙、写结论、收框 + 一句通知（render 兑现）、刷新数据。
     ///
-    /// ⚠️ **执行前用当下清单按 id 重建计划**在调用方做（见 `run_cli_uninstall`）：
-    /// 对话框开着的时候后台可能重扫，快照里的版本与目录可能已经变了
+    /// 与另两条阶段化链路（[`spawn_cli_upgrade`] / [`spawn_cli_uninstall_run`]）
+    /// 的分工见各自文档；**还给 plain 路的就这两种**——卸载 2026-10-15 起
+    /// 有了步骤管道（设计 §3.11.6），不再走这儿
     fn spawn_cli_run(
         &mut self,
         cx: &mut Context<Self>,
@@ -1819,10 +1837,11 @@ impl Shell {
     /// 跑一次**阶段化升级**（阶段四 P0）：② 卡 run 态的五阶段管道 +
     /// 进度带 + 「取消升级」都靠它供血。
     ///
-    /// 与 [`spawn_cli_run`]（plain 路：卸载 / 清理 / ⌘K 批量升级还在用）
+    /// 与 [`spawn_cli_run`]（plain 路：⌘K 批量升级 / 共享缓存清理还在用）
     /// 的分工：那条每**步**回调一次（一步一结论），这条每**行**、每次
     /// **阶段切换**都回调——升级的五阶段管道（下载 → 校验 → 替换 …）
-    /// 是阶段内的事件，plain 路那根管道看不见。
+    /// 是阶段内的事件，plain 路那根管道看不见。卸载 2026-10-15 起走
+    /// [`spawn_cli_uninstall_run`]（步骤管道，同一族机制）
     ///
     /// 三步与 plain 路同构：① 预览行进日志 + 起 run 态现场（初始进度
     /// 五格全「等待」+ 取消旗号）→ ② 后台 `cli::run_upgrade`，行进共享
@@ -1950,24 +1969,164 @@ impl Shell {
         cx.notify();
     }
 
-    /// 卸载（卸载确认框那颗「卸载」）。**执行前用当下清单按 id 重建计划**：
-    /// 对话框开着的时候后台可能重扫，快照里的版本 / 目录可能已经变了
+    /// 点「取消卸载」（② 卡卸载执行态那颗键）。**只置旗号**：杀进程、
+    /// 收尾全在 core 的 runner 与收尾帧里做（同 [`cancel_cli_upgrade`]）——
+    /// 用户要看见「已取消」落在哪一步上
+    pub(crate) fn cancel_cli_uninstall(&mut self, cx: &mut Context<Self>) {
+        if let Some(u) = self.cli_uninstall.as_ref() {
+            u.cancel.cancel();
+        }
+        cx.notify();
+    }
+
+    /// 跑一次**卸载计划**（② 卡卸载执行态，设计 §3.11.6「七步管道 +
+    /// 取消」）：步骤管道与「取消卸载」都靠它供血。
+    ///
+    /// 与 [`spawn_cli_run`]（plain 路：⌘K 批量升级 / 共享缓存清理还在用）
+    /// 的分工：那条每**步**回调一次结论；这条每**行**、每次**步骤状态
+    /// 切换**都回调（core `execute::run_plan_live`）——步骤管道要的是
+    /// "这一步正在进行"，plain 路那根管道看不见步内的事。
+    ///
+    /// 三步与 plain 路同构：① 预览行进日志 + 起执行态现场（初始快照
+    /// 全「等待」+ 取消旗号）→ ② 后台 `run_plan_live`（行进共享缓冲、
+    /// 步骤快照走 `LogEvent::CliUninstall`）→ ③ 收尾：清忙、清执行态、
+    /// 写结论、一句通知、重扫。
+    ///
+    /// ⚠️ **结论按三种终局分别说**（取消 / 完成 / 有步骤没成功），清理
+    /// 真释放了字节才带那句——`out.freed` 是 core 加出来的合计，不是
+    /// 审计页那个"预计"
+    fn spawn_cli_uninstall_run(
+        &mut self,
+        cx: &mut Context<Self>,
+        pkg: &qingbird_core::cli::CliPackage,
+        plan: &qingbird_core::cli::OpPlan,
+    ) {
+        let id = pkg.id.clone();
+        // ① 预览：每步一行等宽命令——**这是用户点确认之前看到的同一份**
+        // （审计页里那段预览），执行后再原样进日志，两边不会对不上
+        let lg = &mut self.cli_log;
+        lg.lines.push(format!("· {}", plan.summary));
+        for s in &plan.steps {
+            lg.lines.push(format!("  {}", s.preview()));
+        }
+        lg.running = true;
+        lg.error = None;
+        lg.verdict = None;
+        lg.ts = store::now_secs();
+        cx.notify();
+
+        // ② 执行态现场。取消旗号建一份、后台拿一份克隆——两边看得是同一个字节
+        let cancel = qingbird_core::cli::CancelToken::new();
+        self.cli_uninstall = Some(CliUninstallRun {
+            pkg_id: id.clone(),
+            progress: qingbird_core::cli::execute::PlanProgress::new(&plan.steps),
+            cancel: cancel.clone(),
+        });
+        self.cli.busy.insert(id.clone());
+
+        // ③ 后台跑。行与快照进同一颗缓冲（与 plain 路 / 升级同一条轮询管道）
+        let buf: Arc<Mutex<Vec<LogEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let done = Arc::new(AtomicBool::new(false));
+        let sink_buf = Arc::clone(&buf);
+        let sink_done = Arc::clone(&done);
+        let run_plan = plan.clone();
+        let run_id = id.clone();
+        let runner = cx.background_executor().spawn(async move {
+            let line_buf = Arc::clone(&sink_buf);
+            let prog_buf = Arc::clone(&sink_buf);
+            let out = qingbird_core::cli::execute::run_plan_live(
+                &run_plan,
+                &cancel,
+                move |line| {
+                    // 每行进两处：屏上看得见（`cli_log`）与 app.log
+                    // （release 无 stderr，显式捕获通道，设计 §11）
+                    crate::diag::note(line);
+                    if let Ok(mut g) = line_buf.lock() {
+                        g.push(LogEvent::Line(line.to_string()));
+                    }
+                },
+                move |p| {
+                    if let Ok(mut g) = prog_buf.lock() {
+                        g.push(LogEvent::CliUninstall {
+                            id: run_id.clone(),
+                            progress: p.clone(),
+                        });
+                    }
+                },
+            );
+            // 置完成旗号：轮询那条循环搬完最后一批就退（plain 路同一颗）
+            sink_done.store(true, Ordering::SeqCst);
+            out
+        });
+        drain_log_until_done(cx, &buf, &done, LogSink::Cli);
+
+        // ④ 收尾。与 plain 路同一套动作，只多两件：清执行态现场、
+        // 结论按三种终局分别说
+        let summary = plan.summary.clone();
+        cx.spawn(async move |this, cx| {
+            let out = runner.await;
+            this.update(cx, |this, cx| {
+                // 同一时刻只放一个 ⇒ 两个忙集一起清（不会误伤别的操作）
+                this.cli.busy.clear();
+                this.cli.shared_busy.clear();
+                // 执行态收掉：② 卡回 ready 态。**最终那份快照不进界面**——
+                // 结论在 ③ 终端日志卡与那一条通知里（与升级执行态同一条）
+                this.cli_uninstall = None;
+                let mut verdict = if out.cancelled {
+                    format!("{summary}：已取消")
+                } else if out.ok {
+                    format!("{summary}：完成")
+                } else {
+                    format!("{summary}：有步骤没成功，详见上面")
+                };
+                if out.freed > 0 {
+                    verdict.push_str(&format!(
+                        "，清理释放 {}",
+                        qingbird_core::space::human_bytes(out.freed)
+                    ));
+                }
+                let lg = &mut this.cli_log;
+                lg.running = false;
+                lg.verdict = Some((out.ok, verdict.clone()));
+                lg.ts = store::now_secs();
+                // 通知必须弹：用户可能已经切到别的屏，而日志区在 CLI
+                // 屏里——不弹一句他就此不知道结果（plain 路同一条）
+                this.pending_cli_note = Some(verdict);
+                // 包清单变了（卸掉一颗）：整屏重扫（`scan_cli` 落地时会
+                // 顺手再查一遍更新）
+                this.scan_cli(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 卸载（审计页那颗「卸载」）。**执行前用当下清单按 id 重建计划**：
+    /// 审计页开着的时候后台可能重扫，快照里的版本 / 目录可能已经变了
     /// （`CliUninstallAudit::pkg` 字段注释）
+    ///
+    /// 阶段四起确认即**交棒给卸载执行态**（设计 §3.11.6）：审计页收掉，
+    /// ② 卡换成步骤管道（`cli_uninstall`），跑完收尾即清
     pub(crate) fn run_cli_uninstall(&mut self, cx: &mut Context<Self>) {
-        // 整份克隆出来再动手：下面几处要**改** `cli_audit`（置空 / 置
-        // running），而 `d` 还借在它身上——克隆一份快照，借用当场结束
+        // 整份克隆出来再动手：下面要**置空** `cli_audit`，而 `d` 还借在
+        // 它身上——克隆一份快照，借用当场结束
         let Some(d) = self.cli_audit.clone() else {
             return;
         };
-        if d.running {
+        // 串行锁（替代审计页那颗"执行中…"）：忙时入口全禁，压根到不了
+        // 这儿；两颗监听排在一起时第二次读到的已在忙，再挡一次
+        if self.cli_busy_any() {
             return;
         }
         let id = d.pkg.id.clone();
-        // 包没了（重扫之后被卸掉 / 改名）：关框说清楚，**不开空执行**
+        // 包没了（重扫之后被卸掉 / 改名）：收审计态说清楚，**不开空执行**
         let Some(pkg) = self.cli.packages.iter().find(|p| p.id == id).cloned() else {
             self.cli_audit = None;
-            self.pending_cli_dlg_close = true;
-            self.pending_cli_note = Some(format!("{} 已经不在清单里了，没有动任何东西", d.pkg.name));
+            self.pending_cli_note = Some(format!(
+                "{} 已经不在清单里了，没有动任何东西",
+                d.pkg.name
+            ));
             cx.notify();
             return;
         };
@@ -1984,20 +2143,16 @@ impl Shell {
             None => qingbird_core::cli::OpPlan::blocked(&pkg, "认不出这个包是从哪个包管理器装的"),
         };
         if plan.steps.is_empty() {
-            // 给不出卸载命令：**不开确认框、也不开执行**（一颗确认了却
-            // 什么都没做的键比没有更糟）。关框 + 把 core 给的那句话说出来
+            // 给不出卸载命令：**不开执行**（一颗确认了却什么都没做的键
+            // 比没有更糟）。收审计态 + 把 core 给的那句话说出来
             self.cli_audit = None;
-            self.pending_cli_dlg_close = true;
             self.pending_cli_note = Some(plan.summary);
             cx.notify();
             return;
         }
-        if let Some(d) = self.cli_audit.as_mut() {
-            d.running = true;
-        }
-        self.cli.busy.insert(id);
-        let summary = plan.summary.clone();
-        self.spawn_cli_run(cx, summary, plan.steps, true, CliAfter::Rescan);
+        // 交棒：审计态收掉，② 卡换成执行态（步骤管道）
+        self.cli_audit = None;
+        self.spawn_cli_uninstall_run(cx, &pkg, &plan);
     }
 
     /// 升级一颗（详情卡那颗「升级」）。**不进 OpPlan**（设计 §6）：升级就是

@@ -63,11 +63,7 @@ impl Shell {
             .filter(|d| d.kind.auto_deletable())
             .map(|d| d.path.clone())
             .collect();
-        self.cli_audit = Some(CliUninstallAudit {
-            pkg,
-            picked,
-            running: false,
-        });
+        self.cli_audit = Some(CliUninstallAudit { pkg, picked });
     }
 
     /// 打开共享缓存清理确认框。一颗一条地清（汇总条那颗「清理」），

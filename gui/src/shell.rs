@@ -1531,6 +1531,7 @@ impl Shell {
             cli_log: LogState::default(),
             cli_log_scroll: ScrollHandle::new(),
             cli_upgrade: None,
+            cli_uninstall: None,
             upd: Default::default(),
             sync_cfg,
             palette,

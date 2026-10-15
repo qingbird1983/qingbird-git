@@ -529,6 +529,10 @@ impl Default for CliState {
 ///
 /// `Clone` 是因为勾选行每帧现读快照（`purge.rs` 同一套写法：
 /// 不现读的话勾选框行为是对的、画面上的方块不动）。
+///
+/// **没有 `running` 档**（阶段四起）：点确认即交棒给卸载执行态
+/// （`cli_uninstall`，② 卡换成步骤管道），这一态本身不再有"执行中"的
+/// 样子——防连点由 `cli_busy_any()` 串行锁承担（忙时入口全禁）
 #[derive(Clone)]
 pub(crate) struct CliUninstallAudit {
     /// 目标包的**快照**。审计态开着的时候后台可能重扫，清单会变——
@@ -537,19 +541,19 @@ pub(crate) struct CliUninstallAudit {
     /// 勾选上的清理目录路径。**`Cache` 默认全勾**（设计 §8：删了不影响功能）；
     /// `Config` / `Data` 压根不进这个集合（灰显禁勾）
     pub(crate) picked: std::collections::HashSet<String>,
-    /// 正在跑：确认键转「执行中…」并禁用（防连点）。**执行前的失败不往这儿写**——
-    /// 包没了 / 给不出命令那两条路是「收审计态 + 一句通知」，不在页里摆错误态
-    /// （一页开着却确认不了的审计，比一句通知难懂）
-    pub(crate) running: bool,
 }
 
 /// 共享缓存清理确认对话框（阶段三，设计 §9）。
 /// 一颗一条地清，也支持 ⌘K「清理共享缓存」整批地清（`targets` 多条）
+///
+/// 与卸载审计不同，这个**执行时框不关**（winget uninstall 是分钟级 ⇒
+/// 执行中的确认框不关、确认键转「执行中…」，跑完由 render 帧收框）——
+/// 所以它有自己的 `running` 档
 #[derive(Clone)]
 pub(crate) struct CliCleanDialog {
     /// 要清的那些（快照：路径 + 名字 + 体积）
     pub(crate) targets: Vec<qingbird_core::cli::PackageDir>,
-    /// 同 `CliUninstallAudit::running`
+    /// 正在跑：确认键转「执行中…」并禁用（防连点）
     pub(crate) running: bool,
 }
 
@@ -572,6 +576,27 @@ pub(crate) struct CliUpgradeRun {
     pub(crate) progress: qingbird_core::cli::UpgradeProgress,
     /// 取消旗号。**一人一份副本看得是同一个字节**（core 侧 `CancelToken`）：
     /// 界面存一份按取消，后台线程拿一份每行检查
+    pub(crate) cancel: qingbird_core::cli::CancelToken,
+}
+
+/// ② 卡**卸载执行态**：一次卸载计划的现场（设计 §3.11.6「七步管道 +
+/// 进度 + 取消」，阶段四落地 2026-10-15）。
+///
+/// 与 [`CliUpgradeRun`] 的分工：那个是"一颗包一条命令"的五阶段（包管理器
+/// 内部的下载 / 校验 / 替换）；这个是"一份计划 N 步"的步骤管道（卸载命令
+/// + 勾选的清理，一步一结论）。审计页点确认即交棒到这一态（`cli_audit`
+/// 清掉），收尾即清回 ready 态——结论在 ③ 终端日志卡与那一条通知里。
+///
+/// `Clone` 同前两个：render 期每帧现读快照渲染步骤列表
+#[derive(Clone)]
+pub(crate) struct CliUninstallRun {
+    /// 在卸载的那颗包 id。**按 id 对**（同 `CliUpgradeRun`：跑着的这会儿
+    /// 后台可能重扫）
+    pub(crate) pkg_id: String,
+    /// 最新一份步骤快照（后台每 120ms 轮询搬进来一份，
+    /// `ops::drain_log_until_done` 的 `LogEvent::CliUninstall`）
+    pub(crate) progress: qingbird_core::cli::execute::PlanProgress,
+    /// 取消旗号（点「取消卸载」置位，core 那头杀进程树）
     pub(crate) cancel: qingbird_core::cli::CancelToken,
 }
 
@@ -1189,10 +1214,14 @@ pub(crate) struct Shell {
     /// 在 CLI 屏滚一下，概览页的日志会跟着跳（阶段 21-1 同一条）
     pub(crate) cli_log_scroll: ScrollHandle,
     /// 一次阶段化升级的现场（阶段四 P0）；None = 没有升级在跑。
-    /// **收尾即清**（与卸载审计态同一套路）：② 卡回到 ready 态，结论在
+    /// **收尾即清**（与卸载执行态同一套路）：② 卡回到 ready 态，结论在
     /// ③ 终端日志卡与那一条通知里——一屏开着却确认不了的执行态，比一句
-    /// 通知难懂（`CliUninstallAudit::running` 同一条理由）
+    /// 通知难懂
     pub(crate) cli_upgrade: Option<CliUpgradeRun>,
+    /// 一次卸载执行的现场（设计 §3.11.6 步骤管道）；None = 没有卸载在跑。
+    /// **收尾即清**（与 `cli_upgrade` 同一套路）：审计页点确认即交棒到
+    /// 这一态，跑完 ② 卡回 ready 态，结论在 ③ 终端日志卡与通知里
+    pub(crate) cli_uninstall: Option<CliUninstallRun>,
     /// 软件自更新这条链的状态（Q44）。**挂在 Shell 上不挂在设置弹窗上**：
     /// 下载是几十秒的长活，弹窗关了下载照走、重开进度还在
     pub(crate) upd: crate::self_update::UpdFlow,

@@ -47,6 +47,7 @@ use gpui_kit::{
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled,
 };
 use gpui_kit::component::checkbox::Checkbox;
+use qingbird_core::cli::execute::StepState;
 use qingbird_core::cli::{
     provider_of, CliPackage, OpPlan, PackageDir, PhaseStatus, PhaseState, ProviderId, RiskLevel,
     UpgradeProgress,
@@ -55,7 +56,7 @@ use qingbird_core::space::human_bytes;
 
 use crate::log::{log_state_line, output_stream, should_follow_bottom};
 use crate::sidebar::{side_shell, Facing};
-use crate::state::{CliUninstallAudit, CliUpgradeRun, Shell};
+use crate::state::{CliUninstallAudit, CliUninstallRun, CliUpgradeRun, Shell};
 use crate::tokens::*;
 use crate::widgets::*;
 
@@ -67,6 +68,9 @@ const NONE: &str = "–";
 const PIPE_DOT: f32 = 18.0;
 /// 管道格与格之间连接线的长度（px）。原型 `.pcn` = 22px
 const PIPE_LINK_W: f32 = 22.0;
+/// 卸载步骤行里"细节"那一列的最大宽度（px）：释放字节 / 失败原因。
+/// 超长截断——标签才是那一行的主角，细节是补充
+const DETAIL_MAX_W: f32 = 220.0;
 
 impl Shell {
     /// 左栏**内容**：工具列表（按 provider 分组，可折叠）+ 底部「重新扫描」。
@@ -409,10 +413,12 @@ impl Shell {
     ///   `num` 档大数字 + 橙色目标版本）；`latest` 为 `None` 是"已最新**或未查询**"
     ///   （模型注释），所以只写「暂无更新信息」这一句**不确定的话**，
     ///   不写「已是最新」那种确定的假话。卡底键组：升级（`can_upgrade`）+ 卸载…
-    /// - **run**（`busy` 含本包）：升级走**五阶段管道 + 进度带 + 取消**
-    ///   （阶段四 P0，`cli_upgrade` 带上 core 的阶段快照才画）；卸载 / 清理的
-    ///   忙态没有阶段事件（阶段化是后续项），继续画状态行——**给不出事件的
-    ///   动作不画管道**。运行中的每步输出实时落进 ③ 终端日志卡
+    /// - **run**（`busy` 含本包）：两条阶段化链路各自整卡换掉——升级走
+    ///   **五阶段管道 + 进度带 + 取消**（P0，`cli_upgrade` 带 core 的阶段
+    ///   快照才画）；卸载走**步骤管道 + 取消**（§3.11.6，`cli_uninstall`）。
+    ///   剩下还给 plain 路的只有 ⌘K 批量升级（一批包的阶段化是后续项），
+    ///   画一行状态行——**给不出事件的动作不画管道**。运行中的输出实时
+    ///   落进 ③ 终端日志卡
     /// - **uninstall**（审计页）：卸载审计从模态框上浮到这一态（阶段四第 5 条）
     fn update_card(&self, p: &CliPackage, t: &Theme, cx: &mut Context<Self>) -> Div {
         // uninstall 审计态（阶段四第 5 条：确认框上浮，不再弹第二层框）——
@@ -424,6 +430,11 @@ impl Shell {
         // 进度带 + 取消升级，卡底键组不画（那两颗此刻全是禁言态）
         if let Some(u) = self.cli_upgrade.as_ref().filter(|u| u.pkg_id == p.id) {
             return card(t).child(self.upgrade_run_body(u, t, cx));
+        }
+        // 卸载执行态（设计 §3.11.6）：这一颗正在跑卸载计划。整卡换成
+        // 步骤管道 + 取消卸载（审计页点确认即交棒到这一态）
+        if let Some(u) = self.cli_uninstall.as_ref().filter(|u| u.pkg_id == p.id) {
+            return card(t).child(self.uninstall_run_body(u, t, cx));
         }
         let version = p.version.clone().unwrap_or_else(|| NONE.into());
         let busy = self.cli_busy_any();
@@ -438,20 +449,9 @@ impl Shell {
         let id = p.id.clone();
         let mut body_col = v_flex().w_full().gap(px(GAP_TIGHT));
         if mine {
-            // 卸载 / **批量**升级的忙态（单颗阶段化升级在上面就返回了，
-            // 到不了这儿）。哪句话由打开的审计判：审计开着且 running =
-            // 卸载中；否则是 ⌘K「升级全部」——那颗走 plain 路（一批包的
-            // 阶段化是后续项），**没有阶段事件的动作只画状态行**，
-            // 画管道就是编
-            let verb = if self
-                .cli_audit
-                .as_ref()
-                .is_some_and(|d| d.running)
-            {
-                "卸载"
-            } else {
-                "升级"
-            };
+            // 到这儿只剩 **⌘K 批量升级**一条 plain 路（单颗升级 / 卸载
+            // 执行态都在上面提前返回了）。批量一颗包一条管道是后续项，
+            // 没有阶段事件 ⇒ 只画状态行，画管道就是编
             body_col = body_col.child(
                 h_flex()
                     .w_full()
@@ -466,7 +466,7 @@ impl Shell {
                             .text_size(px(fs_meta()))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(orange_text(t))
-                            .child(format!("正在{verb} {p}…", p = p.name)),
+                            .child(format!("正在升级 {p}…", p = p.name)),
                     )
                     .child(
                         div()
@@ -601,6 +601,81 @@ impl Shell {
         )
     }
 
+    /// ② 卡**卸载执行态**（设计 §3.11.6「七步管道 + 取消」，阶段四落地）。
+    ///
+    /// 数据全部来自 `u.progress`——core 的步骤快照（`execute::run_plan_live`
+    /// 每次状态切换产一份，经 120ms 轮询搬进来）。**界面不自己判步骤状态、
+    /// 不自己拼计时**：两件都是"同一过程两个真相"的形状（与升级管道同一条）。
+    ///
+    /// ⚠️ **纵排不是横排**：升级那五格是固定的（横排一行放得下），卸载的
+    /// 步骤数不定（1 条卸载命令 + N 条勾选清理，设计稿那个"七步"是示例
+    /// 数）——横排放不下也认不出谁是谁，纵排每行带完整标签。态点与六态
+    /// 画法和升级管道同一套（`pipe_dot`，一个出处）。
+    ///
+    /// ⛔ 没有画的那件：卸载完成后的**残留审计结论**（目录 / 注册表 /
+    /// `.lnk` / PATH）——那是待建 #2，落得在这一态收尾处；现在收尾即清
+    /// （与升级同一条：一页开着却确认不了的执行态，比一句通知难懂），
+    /// 结论在 ③ 终端日志卡与那一条通知里
+    fn uninstall_run_body(&self, u: &CliUninstallRun, t: &Theme, cx: &mut Context<Self>) -> Div {
+        let pr = &u.progress;
+        // 头部一行：第 k/n 步 + 已释放合计（有才有——0 不画，那格不是装饰）
+        let mut head = h_flex()
+            .w_full()
+            .items_center()
+            .gap(px(GAP))
+            .child(
+                div()
+                    .text_size(px(fs_sec()))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(body(t))
+                    .child("正在卸载"),
+            )
+            .child(div().flex_1());
+        if let Some((k, n)) = pr.step_no() {
+            head = head.child(
+                div()
+                    .font_family(t.mono_font_family.clone())
+                    .text_size(px(fs_meta()))
+                    .text_color(tier3(t))
+                    .child(format!("第 {k}/{n} 步")),
+            );
+        }
+        if pr.freed > 0 {
+            head = head.child(
+                div()
+                    .font_family(t.mono_font_family.clone())
+                    .text_size(px(fs_meta()))
+                    .text_color(t.colors.accent)
+                    .child(format!("已释放 {}", human_bytes(pr.freed))),
+            );
+        }
+        let mut rows = v_flex().w_full().gap(px(GAP_DENSE));
+        for st in pr.steps.iter() {
+            rows = rows.child(uninstall_step_row(t, st));
+        }
+        card(t)
+            .child(v_flex().w_full().gap(px(GAP_TIGHT)).child(head).child(rows))
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_shrink_0()
+                    .justify_end()
+                    .gap(px(GAP))
+                    .pt(px(GAP_TIGHT))
+                    .child(
+                        Button::new("cli-uninstall-cancel")
+                            .label("取消卸载")
+                            .with_size(Size::Small)
+                            // **执行中也可点**（与取消升级同一条）：取消不是
+                            // 禁言项。点了只置旗号，杀进程与收尾全在 core
+                            // 与收尾帧里——用户要看见「已取消」落在哪一步上
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cancel_cli_uninstall(cx);
+                            })),
+                    ),
+            )
+    }
+
     /// ② 卡 uninstall 审计态（阶段四第 5 条：确认框上浮，不再弹第二层框）。
     ///
     /// 四段层级原样搬自 dialogs/cli.rs 的 uninstall_body（v8 定稿：审计是中栏
@@ -688,9 +763,9 @@ impl Shell {
         for dir in a.pkg.dirs.iter() {
             dirs = dirs.child(self.audit_pick_row(t, a, dir, cx));
         }
-        // 键组：取消 + 卸载（danger）。**执行中只禁确认键**：取消随时能点——
-        // 拦着是把用户关在页里；后台任务照跑，收审计态由 render 那一帧做
-        // （`pending_cli_dlg_close` 路径，`close_dialog` 空栈上是安全的）
+        // 键组：取消 + 卸载（danger）。**没有"执行中"档**（阶段四起）：点
+        // 确认即交棒给卸载执行态（② 卡换成步骤管道），这一页连同那颗键
+        // 一起退场；防连点由 `cli_busy_any()` 串行锁承担
         let keys = h_flex()
             .w_full()
             .flex_shrink_0()
@@ -708,10 +783,14 @@ impl Shell {
             )
             .child(
                 Button::new("cli-audit-go")
-                    .label(if a.running { "执行中…" } else { "卸载" })
+                    .label("卸载")
                     .danger()
                     .with_size(Size::Small)
-                    .disabled(a.running)
+                    // 忙时禁言（串行锁口径：任一非空 ⇒ 所有入口键禁用）。
+                    // 到得了这儿还点得动的情况只有一种——审计页开着时
+                    // 从左栏换了颗包起了别的操作，再点回来；不禁言的话
+                    // 那一颗点是静默无响应
+                    .disabled(self.cli_busy_any())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.run_cli_uninstall(cx);
                     })),
@@ -1201,21 +1280,155 @@ pub(crate) fn size_text(size: Option<u64>) -> String {
     }
 }
 
-/// 五阶段管道（§3.11.5 run 态）：每格 = 态点 + 阶段名 + 计时/状态，
-/// 格与格之间一根 22px 连接线。**六态各有各的画法**，没有"默认 ✓"：
+/// 管道态点的档位。**升级六态与卸载六态共用的那一张表**（§3.11.5 与
+/// §3.11.6 是同一张画法）——两个 core enum（`PhaseState` / `StepState`）
+/// 各映到这儿，画法只有一个出处；分开两处写，改一档漏一档
+#[derive(Clone, Copy)]
+enum DotState {
+    Pending,
+    Running,
+    Done(std::time::Duration),
+    /// 无载荷：计时格按 §3.11.5 那张表只写「失败」。**那段用时 core 记着**
+    /// （`PhaseState::Failed(d)` / `StepState::Failed(d)`，`elapsed()` 取）——
+    /// 要在管道上显示它是以后的事，改这张表一处就够
+    Failed,
+    Cancelled,
+    /// 升级专属：命令成功但包管理器全程没报这一段（画 ✓ 是编）
+    Unreported,
+    /// 卸载专属：计划因前一步失败而停，根本没跑（画 ✗ 是冤）
+    Skipped,
+}
+
+impl DotState {
+    fn of_phase(s: PhaseState) -> Self {
+        match s {
+            PhaseState::Pending => DotState::Pending,
+            PhaseState::Running => DotState::Running,
+            PhaseState::Done(d) => DotState::Done(d),
+            PhaseState::Failed(_) => DotState::Failed,
+            PhaseState::Cancelled => DotState::Cancelled,
+            PhaseState::Unreported => DotState::Unreported,
+        }
+    }
+
+    fn of_step(s: StepState) -> Self {
+        match s {
+            StepState::Pending => DotState::Pending,
+            StepState::Running => DotState::Running,
+            StepState::Done(d) => DotState::Done(d),
+            StepState::Failed(_) => DotState::Failed,
+            StepState::Cancelled => DotState::Cancelled,
+            StepState::Skipped => DotState::Skipped,
+        }
+    }
+}
+
+/// 那张六态表的唯一实现：`(点底, 点色, 图标, 计时字, 计时字色, 标签字色)`。
+/// **七档各有各的画法，没有"默认 ✓"**：
 ///
 /// | 态 | 点 | 计时格 |
 /// |---|---|---|
-/// | Done | ✓ 成功色 / ok-wash 底 | `00:02`（这一段的用时） |
-/// | Running | ● 品牌色 / wash 底 | `进行中…` |
+/// | Done | ✓ 成功色 / ok-wash 底 | `00:02`（这一段自己的用时） |
+/// | Running | ● 品牌色 / info-wash 底 | `进行中…` |
 /// | Pending | ○ 空心 / wash 底 | `等待` |
 /// | Failed | ✗ 危险色 / bad-wash 底 | `失败` |
 /// | Cancelled | ⊘ 中性 | `已取消` |
-/// | Unreported | − 中性淡 | `未报告` |
+/// | Unreported | − 中性淡 | `未报告`（升级专属） |
+/// | Skipped | − 中性淡 | `未执行`（卸载专属） |
 ///
-/// 后两态是 P0 的诚实档：**未报告** = 命令成功了但包管理器全程没报这
-/// 一段（画 ✓ 是编）；**已取消** = 用户按停时正卡在这儿（或一段都没
-/// 点亮时记在第一段，见 core 收尾定界）
+/// 后三档是诚实档：**未报告** = 命令成功了但包管理器全程没报这一段
+/// （画 ✓ 是编）；**已取消** = 用户按停时正卡在这儿；**未执行** = 计划
+/// 因前一步失败而停，根本没跑到这一步（画 ✗ 是冤）
+fn pipe_parts(t: &Theme, st: DotState) -> (Hsla, Hsla, AssetIcon, String, Hsla, Hsla) {
+    match st {
+        DotState::Done(d) => (
+            wash_bg(OK_WASH, t),
+            t.colors.success,
+            AssetIcon::Check,
+            fmt_elapsed(d),
+            tier3(t),
+            body(t),
+        ),
+        DotState::Running => (
+            wash_bg(INFO_WASH, t),
+            t.colors.accent,
+            AssetIcon::CircleDot,
+            "进行中…".to_string(),
+            t.colors.accent,
+            body(t),
+        ),
+        DotState::Pending => (
+            wash(t),
+            tier4(t),
+            AssetIcon::Circle,
+            "等待".to_string(),
+            tier4(t),
+            tier4(t),
+        ),
+        DotState::Failed => (
+            wash_bg(BAD_WASH, t),
+            t.colors.danger,
+            AssetIcon::X,
+            "失败".to_string(),
+            t.colors.danger,
+            body(t),
+        ),
+        DotState::Cancelled => (
+            wash(t),
+            tier3(t),
+            AssetIcon::CircleSlash,
+            "已取消".to_string(),
+            tier3(t),
+            tier3(t),
+        ),
+        DotState::Unreported => (
+            wash(t),
+            tier4(t),
+            AssetIcon::Minus,
+            "未报告".to_string(),
+            tier4(t),
+            tier4(t),
+        ),
+        DotState::Skipped => (
+            wash(t),
+            tier4(t),
+            AssetIcon::Minus,
+            "未执行".to_string(),
+            tier4(t),
+            tier4(t),
+        ),
+    }
+}
+
+/// 态点（18px 圆底图标）。升级管道与卸载步骤行共用
+fn pipe_dot(t: &Theme, st: DotState) -> Div {
+    let (bg, fg, icon, _, _, _) = pipe_parts(t, st);
+    div()
+        .w(px(PIPE_DOT))
+        .h(px(PIPE_DOT))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(bg)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon_sm(icon).text_color(fg))
+}
+
+/// 计时格：mono 小字（`00:02` / `进行中…` / `失败` / `已取消` / `未报告` /
+/// `未执行`）
+fn pipe_time(t: &Theme, st: DotState) -> Div {
+    let (_, _, _, tm, tm_color, _) = pipe_parts(t, st);
+    div()
+        .flex_shrink_0()
+        .font_family(t.mono_font_family.clone())
+        .text_size(px(fs_meta()))
+        .text_color(tm_color)
+        .child(tm)
+}
+
+/// 五阶段管道（§3.11.5 run 态）：每格 = 态点 + 阶段名 + 计时/状态，
+/// 格与格之间一根 22px 连接线
 fn upgrade_pipeline(t: &Theme, pr: &UpgradeProgress) -> Div {
     let mut row = h_flex().w_full().items_center();
     for (ix, st) in pr.phases.iter().enumerate() {
@@ -1234,87 +1447,63 @@ fn upgrade_pipeline(t: &Theme, pr: &UpgradeProgress) -> Div {
 }
 
 /// 管道里的一格。**每帧从快照现读**（`u.progress` 每 120ms 换一份），
-/// 不缓存——缓存的话行为是对的、画面不动（与审计态勾选同一课）
+/// 不缓存——缓存的话行为是对的、画面不动（与审计态勾选同一课）。
+/// 画法走 `pipe_parts` 那张共享表（与卸载步骤行同一套）
 fn upgrade_stage(t: &Theme, st: &PhaseStatus) -> Div {
-    let (bg, fg, icon, tm, tm_color, lb_color) = match st.state {
-        PhaseState::Done(d) => (
-            wash_bg(OK_WASH, t),
-            t.colors.success,
-            AssetIcon::Check,
-            fmt_elapsed(d),
-            tier3(t),
-            body(t),
-        ),
-        PhaseState::Running => (
-            wash_bg(INFO_WASH, t),
-            t.colors.accent,
-            AssetIcon::CircleDot,
-            "进行中…".to_string(),
-            t.colors.accent,
-            body(t),
-        ),
-        PhaseState::Pending => (
-            wash(t),
-            tier4(t),
-            AssetIcon::Circle,
-            "等待".to_string(),
-            tier4(t),
-            tier4(t),
-        ),
-        PhaseState::Failed(_) => (
-            wash_bg(BAD_WASH, t),
-            t.colors.danger,
-            AssetIcon::X,
-            "失败".to_string(),
-            t.colors.danger,
-            body(t),
-        ),
-        PhaseState::Cancelled => (
-            wash(t),
-            tier3(t),
-            AssetIcon::CircleSlash,
-            "已取消".to_string(),
-            tier3(t),
-            tier3(t),
-        ),
-        PhaseState::Unreported => (
-            wash(t),
-            tier4(t),
-            AssetIcon::Minus,
-            "未报告".to_string(),
-            tier4(t),
-            tier4(t),
-        ),
-    };
+    let d = DotState::of_phase(st.state);
+    let (_, _, _, _, _, lb_color) = pipe_parts(t, d);
     h_flex()
         .flex_shrink_0()
         .items_center()
         .gap(px(GAP_TIGHT))
-        .child(
-            div()
-                .w(px(PIPE_DOT))
-                .h(px(PIPE_DOT))
-                .flex_shrink_0()
-                .rounded_full()
-                .bg(bg)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(icon_sm(icon).text_color(fg)),
-        )
+        .child(pipe_dot(t, d))
         .child(
             div()
                 .text_size(px(fs_meta()))
                 .text_color(lb_color)
                 .child(st.phase.label()),
         )
+        .child(pipe_time(t, d))
+}
+
+/// 卸载执行态的一行（纵排步骤列表，§3.11.6）：态点 + 标签 + 细节 +
+/// 计时格。标签是 core 拼的（`StepStatus::label`——"卸载命令 · winget" /
+/// "清理缓存 · npm-cache"），界面不自己拼；细节只有成功了（释放字节）
+/// 或失败了（原因）才画。画法走 `pipe_parts` 那张共享表（与升级管道
+/// 同一套）
+fn uninstall_step_row(t: &Theme, st: &qingbird_core::cli::execute::StepStatus) -> Div {
+    let d = DotState::of_step(st.state);
+    let (_, _, _, _, _, lb_color) = pipe_parts(t, d);
+    let mut row = h_flex()
+        .w_full()
+        .items_center()
+        .gap(px(GAP_TIGHT))
+        .child(pipe_dot(t, d))
         .child(
             div()
-                .font_family(t.mono_font_family.clone())
+                .flex_1()
+                .min_w_0()
+                .truncate()
                 .text_size(px(fs_meta()))
-                .text_color(tm_color)
-                .child(tm),
-        )
+                .text_color(lb_color)
+                .child(st.label.clone()),
+        );
+    if !st.detail.is_empty() {
+        row = row.child(
+            div()
+                .flex_shrink_0()
+                .max_w(px(DETAIL_MAX_W))
+                .truncate()
+                .text_size(px(fs_meta()))
+                .text_color(if matches!(st.state, StepState::Failed(_)) {
+                    t.colors.danger
+                } else {
+                    tier3(t)
+                })
+                .child(st.detail.clone()),
+        );
+    }
+    row.child(pipe_time(t, d))
 }
 
 /// 进度带（§3.11.5）：不定态扫光 / 确定态填充 + 一行读数
