@@ -56,7 +56,7 @@ pub mod execute;
 
 pub use cache::{load_cached, save_cached};
 pub use model::{CliPackage, DirKind, PackageDir, PackageKind, ProviderId, ScanReport};
-pub use plan::{clean_plan, OpPlan, RiskLevel, Step, StepKind, UpdateInfo};
+pub use plan::{clean_plan, dependents_of, OpPlan, RiskLevel, Step, StepKind, UpdateInfo};
 pub use provider::{provider_of, providers, PackageProvider};
 /// 阶段四 P0 的阶段化升级事件。**摊到 `cli` 根**：界面侧（`ops.rs` /
 /// `state.rs`）每帧读的就是 `cli::UpgradeProgress` 那一格，入口

@@ -251,6 +251,57 @@ pub struct UpdateInfo {
     pub latest: String,
 }
 
+/// 依赖倒查（待建 #3，设计 §3.11.6 审计页第五段）：卸载 `pkg` 之后，
+/// 清单里**跟着失效**的那些包。
+///
+/// 判据只有一条，而且只用扫描已经拿到的数据：`other` 的安装目录**严格
+/// 位于 `pkg` 的安装目录之下**（`winget:Node.js` = `C:\Program Files\nodejs`，
+/// npm 全局包 = `C:\Program Files\nodejs\node_modules\…` ⇒ 卸 Node.js
+/// 它们全废）。路径比较先把两边统一成小写 + `\` 分隔再比前缀——Windows
+/// 大小写不敏感、资源管理器两种斜杠都给，界面不能因为写法不同就漏报。
+///
+/// **查不出来就不警告**（本项目"不猜"纪律在这条上的形状）：
+///
+/// - 有一边 `install_path` 是 `None` ⇒ 不判；
+/// - 管理的包不在管理器自己的目录之下（设计稿例子里 bun 管的包在
+///   `~/.bun`，而 bun 本体装在 npm 全局目录下）⇒ 查不出，**不编一条
+///   警告出来**。这条范围边界登记在 roadmap 偏差表。
+///
+/// 兄弟目录不算（卸 `nodejs\node_modules\typescript` 废不掉同级的
+/// `@wenyan-md/cli`），自身排除，返回按清单原序。
+pub fn dependents_of(pkg: &CliPackage, all: &[CliPackage]) -> Vec<CliPackage> {
+    let Some(root) = pkg.install_path.as_deref().map(normalize_path) else {
+        return Vec::new();
+    };
+    all.iter()
+        .filter(|other| {
+            other.id != pkg.id
+                && other
+                    .install_path
+                    .as_deref()
+                    .map(|p| under(&normalize_path(p), &root))
+                    .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
+}
+
+/// 路径比较前的归一：全小写 + `/` 换 `\` + 去掉结尾分隔符。
+/// 只用于前缀比对，**不碰文件系统**——拿归一结果去读盘是另一回事。
+fn normalize_path(p: &str) -> String {
+    let mut s = p.to_ascii_lowercase().replace('/', "\\");
+    while s.ends_with('\\') {
+        s.pop();
+    }
+    s
+}
+
+/// `child` 是否严格位于 `root` 之下（两边都已 [`normalize_path`]）：
+/// 前缀相等且再多一个分隔符——`c:\a` 不是 `c:\ab` 的前缀包含。
+fn under(child: &str, root: &str) -> bool {
+    child.starts_with(root) && child[root.len()..].starts_with('\\')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +361,56 @@ mod tests {
         assert_eq!(notes.len(), 4, "四档各一句，不许重复：{notes:?}");
         // "未确定"那一档必须说出"没确定"，不能说得像结论
         assert!(affected_notes(PackageKind::Unknown)[0].contains("未确定"));
+    }
+
+    /// 依赖倒查真值表（待建 #3）：卸载宿主 → 目录在它之下的包跟着失效。
+    /// 这条钉三个方向：**父子命中、兄弟不连坐、查不出不猜**——
+    /// 卸 `nodejs\node_modules\typescript` 若废掉了同级包，审计页会
+    /// 吓得用户不敢卸一个普通 CLI；反过来 Node.js 那条真警告漏了，
+    /// 用户卸完才发现 `rg` 没了。
+    #[test]
+    fn dependents_need_to_live_under_the_uninstalled_root() {
+        let mut node = pkg(PackageKind::CliOnly);
+        node.id = "winget:Node.js".into();
+        node.install_path = Some("C:\\Program Files\\nodejs".into());
+        let mut ts = pkg(PackageKind::CliOnly);
+        ts.id = "npm:typescript".into();
+        ts.install_path = Some("c:/program files/nodejs/node_modules/typescript".into());
+        let mut wenyan = pkg(PackageKind::CliOnly);
+        wenyan.id = "npm:@wenyan-md/cli".into();
+        // 兄弟：同在 node_modules 下但不在 typescript 之下
+        wenyan.install_path = Some("C:\\Program Files\\nodejs\\node_modules\\@wenyan-md\\cli".into());
+        let mut outside = pkg(PackageKind::CliOnly);
+        outside.id = "cargo:eza".into();
+        outside.install_path = Some("C:\\Users\\u\\.cargo\\bin".into());
+
+        // 卸 Node.js：npm 全局包全在 nodejs 之下 ⇒ 两条都命中（这正是
+        // 设计稿那条"卸了宿主，N 个全局 CLI 跟着废"的真实形状）；
+        // 大小写与正反斜杠写法不挡路（比较前统一过）、外部目录不连坐
+        let deps = dependents_of(&node, &[ts.clone(), wenyan.clone(), outside.clone()]);
+        assert_eq!(
+            deps.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["npm:typescript", "npm:@wenyan-md/cli"],
+        );
+
+        // 卸一个普通 CLI：同级包不连坐（反向吓人是这条规则最贵的错法）
+        assert!(dependents_of(&ts, &[wenyan.clone(), node.clone()]).is_empty());
+
+        // 有一边拿不到安装目录 ⇒ 不判（宁可不警告，不猜）
+        let mut ghost = pkg(PackageKind::CliOnly);
+        ghost.id = "npm:ghost".into();
+        ghost.install_path = None;
+        assert!(dependents_of(&ghost, &[ts.clone()]).is_empty());
+        assert!(dependents_of(&node, &[ghost]).is_empty());
+    }
+
+    /// 前缀包含的边界：`c:\a` 不是 `c:\ab` 的前缀包含（差一个分隔符）。
+    /// 这条不钉住的话，装在 `C:\tools` 旁边的 `C:\tools2` 会被算进 `C:\tools` 名下。
+    #[test]
+    fn prefix_requires_a_separator_boundary() {
+        assert!(!under(r"c:\ab", r"c:\a"));
+        assert!(under(r"c:\a\ts", r"c:\a"));
+        assert!(under(r"c:\a\", r"c:\a"), "结尾分隔符归一后剥掉，仍是包含");
     }
 
     /// 计划装配：卸载步在前、清理步按序随后；`program + args` 是结构化的。
