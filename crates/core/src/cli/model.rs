@@ -245,6 +245,12 @@ pub struct CliPackage {
     /// 安装目录（拿不到就是 `None`）
     #[serde(default)]
     pub install_path: Option<String>,
+    /// 程序本体（`install_path`）的体积。**`None` = 没量过**（量体是
+    /// GUI 后台惰性干的活，见 `ops::spawn_dir_sizes`——不是 0，不是"空"），
+    /// 与 [`Self::dirs`] 那份缓存 / 数据分项合成 ④ 卡的构成条
+    /// （§3.11.5："程序 / 缓存 / 数据分项体积"）
+    #[serde(default)]
+    pub program_size: Option<u64>,
     /// 这个包提供的**命令名**（`rg` / `wenyan`）。
     /// ⚠️ 从包自己的 `bin` 元数据读，**不是从包名猜**——npm 实测
     /// `@wenyan-md/cli` 提供的是 `wenyan`、`@moonshot-ai/kimi-code` 提供的是 `kimi`

@@ -262,6 +262,11 @@ pub fn carry_sizes(fresh: &mut [CliPackage], old: &[CliPackage]) {
         let Some(oldp) = old.iter().find(|o| o.id == p.id) else {
             continue;
         };
+        // 程序本体的体积只在**安装目录没变**时才接——目录换了，旧数字
+        // 量的是另一个地方，接过来就是错报（比"计算中…"贵）
+        if p.install_path == oldp.install_path {
+            p.program_size = oldp.program_size;
+        }
         carry_dir_sizes(&mut p.dirs, &oldp.dirs);
     }
 }
@@ -309,6 +314,7 @@ mod tests {
 
     fn pkg(name: &str, cmds: &[&str], provider: ProviderId) -> CliPackage {
         CliPackage {
+        program_size: None,
             id: format!("{}:{name}", provider.key()),
             provider,
             name: name.into(),
@@ -570,5 +576,27 @@ mod tests {
         fresh2[0].dirs[0].size = None;
         carry_sizes(&mut fresh2, &old);
         assert_eq!(fresh2[0].dirs[0].size, None);
+    }
+
+    /// 程序本体体积（`program_size`）只在**安装目录没变**时才接：
+    /// 目录换了，旧数字量的是另一个地方，接过来就是错报——
+    /// 比"计算中…"贵（§3.11.8 #5）
+    #[test]
+    fn program_size_is_carried_only_when_install_path_unchanged() {
+        let mut fresh = vec![pkg("deno", &["deno"], ProviderId::Npm)];
+        fresh[0].install_path = Some(r"C:\Users\x\scoop\apps\deno\current".into());
+        let mut old = vec![pkg("deno", &["deno"], ProviderId::Npm)];
+        old[0].install_path = fresh[0].install_path.clone();
+        old[0].program_size = Some(88);
+
+        carry_sizes(&mut fresh, &old);
+        assert_eq!(fresh[0].program_size, Some(88), "同 id 且目录没变 ⇒ 接");
+
+        // 升级换了安装目录 ⇒ 不接（留 None，后台重新量）
+        old[0].install_path = Some(r"C:\Users\x\scoop\apps\deno\0.1.2".into());
+        let mut fresh2 = vec![pkg("deno", &["deno"], ProviderId::Npm)];
+        fresh2[0].install_path = fresh[0].install_path.clone();
+        carry_sizes(&mut fresh2, &old);
+        assert_eq!(fresh2[0].program_size, None, "目录变了旧数字就是错报");
     }
 }

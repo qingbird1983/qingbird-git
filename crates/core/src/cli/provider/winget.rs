@@ -290,6 +290,7 @@ fn parse_row(line: &str, starts: &[usize; 5]) -> Row {
         install_path: None,
         executables: Vec::new(),
         kind: PackageKind::default(),
+        program_size: None,
         dirs: Vec::new(),
     })
 }

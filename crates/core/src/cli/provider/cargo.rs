@@ -199,6 +199,7 @@ fn pkg(name: String, version: Option<String>, bins: Vec<String>) -> CliPackage {
         executables: bins,
         // 桌面关联归扫描协调器统一算（`cli::desktop`）——provider 只管"有哪些包"
         kind: PackageKind::Unknown,
+        program_size: None,
         dirs: Vec::new(),
     }
 }

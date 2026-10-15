@@ -308,6 +308,7 @@ mod tests {
 
     fn fake_pkg(dir: &Path, commands: &[&str]) -> CliPackage {
         CliPackage {
+        program_size: None,
             id: "npm:demo".into(),
             provider: ProviderId::Npm,
             name: "demo".into(),

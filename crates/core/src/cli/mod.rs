@@ -204,6 +204,7 @@ mod tests {
 
     fn pkg(id: &str, provider: ProviderId, name: &str) -> CliPackage {
         CliPackage {
+        program_size: None,
             id: id.into(),
             provider,
             name: name.into(),

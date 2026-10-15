@@ -90,6 +90,7 @@ pub(crate) fn load_cached_in(db: &Path) -> Option<Cached> {
             executables: serde_json::from_str(&executables).unwrap_or_default(),
             kind: PackageKind::from_key(&kind),
             // 下面一次全查回来再挂上去
+            program_size: None,
             dirs: Vec::new(),
         });
     }
@@ -289,6 +290,7 @@ mod tests {
         };
         report.packages = vec![
             CliPackage {
+            program_size: None,
                 id: "npm:pnpm".into(),
                 provider: ProviderId::Npm,
                 name: "pnpm".into(),
@@ -304,6 +306,7 @@ mod tests {
                 ],
             },
             CliPackage {
+            program_size: None,
                 id: "scoop:ripgrep".into(),
                 provider: ProviderId::Scoop,
                 name: "ripgrep".into(),

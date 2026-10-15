@@ -494,6 +494,7 @@ mod tests {
 
     fn pkg(id: &str, install: Option<&Path>, cmds: &[&str]) -> CliPackage {
         CliPackage {
+        program_size: None,
             id: id.into(),
             provider: ProviderId::Npm,
             name: id.into(),

@@ -473,6 +473,7 @@ mod tests {
 
     fn pkg() -> CliPackage {
         CliPackage {
+        program_size: None,
             id: "npm:pnpm".into(),
             provider: ProviderId::Npm,
             name: "pnpm".into(),
