@@ -975,9 +975,12 @@ impl Shell {
     /// 单独清理后端没有（`Step::cleanup` 只活在卸载计划里），不画骗人的键；
     /// 共享缓存有（阶段三的确认框路径），画
     fn disk_card(&self, p: &CliPackage, t: &Theme, cx: &mut Context<Self>) -> Div {
-        // 合计：只加量过的（`None` 是"还没算"，不是 0——同一属性两个出处）
+        // 合计：只加量过的（`None` 是"还没算"，不是 0——同一属性两个出处）。
+        // 程序本体（§3.11.8 #5）算一项：④ 卡设计口径"程序 / 缓存 / 数据
+        // 分项体积"，本体是构成条的第一段
         let measured: Vec<u64> = p.dirs.iter().filter_map(|d| d.size).collect();
-        let total: u64 = measured.iter().sum();
+        let total: u64 = measured.iter().sum::<u64>() + p.program_size.unwrap_or(0);
+        let measured_n = measured.len() + usize::from(p.program_size.is_some());
         let head = h_flex()
             .w_full()
             .items_center()
@@ -994,18 +997,29 @@ impl Shell {
                 div()
                     .text_size(px(fs_meta()))
                     .text_color(tier3(t))
-                    .child(if p.dirs.is_empty() {
+                    .child(if p.dirs.is_empty() && p.program_size.is_none() {
                         "没有发现这颗工具的独立数据目录".to_string()
                     } else {
-                        format!("合计 {}（{} 项）", human_bytes(total), measured.len())
+                        format!("合计 {}（{} 项）", human_bytes(total), measured_n)
                     }),
             );
+        // 构成条：程序段（accent）在最前——它是"工具本身"，缓存 / 数据
+        // 是"工具的渣"。没量过就不画那一段（不给"还没算"的项编宽度）
         let mut bar = h_flex()
             .w_full()
             .h(px(8.0))
             .rounded(px(R_SM))
             .overflow_hidden()
             .bg(track(t));
+        if let Some(sz) = p.program_size.filter(|_| total > 0) {
+            bar = bar.child(
+                div()
+                    .h_full()
+                    .rounded(px(R_SM))
+                    .bg(t.colors.accent)
+                    .flex_grow(sz as f32),
+            );
+        }
         for d in p.dirs.iter() {
             if let Some(sz) = d.size {
                 if total > 0 {
@@ -1019,7 +1033,50 @@ impl Shell {
                 }
             }
         }
+        // 图例（设计 §3.11.5 明写"构成条 + 图例"）：三档色点各一句。
+        // 构成条一段都没有时不画——给空图编图例更吵
+        let legend = if total > 0 {
+            Some(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap(px(GAP))
+                    .children(
+                        [
+                            (t.colors.accent, "程序"),
+                            (orange_text(t), "缓存"),
+                            (tier3(t), "配置 · 数据"),
+                        ]
+                        .into_iter()
+                        .map(|(c, label)| {
+                            h_flex()
+                                .items_center()
+                                .gap(px(GAP_DENSE))
+                                .child(
+                                    div()
+                                        .w(px(8.0))
+                                        .h(px(8.0))
+                                        .rounded_full()
+                                        .bg(c),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(fs_meta()))
+                                        .text_color(tier3(t))
+                                        .child(label),
+                                )
+                        }),
+                    ),
+            )
+        } else {
+            None
+        };
         let mut rows = v_flex().w_full().gap(px(GAP_DENSE));
+        // 程序本体行（§3.11.8 #5）：路径就是安装目录。**没有清理键**——
+        // 卸它得卸整个工具（那是 ② 卡的事），给一行"清理本体"就是骗人的键
+        if let (Some(path), Some(sz)) = (&p.install_path, p.program_size) {
+            rows = rows.child(program_row(path, sz, t));
+        }
         for d in p.dirs.iter() {
             rows = rows.child(dir_row(d, t));
         }
@@ -1030,7 +1087,14 @@ impl Shell {
             }
         }
         card(t)
-            .child(v_flex().w_full().gap(px(GAP_TIGHT)).child(head).child(bar))
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap(px(GAP_TIGHT))
+                    .child(head)
+                    .child(bar)
+                    .children(legend),
+            )
             .child(rows)
     }
 
@@ -1274,6 +1338,48 @@ fn audit_risk_pill(risk: RiskLevel, t: &Theme) -> Div {
         RiskLevel::High => (t.colors.danger, wash_bg(BAD_WASH, t)),
     };
     pill(&format!("风险 {}", risk.label()), fg, bg)
+}
+
+/// 程序本体那一行（§3.11.8 #5）：类别写「程序」+ 体积 + 安装目录路径。
+/// 最后一格写一句归属说明（与目录行的 note 同位）——本体没有"清理"，
+/// 说明里也不暗示有
+fn program_row(path: &str, size: u64, t: &Theme) -> Div {
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap(px(GAP))
+        .child(
+            div()
+                .w(px(FORM_LABEL_W))
+                .flex_shrink_0()
+                .text_size(px(fs_meta()))
+                .text_color(tier3(t))
+                .child("程序"),
+        )
+        .child(
+            div()
+                .w(px(DIR_SIZE_W))
+                .flex_shrink_0()
+                .text_size(px(fs_meta()))
+                .text_color(body(t))
+                .child(human_bytes(size)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(fs_meta()))
+                .text_color(tier3(t))
+                .child(path.to_string()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(fs_meta()))
+                .text_color(tier3(t))
+                .child("随卸载一起移除"),
+        )
 }
 
 /// 数据目录里的一行：类别 · 体积 · 路径 · 那句话。

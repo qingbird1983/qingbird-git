@@ -1626,6 +1626,13 @@ impl Shell {
             for d in p.dirs.iter().filter(|d| d.size.is_none()) {
                 targets.push((Some(p.id.clone()), d.path.clone()));
             }
+            // 程序本体（§3.11.8 #5）：④ 卡构成条的"程序"段，量体同样
+            // 惰性——install_path 在、还没量过才派。**只给选中包**：
+            // 量本体与量目录一样是走盘活，清单里几十颗全量一遍就是
+            // "进屏先等几秒"（§3.11.4 那条纪律的反面）
+            if let (Some(path), None) = (&p.install_path, p.program_size) {
+                targets.push((Some(p.id.clone()), path.clone()));
+            }
         }
         if targets.is_empty() {
             return;
@@ -1656,18 +1663,39 @@ impl Shell {
                             return false;
                         }
                         let hit = match &pkg {
-                            None => this.cli.shared.iter_mut().find(|d| d.path == path),
+                            None => this
+                                .cli
+                                .shared
+                                .iter_mut()
+                                .find(|d| d.path == path)
+                                .map(|d| d.size = Some(size)),
                             Some(id) => this
                                 .cli
                                 .packages
                                 .iter_mut()
                                 .find(|p| &p.id == id)
-                                .and_then(|p| p.dirs.iter_mut().find(|d| d.path == path)),
+                                .and_then(|p| {
+                                    // 程序本体那条目标对准 `program_size`，
+                                    // 目录条目对准 `dirs`——**先判本体**：
+                                    // install_path 与某个数据目录路径相同
+                                    // 的场合（罕见但允许），写错格子比
+                                    // 少一格更难查
+                                    if p.install_path.as_deref() == Some(path.as_str()) {
+                                        p.program_size = Some(size);
+                                        return Some(());
+                                    }
+                                    p.dirs
+                                        .iter_mut()
+                                        .find(|d| d.path == path)
+                                        .map(|d| d.size = Some(size))
+                                }),
                         };
-                        if let Some(d) = hit {
-                            d.size = Some(size);
+                        // `hit` 现在是"对上了哪个格子"的信号（本体 / 目录 /
+                        // 共享缓存各自写各自的），不是格子本身——写格子
+                        // 已经在 match 里干完了
+                        if hit.is_some() {
+                            cx.notify();
                         }
-                        cx.notify();
                         true
                     })
                     .unwrap_or(false);
