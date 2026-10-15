@@ -224,6 +224,26 @@ pub struct PackageDir {
     pub size: Option<u64>,
 }
 
+/// 一颗包的**版本级发行说明**（`winget show` 抓回解析完的产物；npm 没有
+/// 可靠的 per-version changelog ⇒ 这一档只有 winget 有，别的 provider 不画）。
+///
+/// 三计数是**文本里看得见的计数**：行级关键词命中数（见
+/// `winget::classify_notes`）——不是"理解了这篇说明在讲什么"。没命中
+/// 就是 0，不编；这份边界登记在 `roadmap/cli.md` 偏差表。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct ReleaseNotes {
+    /// 说明的第一行（上屏就这一行——整篇不是 ② 卡的事）
+    pub summary: String,
+    /// 「发行说明 URL」（包里有才 Some）
+    pub url: Option<String>,
+    /// 修复计数（`fix` / `bug` / `修复` 行）
+    pub fixes: u32,
+    /// 安全计数（`CVE-` / `security` / `安全` 行）
+    pub security: u32,
+    /// 破坏性计数（`breaking` / `破坏` / `不兼容` 行）
+    pub breaking: u32,
+}
+
 /// 一个扫出来的 CLI 包。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CliPackage {
@@ -251,6 +271,14 @@ pub struct CliPackage {
     /// （§3.11.5："程序 / 缓存 / 数据分项体积"）
     #[serde(default)]
     pub program_size: Option<u64>,
+    /// 可更新到的那一版的发行说明（§3.11.1 就绪态"变更三统计 + 发布说明
+    /// 一行"的数据）。**`None` = 还没查**（走网络的后台活，与 `latest` 同一
+    /// 套"扫描落地后单独派发"）；winget 之外的 provider 恒 `None`——
+    /// npm 没有可靠的 per-version changelog，不画那一行就是诚实。
+    /// ⚠️ 不持久化（`cli_packages` 表没有这几列，加列要动 SCHEMA 迁移），
+    /// 重启后重查一次
+    #[serde(default)]
+    pub release_notes: Option<ReleaseNotes>,
     /// 这个包提供的**命令名**（`rg` / `wenyan`）。
     /// ⚠️ 从包自己的 `bin` 元数据读，**不是从包名猜**——npm 实测
     /// `@wenyan-md/cli` 提供的是 `wenyan`、`@moonshot-ai/kimi-code` 提供的是 `kimi`

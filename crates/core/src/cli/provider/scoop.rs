@@ -104,6 +104,7 @@ pub(crate) fn parse_scoop_export(text: &str) -> Result<Vec<CliPackage>, String> 
             kind: PackageKind::Unknown,
             // 数据目录归扫描协调器统一解析（`cli::dirs::for_package`）
             program_size: None,
+            release_notes: None,
             dirs: Vec::new(),
         });
     }

@@ -55,9 +55,13 @@ pub mod desktop;
 pub mod execute;
 
 pub use cache::{load_cached, save_cached};
-pub use model::{CliPackage, DirKind, PackageDir, PackageKind, ProviderId, ScanReport};
+pub use model::{CliPackage, DirKind, PackageDir, PackageKind, ProviderId, ReleaseNotes, ScanReport};
 pub use plan::{clean_plan, dependents_of, OpPlan, RiskLevel, Step, StepKind, UpdateInfo};
 pub use provider::{provider_of, providers, PackageProvider};
+/// 发行说明抓取（§3.11.1 就绪态"变更三统计 + 发布说明一行"，阶段四 #4）。
+/// **只有 winget 有**——`winget show` 的输出里带发行说明；npm 没有可靠的
+/// per-version changelog，不给别的 provider 编一份出来（GUI 侧据此不画）。
+pub use provider::release_notes;
 /// 阶段四 P0 的阶段化升级事件。**摊到 `cli` 根**：界面侧（`ops.rs` /
 /// `state.rs`）每帧读的就是 `cli::UpgradeProgress` 那一格，入口
 /// `cli::upgrade::run_upgrade` 留着那段路径——"跑一次升级"摊成
@@ -205,6 +209,7 @@ mod tests {
     fn pkg(id: &str, provider: ProviderId, name: &str) -> CliPackage {
         CliPackage {
         program_size: None,
+        release_notes: None,
             id: id.into(),
             provider,
             name: name.into(),

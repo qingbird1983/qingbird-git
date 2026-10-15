@@ -158,6 +158,7 @@ pub(crate) fn parse_npm_ls(text: &str) -> Result<Vec<CliPackage>, String> {
             // 数据目录归扫描协调器统一解析（`cli::dirs::for_package`），
             // provider 只管"有哪些包"——规则库不该有第二个出处
             program_size: None,
+            release_notes: None,
             dirs: Vec::new(),
         });
     }

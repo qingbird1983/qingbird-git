@@ -540,6 +540,7 @@ mod tests {
     fn pkg() -> CliPackage {
         CliPackage {
         program_size: None,
+        release_notes: None,
             id: "winget:Bun.Bun".into(),
             provider: ProviderId::Winget,
             name: "Bun".into(),

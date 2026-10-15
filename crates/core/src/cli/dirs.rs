@@ -267,6 +267,11 @@ pub fn carry_sizes(fresh: &mut [CliPackage], old: &[CliPackage]) {
         if p.install_path == oldp.install_path {
             p.program_size = oldp.program_size;
         }
+        // 发行说明绑的是**可更新到的那一版**：latest 没变才接——重扫之后
+        // latest 变了，旧说明讲的就是另一个版本的事（比"还没查"更糟）
+        if p.latest == oldp.latest {
+            p.release_notes = oldp.release_notes.clone();
+        }
         carry_dir_sizes(&mut p.dirs, &oldp.dirs);
     }
 }
@@ -315,6 +320,7 @@ mod tests {
     fn pkg(name: &str, cmds: &[&str], provider: ProviderId) -> CliPackage {
         CliPackage {
         program_size: None,
+        release_notes: None,
             id: format!("{}:{name}", provider.key()),
             provider,
             name: name.into(),

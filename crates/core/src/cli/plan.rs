@@ -310,6 +310,7 @@ mod tests {
     fn pkg(kind: PackageKind) -> CliPackage {
         CliPackage {
         program_size: None,
+        release_notes: None,
             id: "npm:pnpm".into(),
             provider: ProviderId::Npm,
             name: "pnpm".into(),

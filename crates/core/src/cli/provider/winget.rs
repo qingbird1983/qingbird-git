@@ -64,7 +64,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{PackageProvider, LIST_TIMEOUT};
 use crate::cli::exec;
-use crate::cli::model::{CliPackage, PackageKind, ProviderId};
+use crate::cli::model::{CliPackage, PackageKind, ProviderId, ReleaseNotes};
 use crate::cli::plan::Step;
 use crate::cli::provider::winget_id_of;
 use crate::cli::upgrade::UpgradePhase;
@@ -291,6 +291,7 @@ fn parse_row(line: &str, starts: &[usize; 5]) -> Row {
         executables: Vec::new(),
         kind: PackageKind::default(),
         program_size: None,
+        release_notes: None,
         dirs: Vec::new(),
     })
 }
@@ -343,6 +344,139 @@ fn first_line(s: &str) -> String {
         .chars()
         .take(200)
         .collect()
+}
+
+// ---------- 发行说明（§3.11.1 就绪态"变更三统计 + 发布说明一行"，阶段四 #4） ----------
+
+/// 抓一颗包可更新到的那一版的发行说明：`winget show --id <id>`。
+///
+/// 与 `list()` 同一条"上游没有机器可读输出"的老账（模块头）：show 同样只有
+/// 给人看的文本，解析靠**字段行判据**。本机实测（2026-10-14，zh-CN）：
+/// 字段标签**顶格**、以「:」结尾；多行字段的**续行带缩进**——这就是
+/// "说明正文到哪儿为止"的分界，不靠猜。
+///
+/// 返回 `Ok(None)` = 这颗包没有发行说明段（标签行都没出现——很多包没有）；
+/// `Err` = show 本身没跑成。
+pub fn release_notes(id: &str) -> Result<Option<ReleaseNotes>, String> {
+    let out = exec::run_program(
+        "winget",
+        &["show", "--id", id, "--disable-interactivity"],
+        LIST_TIMEOUT,
+    )?;
+    if !out.ok() {
+        return Err(first_line(&out.stderr));
+    }
+    Ok(parse_release_notes(&out.stdout))
+}
+
+/// [`release_notes`] 的解析半边（纯函数，测试喂真输出）。
+///
+/// 标签随系统语言变（`list` 的表头同一条课）：zh-CN 是「发行说明」/
+/// 「发行说明 URL」，en-US 是「Release Notes」/「Release Notes Url」
+/// ——两套都认，都认不出就没有这个段（不猜）。
+fn parse_release_notes(text: &str) -> Option<ReleaseNotes> {
+    // 比较前 label 过了 to_ascii_lowercase（只转 ASCII，中文不受影响，
+    // 但「URL」三个字母会被转成小写）⇒ 两边都用小写写死
+    const NOTES: [&str; 2] = ["发行说明", "release notes"];
+    const URL: [&str; 2] = ["发行说明 url", "release notes url"];
+
+    // 字段行 = 顶格 + 有冒号（结尾「:」或同行「label: value」——实测
+    // 「发行说明 URL: https://…」是同行给的，说明正文恒缩进）。返回
+    // (剥掉冒号与空白的标签, 同行的值)；缩进行 = 上一字段的续行，不是字段
+    let field = |line: &str| -> Option<(String, Option<String>)> {
+        let t = line.trim_end();
+        if t.starts_with(' ') || t.starts_with('\u{3000}') {
+            return None;
+        }
+        let (label, value) = match t.find(':') {
+            Some(i) => (&t[..i], t[i + 1..].trim()),
+            None => return None,
+        };
+        Some((
+            label.trim().to_ascii_lowercase(),
+            (!value.is_empty()).then(|| value.to_string()),
+        ))
+    };
+
+    let mut notes: Vec<String> = Vec::new();
+    let mut url: Option<String> = None;
+    // 当前在收哪个字段：0 = 没在收，1 = 发行说明，2 = URL
+    let mut mode = 0u8;
+    for line in text.lines() {
+        if let Some((label, value)) = field(line) {
+            mode = if NOTES.iter().any(|n| label == *n) {
+                1
+            } else if URL.iter().any(|u| label == *u) {
+                2
+            } else {
+                0
+            };
+            // URL 的值就在标签同一行（实测）；万一换行给了，mode==2 分支兜着
+            if mode == 2 {
+                if url.is_none() {
+                    url = value;
+                } else if value.is_some() {
+                    url = value;
+                }
+            }
+            continue;
+        }
+        match mode {
+            1 => notes.push(line.trim().to_string()),
+            2 => {
+                if url.is_none() && !line.trim().is_empty() {
+                    url = Some(line.trim().to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    let summary = notes.iter().find(|l| !l.is_empty()).cloned()?;
+    // 三计数对**整篇说明**逐行数（只数第一行的话，"Changes since …" 这种
+    // 日期行的三格永远全 0——计数就不带信息了）；URL 段的行不混进来
+    // （mode 已切走）。一行可同时命中两类，各计各的
+    let (fixes, security, breaking) =
+        notes.iter().fold((0, 0, 0), |(f, s, b), line| {
+            let (a, c, d) = classify(line);
+            (f + a, s + c, b + d)
+        });
+    Some(ReleaseNotes {
+        summary,
+        url,
+        fixes,
+        security,
+        breaking,
+    })
+}
+
+/// 保守的行级分级：摘要那行里**看得见什么数什么**。
+///
+/// 三类的判据都是"这行明说了"：安全 = `CVE-` / `security` / `安全`；
+/// 破坏性 = `breaking` / `破坏` / `不兼容`；修复 = `fix`（词界）/ `bug` /
+/// `修复`。**没命中就是 0**——这是数出来的计数，不是理解的结论（偏差登记）。
+fn classify(line: &str) -> (u32, u32, u32) {
+    let low = line.to_lowercase();
+    // 词界版子串：`fix` 命中 `fixed` 但不许命中 `prefix` / `suffix`
+    let has = |needle: &str| -> bool {
+        let mut from = 0;
+        while let Some(i) = low[from..].find(needle) {
+            let a = from + i;
+            let b = a + needle.len();
+            let left_ok = a == 0 || !low.as_bytes()[a - 1].is_ascii_alphabetic();
+            let right_ok = b == low.len() || !low.as_bytes()[b].is_ascii_alphabetic();
+            if left_ok && right_ok {
+                return true;
+            }
+            from = a + 1;
+        }
+        false
+    };
+    let security = (low.contains("cve-") || low.contains("security") || low.contains("安全"))
+        as u32;
+    let breaking =
+        (low.contains("breaking") || low.contains("破坏") || low.contains("不兼容")) as u32;
+    let fixes = ((has("fix") || low.contains("bug") || low.contains("修复"))) as u32;
+    (fixes, security, breaking)
 }
 
 #[cfg(test)]
@@ -532,4 +666,75 @@ mod tests {
         assert_eq!(parse_list(&render(&none)).expect("空表也是表").len(), 0);
     }
 
+    /// 发行说明解析：夹具是**本机真输出**（`winget show --id Git.Git`，
+    /// zh-CN，2026-10-15 抓的）。字段标签顶格、正文缩进两格——分界就靠
+    /// 这个，不靠"两个空格"猜。
+    #[test]
+    fn parses_the_real_show_output() {
+        let real = "已找到 Git [Git.Git]\n\
+                    版本: 2.55.0.5\n\
+                    发布者: The Git Development Community\n\
+                    描述:\n\
+                      Git 是一个免费开源的分布式版本控制系统。\n\
+                    发行说明:\n\
+                      Changes since Git for Windows v2.55.0(4) (August 11th 2026)\n\
+                      New Features\n\
+                      - Git for Windows' installer is now a 64-bit executable (x64 instead of 86).\n\
+                      Bug Fixes\n\
+                      - The long-standing bug where Git Bash's screen was cleared was fixed.\n\
+                    发行说明 URL: https://github.com/git-for-windows/git/releases/tag/v2.55.0.windows.5\n\
+                    文档:\n\
+                      维基: https://github.com/git-for-windows/git/wiki\n";
+        let n = parse_release_notes(real).expect("真输出该解析得出");
+        assert_eq!(
+            n.summary,
+            "Changes since Git for Windows v2.55.0(4) (August 11th 2026)",
+            "摘要是说明第一行，不是包描述"
+        );
+        assert_eq!(
+            n.url.as_deref(),
+            Some("https://github.com/git-for-windows/git/releases/tag/v2.55.0.windows.5")
+        );
+        // 行级计数：两行带 bug ⇒ 修复 2；这篇没提安全与破坏性 ⇒ 0（不编）
+        assert_eq!((n.fixes, n.security, n.breaking), (2, 0, 0));
+    }
+
+    /// en-US 标签也要认（别人机器上 winget 打的是它）。本机抓不到真英文
+    /// 输出，样例按 winget 资源文件的字段名拼——同 `recognises_the_en_header_too`
+    /// 那条边界：只验标签识别，不摆会漂的期望值
+    #[test]
+    fn recognises_the_en_labels_too() {
+        let en = "Found Git [Git.Git]\n\
+                  Version: 2.55.0.5\n\
+                  Release Notes:\n\
+                    Contains a security fix for CVE-2026-1234 and breaking changes.\n\
+                  Release Notes Url: https://example.com/notes\n";
+        let n = parse_release_notes(en).expect("英文标签该认得出");
+        assert_eq!(n.summary, "Contains a security fix for CVE-2026-1234 and breaking changes.");
+        assert_eq!(n.url.as_deref(), Some("https://example.com/notes"));
+        // 一行可同时命中两类：security（security + CVE-）与破坏性（breaking）
+        // 各计各的；fix 命中"security fix"的 fix（词界：前后非字母）
+        assert_eq!((n.fixes, n.security, n.breaking), (1, 1, 1));
+    }
+
+    /// 没有发行说明段（很多包没有）⇒ None，不编一段空的出来
+    #[test]
+    fn no_notes_section_is_none() {
+        let bare = "已找到某包 [X.Y]\n版本: 1.0\n描述:\n  就这些。\n";
+        assert!(parse_release_notes(bare).is_none());
+        // 有标签但正文空 ⇒ 同样没有可给的摘要
+        let empty = "发行说明:\n发行说明 URL: https://example.com\n";
+        assert!(parse_release_notes(empty).is_none());
+    }
+
+    /// 分级词界：`prefix` / `suffix` 不许计入修复（`fix` 两侧是字母就不算）；
+    /// CVE- / 安全 / 破坏 / 不兼容各就各位
+    #[test]
+    fn classify_respects_word_boundaries() {
+        assert_eq!(classify("rebase --onto with prefix support"), (0, 0, 0));
+        assert_eq!(classify("fixes a bug"), (1, 0, 0));
+        assert_eq!(classify("addresses CVE-2026-9999"), (0, 1, 0));
+        assert_eq!(classify("修复了中文路径下安全检查被绕过的问题"), (1, 1, 0));
+        assert_eq!(classify("breaking: 配置格式不兼容"), (0, 0, 1));
+    }
 }

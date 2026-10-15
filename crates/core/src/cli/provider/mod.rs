@@ -15,6 +15,11 @@ pub use npm::Npm;
 pub use pipx::Pipx;
 pub use scoop::Scoop;
 pub use winget::Winget;
+/// 发行说明抓取（§3.11.1 就绪态三统计，阶段四 #4）。**只有 winget 有**——
+/// `winget show` 的输出里带发行说明；npm 没有可靠的 per-version changelog，
+/// 不给别的 provider 编一份出来（GUI 侧据此不画）。经 `cli::release_notes`
+/// 摊给界面侧。
+pub use winget::release_notes;
 
 use std::time::Duration;
 
