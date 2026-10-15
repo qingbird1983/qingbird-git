@@ -31,6 +31,7 @@ mod exec;
 mod model;
 mod plan;
 mod provider;
+mod residue;
 mod upgrade;
 
 /// CLI 工具图标（阶段二第一件：从 exe 提图标 + 磁盘缓存）。
@@ -58,6 +59,7 @@ pub use cache::{load_cached, save_cached};
 pub use model::{CliPackage, DirKind, PackageDir, PackageKind, ProviderId, ReleaseNotes, ScanReport};
 pub use plan::{clean_plan, dependents_of, OpPlan, RiskLevel, Step, StepKind, UpdateInfo};
 pub use provider::{provider_of, providers, PackageProvider};
+pub use residue::{audit_pkg, verdict as residue_verdict, ResidueItem, ResidueKind};
 /// 发行说明抓取（§3.11.1 就绪态"变更三统计 + 发布说明一行"，阶段四 #4）。
 /// **只有 winget 有**——`winget show` 的输出里带发行说明；npm 没有可靠的
 /// per-version changelog，不给别的 provider 编一份出来（GUI 侧据此不画）。
