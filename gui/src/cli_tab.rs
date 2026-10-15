@@ -49,8 +49,8 @@ use gpui_kit::{
 use gpui_kit::component::checkbox::Checkbox;
 use qingbird_core::cli::execute::StepState;
 use qingbird_core::cli::{
-    provider_of, CliPackage, OpPlan, PackageDir, PhaseStatus, PhaseState, ProviderId, RiskLevel,
-    UpgradeProgress,
+    dependents_of, provider_of, CliPackage, OpPlan, PackageDir, PhaseStatus, PhaseState, ProviderId,
+    RiskLevel, UpgradeProgress,
 };
 use qingbird_core::space::human_bytes;
 
@@ -763,6 +763,57 @@ impl Shell {
         for dir in a.pkg.dirs.iter() {
             dirs = dirs.child(self.audit_pick_row(t, a, dir, cx));
         }
+        // ⑤ 依赖倒查（待建 #3，§3.11.6 审计页第五段）：卸载宿主（如
+        // winget:Node.js）→ 装在它目录之下的全局 CLI 跟着失效。判据与
+        // 范围边界全在 core 的 `dependents_of`（**查不出连带就不说有
+        // 连带**），这里只管画——**空表不画这一段**，一段"没有连带"
+        // 的占位比没有更吵
+        let deps = dependents_of(&a.pkg, &self.cli.packages);
+        let dependents = if deps.is_empty() {
+            None
+        } else {
+            // 名单最多点四个名，余下的说个数——点名是为了让用户对得上
+            // "哪几个会废"，不是 roll call；一长串反而读不到重点
+            let names: Vec<String> = deps.iter().map(|p| p.name.clone()).collect();
+            let list = if names.len() > 4 {
+                format!(
+                    "{} 等 {} 个",
+                    names[..4].join("、"),
+                    names.len()
+                )
+            } else {
+                names.join("、")
+            };
+            Some(
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .gap(px(GAP_TIGHT))
+                    .rounded(px(r_lg(t)))
+                    .bg(wash_bg(WARN_WASH, t))
+                    .px(px(GAP))
+                    .py(px(GAP_TIGHT))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .pt(px(2.0))
+                            .text_color(orange_text(t))
+                            .child(icon_sm(AssetIcon::TriangleAlert)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(fs_sec()))
+                            .line_height(px(18.0))
+                            .text_color(orange_text(t))
+                            .child(format!(
+                                "卸载后 {} 个全局 CLI 将无法运行：{list}",
+                                deps.len()
+                            )),
+                    ),
+            )
+        };
         // 键组：取消 + 卸载（danger）。**没有"执行中"档**（阶段四起）：点
         // 确认即交棒给卸载执行态（② 卡换成步骤管道），这一页连同那颗键
         // 一起退场；防连点由 `cli_busy_any()` 串行锁承担
@@ -813,6 +864,7 @@ impl Shell {
                     )
                     .child(dirs),
             )
+            .children(dependents)
             .child(keys)
     }
 
