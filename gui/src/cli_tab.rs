@@ -512,6 +512,59 @@ impl Shell {
                                     .child(format!("当前 · 可更新到（{}）", p.provider.label())),
                             ),
                     );
+                    // 变更三统计 + 发布说明一行（阶段四 #4）。**notes 是
+                    // None 就不画这一段**——还没抓到（后台在查 / show 失败 /
+                    // npm 这类没有可靠 changelog 的 provider 恒 None），
+                    // 编一行"没有变更说明"出来比空白更吵
+                    if let Some(n) = &p.release_notes {
+                        body_col = body_col.child(
+                            v_flex()
+                                .w_full()
+                                .gap(px(GAP_DENSE))
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .items_center()
+                                        .gap(px(GAP_TIGHT))
+                                        // 三计数同语义同色（全站那三套）：
+                                        // 修复 = 中性、安全 = 危险、破坏性 = 警示——
+                                        // 「有破坏性变更」是黄灯不是红灯，
+                                        // 安全修复才值得红灯
+                                        .child(pill(
+                                            &format!("修复 {}", n.fixes),
+                                            body(t),
+                                            wash(t),
+                                        ))
+                                        .child(pill(
+                                            &format!("安全 {}", n.security),
+                                            t.colors.danger,
+                                            wash_bg(BAD_WASH, t),
+                                        ))
+                                        .child(pill(
+                                            &format!("破坏性 {}", n.breaking),
+                                            orange_text(t),
+                                            wash_bg(WARN_WASH, t),
+                                        ))
+                                        .children(n.url.as_ref().map(|u| {
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(px(fs_meta()))
+                                                .text_color(tier4(t))
+                                                .child(u.clone())
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .text_size(px(fs_meta()))
+                                        .text_color(tier3(t))
+                                        .child(n.summary.clone()),
+                                ),
+                        );
+                    }
                 }
                 None => {
                     body_col = body_col.child(

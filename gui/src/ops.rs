@@ -1538,6 +1538,9 @@ impl Shell {
                     // 它要走网络（`npm outdated`），压进这一趟就是"进屏先等几秒"。
                     // 合并按 id 对，期间又重扫了也对不坏（见 `check_cli_updates`）
                     this.check_cli_updates(cx);
+                    // 发行说明同一条纪律（阶段四 #4）：`winget show` 要走网络，
+                    // 且只有 winget 给得出（npm 无可靠 changelog ⇒ 不查不画）
+                    this.spawn_release_notes(cx);
                     cx.notify();
                     true
                 })
@@ -1761,6 +1764,67 @@ impl Shell {
                 cx.notify();
             })
             .ok();
+        })
+        .detach();
+    }
+
+    /// 抓可更新包的发行说明（阶段四 #4，§3.11.1 就绪态"变更三统计 +
+    /// 发布说明一行"）。**只有 winget 给得出**（`winget show` 带"发行说明"
+    /// 段；npm 没有可靠的 per-version changelog ⇒ 不查、界面也不画）。
+    ///
+    /// - 与 [`check_cli_updates`] 同一条纪律：要走网络，扫描落地后**单独派发**
+    /// - 只查 **winget 且有 `latest` 且还没抓过** 的包——没新版就没有
+    ///   "变更"可言，抓了也没地方显示
+    /// - 每颗一条后台任务（与 `spawn_dir_sizes` 同一套并发写法），收一条
+    ///   写一条；抓失败（`Err`）就留着 `None`——界面上那行不出现，比
+    ///   编一段"没有变更说明"出来诚实
+    fn spawn_release_notes(&mut self, cx: &mut Context<Self>) {
+        let targets: Vec<String> = self
+            .cli
+            .packages
+            .iter()
+            .filter(|p| {
+                p.provider == qingbird_core::cli::ProviderId::Winget
+                    && p.latest.is_some()
+                    && p.release_notes.is_none()
+            })
+            .map(|p| p.id.clone())
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let mut tasks: Vec<(Task<qingbird_core::cli::ReleaseNotes>, String)> = Vec::new();
+        for id in targets {
+            let task = cx.background_executor().spawn({
+                let id = id.clone();
+                async move {
+                    // Err（show 没跑成）与 None（包没有说明段）在界面上是同一句话：
+                    // 那行不出现
+                    qingbird_core::cli::release_notes(&id)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default()
+                }
+            });
+            tasks.push((task, id));
+        }
+        cx.spawn(async move |this, cx| {
+            for (task, id) in tasks {
+                let notes = task.await;
+                this.update(cx, |this, cx| {
+                    // **按 id 对**，不按位置：网络那几秒里后台可能重扫，
+                    // 清单会换序（`spawn_dir_sizes` 同一条课）
+                    if let Some(p) = this.cli.packages.iter_mut().find(|p| p.id == id) {
+                        // 默认值（全空）不写——抓回来的"没有"就留 None，
+                        // 界面那一行不出现
+                        if !notes.summary.is_empty() {
+                            p.release_notes = Some(notes);
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
         })
         .detach();
     }
